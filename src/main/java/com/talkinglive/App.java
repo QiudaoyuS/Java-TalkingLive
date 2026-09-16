@@ -748,6 +748,22 @@ public final class App {
                         result.note(), Logging.describeWithFingerprint(text));
             }
 
+            // ★ 链路诊断行：把「预览 / 精化 / 实际注入」三段文本并排打出来。
+            //   存在的理由：实测遇到第二段注入的文字里混着上一段句子
+            //   （用户说「在进行麦克风测试」，注入「。在进行麦克风测试。」），
+            //   只看长度与指纹判断不出「哪一截是旧的」，必须并排看前缀。
+            //   前缀默认不打印（遵守「不记转写内容」），
+            //   用 -Dtalkinglive.log.text=true 打开。
+            log.info("提交链路：gen={} 预览[{}] 精化[{}] 注入[{}]",
+                    ctx.generation(), Logging.stamp(s.previewText()),
+                    result.refined() ? Logging.stamp(result.text()) : "（未精化）",
+                    Logging.stamp(text));
+            if (Boolean.getBoolean("talkinglive.log.text")) {
+                log.info("提交内容（诊断模式）：预览『{}』精化『{}』注入『{}』",
+                        Logging.prefix(s.previewText(), Logging.DIAG_PREFIX_CODE_POINTS),
+                        Logging.prefix(result.text(), Logging.DIAG_PREFIX_CODE_POINTS),
+                        Logging.prefix(text, Logging.DIAG_PREFIX_CODE_POINTS));
+            }
             if (text.isEmpty()) {
                 log.info("本段没有可注入的文本（可能是误触发或只有静音），不注入");
                 showNotice("本段没有内容", "没有识别到文字，因此没有注入。若经常如此，请检查麦克风与唤醒词。");

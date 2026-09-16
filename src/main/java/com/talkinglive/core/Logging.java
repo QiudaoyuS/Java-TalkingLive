@@ -47,4 +47,39 @@ public final class Logging {
     public static String describeWithFingerprint(String text) {
         return describe(text, "fp=" + fingerprint(Objects.requireNonNullElse(text, "")));
     }
+
+    /** 形如 {@code len=6 fp=abcd1234} —— 不含「内容不记录」那段文字，便于并排对比。 */
+    public static String stamp(String text) {
+        return "len=" + codePointCount(text) + " fp=" + fingerprint(text);
+    }
+
+    /**
+     * 文本的**前若干码点**，用于诊断「这一段是不是上一段的文本」。
+     *
+     * <p>这是对「不记转写内容」原则的一次**受控例外**，必须清楚为什么值得：
+     * 实测遇到过一个只有对比前缀才能定位的故障——第二段注入的文字里
+     * **混着上一段的句子**（用户说「在进行麦克风测试」，注入的是
+     * 「。在进行麦克风测试。」，前半截来自上一段）。光看长度与指纹无法判断
+     * 「哪一部分是旧的」，只有把前缀并排看才能立刻认出来。
+     *
+     * <p>因此：只在**转写内容确认串段**这类排查场景下使用，默认关闭，
+     * 由 {@code -Dtalkinglive.log.text=true} 显式打开。日常运行仍然不记内容。
+     */
+    public static String prefix(String text, int codePoints) {
+        if (text == null || text.isEmpty() || codePoints <= 0) {
+            return "";
+        }
+        int total = text.codePointCount(0, text.length());
+        if (codePoints >= total) {
+            return text;
+        }
+        return text.substring(0, text.offsetByCodePoints(0, codePoints));
+    }
+
+    /** 诊断行里用的默认前缀长度。 */
+    public static final int DIAG_PREFIX_CODE_POINTS = 16;
+
+    private static int codePointCount(String s) {
+        return s == null ? 0 : s.codePointCount(0, s.length());
+    }
 }
