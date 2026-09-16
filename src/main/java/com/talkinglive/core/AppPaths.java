@@ -57,37 +57,43 @@ public final class AppPaths {
     }
 
     /**
-     * **听写用**的 Vosk 模型目录（预览 + 精化）。
+     * **识别用**模型目录 —— 实时预览、落字、段落精化**三者共用这一个**。
      *
-     * <p>默认与 {@link #voskModelDir()} 相同（小模型）。可以用
-     * 系统属性 {@code -Dtalkinglive.model.asr=<目录>} 或环境变量
-     * {@code TALKINGLIVE_ASR_MODEL=<目录>} 指向更大的模型来提升准确率。
+     * <p>优先级：显式配置（{@code -Dtalkinglive.model.asr=<目录>} 或
+     * {@code TALKINGLIVE_ASR_MODEL}）> 自动探测已安装的大模型 > 小模型。
+     * 也就是**装好大模型即自动生效**，用户不需要改任何配置。
      *
-     * <p><b>为什么要分开配置：</b>
-     * <ul>
-     *   <li><b>唤醒/结束词检测必须用小模型</b>——只有它支持运行时动态词表
-     *       （{@code DESIGN.md} 附录 B.2，实测 {@code graph/} 下没有 {@code Hclg.fst}，
-     *       所以能按语法重建解码图）。大模型词表静态，改不了。</li>
-     *   <li><b>预览与精化用越大越好</b>——它们不需要动态词表，只需要准确率。
-     *       小模型 CER 17.15%，大模型（{@code vosk-model-cn-0.22}）CER 7.43%，
-     *       差一倍以上。</li>
-     * </ul>
+     * <p><b>为什么三者必须共用同一个模型</b>：不同模型会给出不同的文本。
+     * 实测拿同一段合成语音（「现在是人工智能输入测试，今天天气不错」）对比：
+     * 小模型输出「人工智能<b>收入</b>测试」，大模型输出「人工智能<b>输入</b>测试」；
+     * 而小模型的**词表里没有任何英文**（A–Z、AI、APP、CPU 全不在表内），
+     * 于是它会把「AI」整个漏掉。两个模型分开时，用户在预览里看到的和最终落进去的
+     * 不是同一句话，而且是**悄悄**不一样 —— 这类预期差比功能缺失更让人困惑。
      *
-     * <p>实测的准确率问题正是这么来的：预览与精化都用 17% CER 的小模型，
-     * 于是两者**错得一样**、精化无从纠正（诊断日志里
-     * 「预览『…』精化『…』与预览差异=0码点」就是这么出现的）。
+     * <p><b>为什么可以共用</b>：实测流式识别速度两者几乎一致 ——
+     * 5.2 秒音频 RTF 0.253（小）对 0.256（大），13.6 秒音频 0.175 对 0.189。
+     * 所以共用只增加加载时间（约 17–21 秒，启动时一次），不增加识别时的 CPU。
+     *
+     * <p><b>唤醒/结束词检测仍然是例外，只能用那个小模型</b>（见 {@link #voskModelDir()}）：
+     * 只有它支持运行时动态词表。大模型词表静态、改不了，实测 C 层会直接输出
+     * {@code Runtime graphs are not supported by this model}。
      */
     public static Path asrModelDir() {
-        Path override = configuredAsrOverride();
-        return override != null ? override : voskModelDir();
+        Path override = configuredModelDir("talkinglive.model.asr", "TALKINGLIVE_ASR_MODEL");
+        if (override != null) {
+            return override;
+        }
+        // 未显式配置时自动探测已安装的大模型 —— 「装好即自动生效」，
+        // 不需要用户为了用上更准的模型去改环境变量或 JSON。
+        Path large = detectLargeModelDir();
+        return large != null ? large : voskModelDir();
     }
 
     /**
-     * **仅**取显式配置的听写模型目录（系统属性 / 环境变量），不做任何回退。
+     * **仅**取显式配置的识别模型目录（系统属性 / 环境变量），不做任何回退。
      *
-     * <p>与 {@link #asrModelDir()} 的区别：后者会在未配置时回退到小模型，
-     * 而调用方（识别大模型的自动探测）需要区分「用户明确指定了」与「什么都没配」——
-     * 只有后者才应该去自动探测已安装的大模型。
+     * <p>与 {@link #asrModelDir()} 的区别：后者会在未配置时自动探测大模型、
+     * 再回退小模型；而调用方有时需要区分「用户明确指定了」与「什么都没配」。
      *
      * @return 配置的目录；未配置或目录不存在时返回 null
      */

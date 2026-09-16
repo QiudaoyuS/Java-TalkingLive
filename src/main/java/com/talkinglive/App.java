@@ -9,7 +9,6 @@ import com.talkinglive.core.InMemoryLogAppender;
 import com.talkinglive.core.Logging;
 import com.talkinglive.core.StateMachine;
 import com.talkinglive.core.StatusLine;
-import com.talkinglive.engine.LazyVoskModel;
 import com.talkinglive.engine.SpeechRecognizer;
 import com.talkinglive.engine.TextRefiner;
 import com.talkinglive.engine.TextRefiners;
@@ -34,6 +33,7 @@ import com.talkinglive.text.WholeSegmentPolicy;
 import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.Icons;
+import com.talkinglive.ui.LoadingWindow;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
 import com.talkinglive.ui.Theme;
@@ -83,22 +83,19 @@ public final class App {
     // ---- 引擎 ----
     private VoskModel voskModel;
     /**
-     * **识别用**的大模型（精化路径），按需从后台加载。
+     * **识别用**模型 —— 预览、落字、精化**三者共用同一个**。
      *
-     * <p>为什么单独持有而不是直接给 {@link #asrModel}：大模型同步加载要 21.5 秒
-     * （解压 2.0GB，见 {@link LazyVoskModel} 的类注释），远超 §6 的 3 秒冷启动预算。
-     * {@link LazyVoskModel} 在后台线程加载，用户说到需要精化时通常已经就绪。
+     * <p>装了大模型时它就是大模型（{@link #loadRecognitionModel} 在启动时同步加载，
+     * 约 21 秒）；没装或加载失败时回退到 {@link #voskModel}（小模型）。
      *
-     * <p>与 {@link #asrModel} 的分工：{@code asrModel} 是**实时预览**用的（必须立刻出字，
-     * 只能用小模型），{@code largeModel} 是**段落精化**用的（可以等，所以要最准的那个）。
-     */
-    private LazyVoskModel largeModel;
-    /**
-     * **听写用**的模型（预览），可以与唤醒检测用的小模型不同。
+     * <p>为什么改成"三者共用"：以前预览用小模型、落字用大模型，于是**预览里看到的
+     * 和最终落进去的不是同一句话**，而且是悄悄不一样 —— 实测小模型漏掉「AI」
+     * （它的词表里没有任何英文）、把「输入」听成「收入」。实测流式速度两者几乎一致
+     * （RTF 0.253 对 0.256），所以共用只增加启动时间，不增加识别时的 CPU。
      *
-     * <p>分开的原因见 {@code AppPaths.asrModelDir}：唤醒词检测必须用小模型
-     * （只有它支持运行时词表），而预览与精化只要有准确率。
-     * 配了更大的模型时，准确率会显著提升（CER 17.15% → 7.43%）。
+     * <p>{@link #voskModel} 仍然要单独留着，因为**唤醒词检测只能用它**：
+     * 大模型不支持运行时语法（实测 C 层输出
+     * {@code Runtime graphs are not supported by this model}）。
      */
     private VoskModel asrModel;
     private WakeWordDetector wakeDetector;
@@ -304,7 +301,33 @@ public final class App {
                 config.sendKey().display(), config.maxSegmentSeconds(), config.itn());
 
         // ③ 引擎
-        loadEngines(opts);
+        //
+        // 识别模型（约 2GB 的大模型）要同步加载约 21 秒，所以先开一个"正在加载"的
+        // 极简窗口 —— 21 秒里没有任何反馈，用户会以为程序卡死了。
+        // 无界面模式（--doctor / --self-check / --mic-test）不加窗口：
+        // 它们本来就不加载大模型（见 loadEngines 里的 interactive 判断）。
+        boolean showLoading = !opts.headless && !opts.selfCheck && !opts.micTest
+                && !java.awt.GraphicsEnvironment.isHeadless();
+        if (showLoading) {
+            onUi(() -> {
+                try {
+                    loadingWindow = LoadingWindow.forModelLoad();
+                    loadingWindow.setVisible(true);
+                } catch (RuntimeException e) {
+                    log.warn("加载提示窗口创建失败（不影响启动）：{}", e.toString());
+                }
+            });
+        }
+        try {
+            loadEngines(opts);
+        } finally {
+            if (loadingWindow != null) {
+                onUi(() -> {
+                    loadingWindow.dispose();
+                    loadingWindow = null;
+                });
+            }
+        }
 
         // ④ 系统
         silence.setTimeoutSeconds(config.silenceSeconds());
@@ -453,40 +476,27 @@ public final class App {
                     + "\n这意味着「词表外的词静默失效」无法被拦住，请检查 Vosk 原生库。");
         }
 
-        // 听写用模型（实时预览）。默认与唤醒模型相同（小模型，能立刻出字）；
-        // 可用 -Dtalkinglive.model.asr=<目录> 或 TALKINGLIVE_ASR_MODEL 指向大模型。
-        Path asrDir = AppPaths.asrModelDir();
-        if (!asrDir.equals(modelDir)) {
-            try {
-                asrModel = VoskModel.load(asrDir);
-                log.info("听写用模型（预览）：{} —— 与唤醒检测模型分开配置", asrDir);
-            } catch (IOException | RuntimeException e) {
-                log.error("听写用模型加载失败，回退到唤醒模型：{}", e.getMessage());
-                asrModel = voskModel;
-            }
-        } else {
-            asrModel = voskModel;
-        }
-
-        // 识别准确率的真正来源：大模型（CER 7.43% 对小模型的 17.15%）。
-        // 只在**精化**路径上用它，因为流式预览必须立刻出字、等不了 21 秒的加载；
-        // 而精化是「段落已录完、正在收尾」，用户本来就在等，那时多等一会儿可接受。
+        // ★ 识别模型（预览 + 落字共用同一个）。优先大模型。
         //
-        // --doctor / --self-check 是「跑完就退出的自检」，不该顺手把 2GB 的大模型
-        // 拉进内存跑一遍 —— 那会让自检又多 20 秒、还多占 2GB，而它并不测这个。
+        //   为什么预览与落字**必须**用同一个模型：不同模型会给出不同的文本 ——
+        //   实测小模型把「人工智能输入测试」听成「人工智能收入测试」，而**小模型
+        //   词表里没有任何英文**（A–Z、AI、APP、CPU 全不在表内）从而漏掉「AI」。
+        //   两个模型分开时，用户在预览里看到的和最终落进去的不是同一句话，
+        //   而且是**悄悄**不一样 —— 这类预期差比功能缺失更让人困惑。
+        //
+        //   为什么可以共用：实测流式识别速度两者几乎一致 ——
+        //   5.2s 音频 RTF 0.253（小）对 0.256（大），13.6s 音频 0.175 对 0.189。
+        //   所以共用只增加加载时间，不增加识别时的 CPU。
+        //
+        //   --doctor / --self-check 是「跑完就退出」的自检，不该顺手把 2GB 的大模型
+        //   拉进内存跑一遍 —— 那会让自检多 20 秒、多占 2GB，而它并不测这个。
         boolean interactive = !opts.headless && !opts.selfCheck;
-        largeModel = interactive
-                ? LazyVoskModel.detect(AppPaths.configuredAsrOverride())
-                : new LazyVoskModel(null);   // 空目录 = 明确的「本次不启用」
-        if (interactive && largeModel.dir() == null) {
-            // 没装大模型时如实说明 —— 用户抱怨的「识别不准」根因就在这里，
-            // 不能让他以为已经在用最准的模型了。
-            log.warn("识别将使用**小模型**（CER 17.15%）：未发现大模型。"
-                    + "更准的做法是把 vosk-model-cn-0.22 解压到 {}（预期 CER 7.43%）",
-                    AppPaths.modelsDir());
-        }
+        asrModel = interactive ? loadRecognitionModel() : voskModel;
 
-        // 唤醒 / 结束词检测
+        // 唤醒 / 结束词检测 —— **仍然只能用那个小模型**。
+        // 大模型词表静态、不支持运行时语法（实测 C 层输出
+        // "Runtime graphs are not supported by this model"），而唤醒词是用户配的、
+        // 必须动态生效。所以这不是保守的选择，是唯一可行的分工。
         try {
             wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
                     hit -> onKeywordHit(hit));
@@ -498,18 +508,12 @@ public final class App {
                     + "\n仍可用悬浮球左键手动开始/结束听写（§2.3 的备用路径）。");
         }
 
-        // 实时预览。优先用大模型：预览文本是**注入的底稿**，预览错得越多、
-        // 精化的纠错负担越重；而且用户很可能在应用启动后一两分钟才开口，
-        // 那时大模型早已在后台加载完成。若尚未就绪（用户开得很快），
-        // 就用小模型顶上 —— 预览的价值是「立刻看到字」，不能为了准确率让它卡住。
+        // 实时预览：与落字同一个模型
         try {
-            VoskModel previewModel = largeModel != null
-                    ? largeModel.getOr(asrModelOrFallback()) : asrModelOrFallback();
-            recognizer = new VoskSpeechRecognizer(previewModel, (kind, text) -> onPreviewText(kind, text));
-            log.info("实时预览就绪：{}", recognizer.describe());
-            if (largeModel != null && largeModel.ready() && previewModel == largeModel.get()) {
-                log.info("实时预览正在使用**大模型**，识别准确率显著高于小模型");
-            }
+            recognizer = new VoskSpeechRecognizer(asrModelOrFallback(),
+                    (kind, text) -> onPreviewText(kind, text));
+            log.info("实时预览就绪：{}（识别模型 {}）", recognizer.describe(),
+                    asrModel != null && asrModel != voskModel ? "大模型" : "小模型");
         } catch (IOException | RuntimeException e) {
             recognizerError = e.getMessage();
             log.error("实时预览不可用：{}", recognizerError);
@@ -551,24 +555,48 @@ public final class App {
      * 允许的降级路径，但不能让用户以为精化是 SenseVoice 做的。
      */
     /**
-     * 精化用的模型：优先用大模型（更准），没装/加载失败则退回小模型。
+     * 加载识别用模型（预览与落字共用）：优先大模型，没装或加载失败则回退小模型。
      *
-     * <p>大模型的加载是异步的（{@link LazyVoskModel}）：这里会**等一下**加载完成，
-     * 因为这段代码只在**真正要精化一段音频**的时候才被调用
-     * （段落已录完、正在收尾，用户本来就在等结果）。
+     * <p><b>这里是同步加载，会花约 21 秒。</b>这是刻意的取舍：预览要用它，
+     * 而预览在**录音一开始**就需要 —— 没法像以前那样「后台慢慢加载、等精化时才用」。
+     * 与其让用户在前 21 秒获得一份「和最终结果不一样」的预览，不如明确等一次。
      *
-     * <p><b>它绝不能在启动路径上被调用。</b>实测过一次事故：{@code createRefiner} 在启动时
-     * 就把它算好并塞进 {@link TextRefiners.VoskOffline}，于是主线程在这里同步等了 21 秒，
-     * 界面整整 21 秒不出现 —— 异步加载等于白做。所以这里传的是 {@code this::...}
-     * 方法引用，模型在第一次精化时才解析。
+     * <p>加载期间的可见性由 {@code ui.LoadingWindow} 提供：等待本身不可怕，
+     * **不知道为什么在等**才可怕。
+     */
+    private VoskModel loadRecognitionModel() {
+        Path dir = AppPaths.asrModelDir();
+        boolean hasLarge = !dir.equals(AppPaths.voskModelDir());
+        long t0 = System.nanoTime();
+        try {
+            VoskModel m = VoskModel.load(dir);
+            long ms = (System.nanoTime() - t0) / 1_000_000;
+            if (hasLarge) {
+                log.info("识别模型：大模型 {}（预览与落字共用，加载 {}ms）", dir, ms);
+            } else {
+                log.warn("识别模型：**小模型**（CER 17.15%，且词表内没有任何英文，"
+                        + "因此英文词会被漏掉）。更准的做法是把 vosk-model-cn-0.22 解压到 {}"
+                        + "（CER 7.43%，词表含 AI/APP/CPU 等）", AppPaths.modelsDir());
+                // 写进 notices 而不是只记日志：这是**用户能自己解决**的一件事，
+                // 而且他抱怨的「识别不准/漏英文」根因就在这里，必须让他看见。
+                notices.add("未安装大模型，正在用小模型识别：准确率较低，且会漏掉英文词（如 AI）。\n"
+                        + "想要更准：把 vosk-model-cn-0.22 解压到 " + AppPaths.modelsDir() + " 即自动启用。");
+            }
+            return m;
+        } catch (IOException | RuntimeException e) {
+            log.error("识别模型加载失败，回退到唤醒用小模型：{}", e.getMessage());
+            notices.add("大模型加载失败，已回退到小模型：" + e.getMessage());
+            return voskModel;
+        }
+    }
+
+    /**
+     * 精化用的模型：与预览、落字同一个（{@link #asrModel}）。
+     *
+     * <p>历史上这里会去等一个大模型，因为那时预览用的是小模型。现在三者统一，
+     * 这个方法退化成一次取值 —— 保留方法名是为了让调用点读起来仍然表达意图。
      */
     private VoskModel refinerModelOrFallback() {
-        if (largeModel != null) {
-            VoskModel m = largeModel.get();
-            if (m != null) {
-                return m;
-            }
-        }
         return asrModelOrFallback();
     }
 
@@ -1037,6 +1065,9 @@ public final class App {
 
     // ------------------------------------------------------------ UI
 
+    /** 启动加载提示窗口（大模型加载期间显示，加载完成即销毁）。 */
+    private LoadingWindow loadingWindow;
+
     private void startUi(Options opts) {
         try {
             UIManager.setLookAndFeel(new com.formdev.flatlaf.FlatDarkLaf());
@@ -1494,23 +1525,23 @@ public final class App {
         // 小模型 CER 17.15%、大模型 7.43%，差一倍以上。
         String asrDetail;
         boolean asrOk;
-        if (largeModel == null || largeModel.dir() == null) {
-            asrOk = false;
-            asrDetail = "正在用小模型识别（CER 17.15%，准确率上限就到这里）。"
-                    + "把 vosk-model-cn-0.22 解压到 " + AppPaths.modelsDir()
-                    + " 即自动启用大模型（CER 7.43%，准确率翻倍），详见 docs/ENGINE-EXPERIMENT.md";
-        } else if (largeModel.ready()) {
+        boolean usingLarge = asrModel != null && asrModel != voskModel;
+        if (usingLarge) {
             asrOk = true;
-            asrDetail = "正在用大模型识别（CER 7.43%，比小模型准一倍）：" + largeModel.dir();
-        } else if (largeModel.error() != null) {
-            asrOk = false;
-            asrDetail = "大模型加载失败，已退回小模型：" + largeModel.error();
+            asrDetail = "预览与落字共用**大模型**（CER 7.43%，词表含 AI/APP/CPU 等英文）："
+                    + asrModel.path();
         } else {
-            asrOk = true;   // 加载中不算故障，只是还没好
-            asrDetail = "大模型正在后台加载（约 20 秒，不阻塞使用）：" + largeModel.dir();
+            asrOk = false;
+            asrDetail = "预览与落字都用**小模型**（CER 17.15%，且词表内没有任何英文，"
+                    + "所以英文词会被漏掉）。把 vosk-model-cn-0.22 解压到 "
+                    + AppPaths.modelsDir()
+                    + " 即自动启用大模型（CER 7.43%，准确率翻倍），详见 docs/ENGINE-EXPERIMENT.md";
         }
-        out.add(new StatusLine("识别准确率",
-                largeModel != null && largeModel.ready() ? "大模型" : "小模型", asrOk, asrDetail));
+        out.add(new StatusLine("识别准确率", usingLarge ? "大模型" : "小模型", asrOk, asrDetail));
+        out.add(new StatusLine("唤醒词检测",
+                wakeDetector != null ? "小模型 · 受限语法" : "不可用", wakeDetector != null,
+                "唤醒词必须用支持运行时词表的小模型 —— 大模型不支持运行时语法"
+                        + "（实测 C 层输出 Runtime graphs are not supported by this model）"));
 
         // 精化
         boolean refinerOk = refiner != null && refiner.available();
@@ -1801,11 +1832,8 @@ public final class App {
         closeQuietly(wakeDetector);
         closeQuietly(recognizer);
         closeQuietly(refiner);
-        // 先关大模型再关小模型：大模型是独立句柄，但它的加载线程可能仍在跑，
-        // LazyVoskModel.close 会把已加载的句柄释放掉、尚未加载完的则由加载线程自己收尾。
-        closeQuietly(largeModel);
-        // asrModel 可能与小模型是同一个句柄（未单独配置时），重复 close 是安全的
-        // （VoskModel 内部用 AtomicBoolean 防了重复释放），但语义上先放大模型更清楚。
+        // asrModel 与 voskModel 在小模型回退时是**同一个句柄**：重复 close 是安全的
+        // （VoskModel 内部用 AtomicBoolean 防了重复释放），先关识别模型再关唤醒模型。
         closeQuietly(asrModel);
         closeQuietly(voskModel);
         persistConfig();
