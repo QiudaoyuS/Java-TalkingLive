@@ -1,0 +1,20 @@
+# 构建产物
+target/
+*.class
+
+# Maven wrapper 下载的临时目录（wrapper 本体随仓库提交，分发包不提交）
+.mvn/wrapper/*.jar
+
+# demo 的编译产物（源码与报告随仓库提交）
+demo/out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# 模型与运行时数据永不进版本库（DESIGN.md §10.3）
+*.zip

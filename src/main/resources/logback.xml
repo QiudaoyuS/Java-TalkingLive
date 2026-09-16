@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  日志策略（DESIGN.md §3.1 第 12 项）：
+    - 滚动 5MB × 3
+    - 记状态流转与错误，**不记转写内容**（见 Logging.java 的约定）
+-->
+<configuration>
+
+  <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${TALKINGLIVE_HOME:-${user.home}/AppData/Local/TalkingLive}/logs/talkinglive.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+      <fileNamePattern>${TALKINGLIVE_HOME:-${user.home}/AppData/Local/TalkingLive}/logs/talkinglive.%i.log</fileNamePattern>
+      <minIndex>1</minIndex>
+      <maxIndex>2</maxIndex>
+    </rollingPolicy>
+    <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
+      <maxFileSize>5MB</maxFileSize>
+    </triggeringPolicy>
+    <encoder>
+      <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{24} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <!-- 设置窗口的「日志」页签直接读这个 appender 的内存环形缓冲，不重复落盘 -->
+  <appender name="MEMORY" class="com.talkinglive.core.InMemoryLogAppender"/>
+
+  <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{20} - %msg%n</pattern>
+      <charset>UTF-8</charset>
+    </encoder>
+  </appender>
+
+  <logger name="org.vosk" level="WARN"/>
+  <logger name="com.sun.jna" level="WARN"/>
+
+  <root level="INFO">
+    <appender-ref ref="FILE"/>
+    <appender-ref ref="MEMORY"/>
+    <appender-ref ref="CONSOLE"/>
+  </root>
+
+</configuration>
