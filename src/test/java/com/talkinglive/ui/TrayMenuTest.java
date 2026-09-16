@@ -81,48 +81,80 @@ class TrayMenuTest {
     }
 
     /**
-     * ★ 这条是三轮排查换来的结论，最容易被后人不小心改回去。
+     * ★ 这条是四轮排查换来的结论，最容易被后人不小心改回去。
      *
      * <p>只要给 {@code TrayIcon} 挂了 {@code PopupMenu}，<b>Windows 就会在右键时
      * 自己把它弹出来</b> —— 这与 {@code MouseListener} 是两套**并行**机制，
      * 互不干扰。于是原生菜单（画不出中文）总是先弹，我们那条 Swing 菜单根本没机会。
      *
      * <p>症状是"中文菜单死活出不来、出来的是英文/方块"，而且看起来像事件没送到 Java，
-     * 极容易往错误方向查（我为此改了三轮）。
+     * 极容易往错误方向查（我为此改了四轮）。
      */
     @Test
     @DisplayName("TrayIcon 不得挂原生 PopupMenu —— 挂上它 Windows 就会自己弹那个画不出中文的菜单")
     void trayIconHasNoNativePopupMenu() throws IOException {
-        List<String> lines = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8);
-        for (int i = 0; i < lines.size(); i++) {
-            String t = lines.get(i).strip();
-            if (t.startsWith("*") || t.startsWith("//") || t.startsWith("/*")) {
-                continue;   // 注释里正是解释这件事的地方
-            }
-            if (t.contains("new TrayIcon(")) {
-                assertTrue(t.contains(", null)"),
-                        "第 " + (i + 1) + " 行的 TrayIcon 必须在构造时传 null 作为 PopupMenu：\n  " + t
-                                + "\n传了 PopupMenu 的话，Windows 会在右键时自己弹那个原生菜单"
-                                + "（150% DPI 下画不出中文），而它与 MouseListener 是并行机制，"
-                                + "我们自己的 Swing 菜单根本没机会显示。");
-            }
+        // ⚠ 断言必须能跨行匹配：`new TrayIcon(...)` 的最后一个参数在另一行，
+        //   第一版按"单行里同时含 new TrayIcon( 与 , null)"来判，于是假失败了。
+        //   源码扫描类断言很容易犯这个错，所以这里把整个构造调用揉成一行再判。
+        String src = Files.readString(APP_JAVA, StandardCharsets.UTF_8);
+        for (String stmt : statements(src, "new TrayIcon(")) {
+            assertTrue(stmt.contains(", null)"),
+                    "TrayIcon 必须在构造时传 null 作为 PopupMenu，实际是：\n  " + stmt
+                            + "\n传了 PopupMenu 的话，Windows 会在右键时自己弹那个原生菜单"
+                            + "（150% DPI 下画不出中文），而它与 MouseListener 是并行机制，"
+                            + "我们自己的 Swing 菜单根本没机会显示。");
         }
     }
 
+    /**
+     * 从源码里取出包含 {@code marker} 的那条语句（把跨行的空白揉成单个空格）。
+     *
+     * <p>存在的理由：源码扫描断言若按"单行是否包含 A 且 B"来写，遇到换行就会假失败
+     * （我在这上面栽过两次：一次是这里，一次是 {@code isPopupTrigger} 出现在注释里）。
+     */
+    private static List<String> statements(String src, String marker) {
+        List<String> out = new ArrayList<>();
+        int i = 0;
+        while ((i = src.indexOf(marker, i)) >= 0) {
+            int end = src.indexOf(';', i);
+            if (end < 0) {
+                break;
+            }
+            out.add(src.substring(i, end + 1).replaceAll("\\s+", " "));
+            i = end;
+        }
+        return out;
+    }
+
+    /**
+     * 托盘的菜单由**左键单击**触发。
+     *
+     * <p>为什么不是右键：实测本环境下 {@code TrayIcon} 的鼠标事件在**右键**上
+     * 根本送不到 Java 层（右键完全没反应，连日志都没有），而左键在挂 PopupMenu 时
+     * 靠 {@code ActionListener} 响过，证明这条路是通的。所以约定是
+     * 「左键单击托盘图标 = 打开菜单」，菜单第一项仍是「手动开始 / 结束听写」。
+     */
     @Test
-    @DisplayName("左键单击托盘图标仍能开始/结束听写（不再走 ActionListener 之后）")
-    void trayLeftClickStillWorks() throws IOException {
-        List<String> lines = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8);
-        boolean handlesButton1 = lines.stream()
+    @DisplayName("托盘菜单由左键单击触发，且走托盘自己的宿主")
+    void trayMenuIsTriggeredByLeftClick() throws IOException {
+        String src = Files.readString(APP_JAVA, StandardCharsets.UTF_8);
+        // 跨行匹配（见 statements 的注释）
+        boolean leftClickOpensMenu = statements(src, "new java.awt.event.MouseAdapter()").stream()
+                .anyMatch(s -> s.contains("BUTTON1") && s.contains("showTrayMenu()"));
+        assertTrue(leftClickOpensMenu,
+                "托盘应当用 MouseListener 判 BUTTON1 并调用 showTrayMenu()。"
+                        + "不用右键：实测该环境下 TrayIcon 的右键事件送不到 Java 层。");
+        List<String> code = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8).stream()
                 .map(String::strip)
-                .filter(t -> !t.startsWith("*") && !t.startsWith("//"))
-                .anyMatch(t -> t.contains("BUTTON1"));
-        assertTrue(handlesButton1,
-                """
-                        由于不再给 TrayIcon 挂 PopupMenu，addActionListener 也不会再被触发
-                        （那个事件只由 PopupMenu 产生）。左键必须在 MouseListener 里判 BUTTON1，
-                        否则托盘左键会失效。
-                        """);
+                .filter(t -> !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("/*"))
+                .toList();
+        assertTrue(code.stream().noneMatch(t -> t.contains("BUTTON3")),
+                "托盘不应当再依赖右键（BUTTON3）—— 实测它在本环境收不到事件。"
+                        + "这是四轮排查的结论，改回去就是又踩一遍。");
+        assertTrue(code.stream().noneMatch(t -> t.contains("addActionListener")
+                        && t.contains("trayIcon")),
+                "不应当用 trayIcon.addActionListener：没挂 PopupMenu 时它不会被触发"
+                        + "（那个事件由 PopupMenu 产生）。");
     }
 
     @Test
@@ -138,19 +170,9 @@ class TrayMenuTest {
     }
 
     @Test
-    @DisplayName("托盘右键走的是**托盘自己的** Swing 菜单与宿主，不借用悬浮球")
-    void trayRightClickUsesItsOwnSwingMenu() throws IOException {
+    @DisplayName("托盘菜单是**托盘自己的**实例与宿主，不借用悬浮球")
+    void trayMenuUsesItsOwnHostAndInstance() throws IOException {
         String src = Files.readString(APP_JAVA, StandardCharsets.UTF_8);
-        // 只查**代码**，跳过注释行：这个文件里有五处注释专门解释"为什么不用
-        // isPopupTrigger"（以及踩过的坑），粗查字符串会把那些解释也算成违规
-        // （第一版断言就是这么假失败的，改了两轮才对）。
-        boolean callsPopupTrigger = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8).stream()
-                .map(String::strip)
-                .filter(t -> !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("/*"))
-                .anyMatch(t -> t.contains("isPopupTrigger()"));
-        assertTrue(!callsPopupTrigger && src.contains("BUTTON3"),
-                "托盘右键应当直接判 BUTTON3。isPopupTrigger() 在 TrayIcon 的事件上"
-                        + " Windows 下不置位（实测：监听器从不生效，原生菜单照旧弹出）");
         assertTrue(src.contains("new TrayMenuAnchor()"),
                 "托盘菜单应当有自己的宿主窗口（TrayMenuAnchor），"
                         + "而不是借悬浮球当宿主 —— 借用会让两个菜单不独立");
@@ -159,11 +181,11 @@ class TrayMenuTest {
         assertTrue(src.contains("MenuFactory.build(menus)"),
                 "托盘菜单应当由 MenuFactory 构造（文案与悬浮球那份保持同一份定义）");
         // 托盘那段不该再引用悬浮球当宿主
-        int trayBlock = src.indexOf("private void maybeShowTrayMenu");
+        int trayBlock = src.indexOf("private void showTrayMenu()");
         String trayBody = src.substring(trayBlock, Math.min(src.length(), trayBlock + 3000));
         assertTrue(!trayBody.contains("ball.showMenuAtScreen") && !trayBody.contains("ball.showMenuAt("),
                 """
-                        托盘右键不应该再借用悬浮球当弹窗宿主。用户明确要求两个菜单
+                        托盘不应该再借用悬浮球当弹窗宿主。用户明确要求两个菜单
                         「相互独立」：共用宿主会让点开一个再点另一个时行为互相影响
                         （实测表现就是"点其他位置时悬浮球菜单自己弹出来"）。
                         """);
