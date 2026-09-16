@@ -159,14 +159,48 @@ public final class DictationSession {
     /**
      * 定出本段的最终文本。
      *
-     * <p>优先级：精化结果（更准 + 带标点）> 预览文本（§7「whisper 推理失败/超时 →
-     * 退回用 Vosk 预览文本注入」）。两边都空则返回空串，调用方不注入。
+     * <p>优先级：精化结果（更准 + 带标点）> 预览文本
+     * （§7「推理失败/超时 → 退回用 Vosk 预览文本注入」）。
+     *
+     * <p><b>两边都空时返回空串</b>，调用方据此不注入并明确提示。
+     * 这里刻意**不做**「用一个去补另一个」的聪明事：两路识别是独立的，
+     * 一路空而另一路全有，说明该段音频有问题（极短、纯噪声、设备异常），
+     * 猜着注入只会让用户更困惑。
+     *
+     * <p>但要如实回报**哪一路成功了**，因为这意味着完全不同的排查方向：
+     * <ul>
+     *   <li>预览有、精化空 → 精化路径的问题（模型/参数），音频是好的；</li>
+     *   <li>预览空、精化有（实测出现过）→ **流式预览这条路有问题**，音频也是好的；</li>
+     *   <li>两边都空 → 音频或设备的问题。</li>
+     * </ul>
      */
     public String resolveFinalText(String refined) {
         if (refined != null && !refined.isBlank()) {
             return refined.strip();
         }
         return previewText == null ? "" : previewText.strip();
+    }
+
+    /**
+     * 本段的文本来源诊断，用于日志与排查。
+     *
+     * <p>正是这个诊断把「预览空、精化有」这种反常情况显式化——
+     * 在它被加进来之前，日志只会显示「注入了 N 个字」，
+     * 看不出这条路本来一个字都没出。
+     */
+    public String textSource(String refined) {
+        boolean hasRefined = refined != null && !refined.isBlank();
+        boolean hasPreview = previewText != null && !previewText.isBlank();
+        if (hasRefined && hasPreview) {
+            return "精化";
+        }
+        if (hasRefined) {
+            return "仅精化（★ 流式预览为空，需排查预览链路）";
+        }
+        if (hasPreview) {
+            return "仅预览（精化未产出，已按 §7 兜底）";
+        }
+        return "两者皆空";
     }
 
     @Override

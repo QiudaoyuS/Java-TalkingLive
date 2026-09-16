@@ -111,19 +111,31 @@ public final class TextRefiners {
         private volatile boolean closed;
         /** 词级信息（lattice 重打分）开关；默认开，因为它才是精化收益的来源。 */
         private final boolean wordLevel;
+        /**
+         * 唤醒词；用于把它的音频段裁掉（见 {@link #refine} 里的说明）。
+         *
+         * <p>空串表示不裁。设为空时行为与旧的「不裁」一致，
+         * 便于对照排查。
+         */
+        private final String wakeWord;
 
         public VoskOffline(VoskModel model) {
-            this(model, "Vosk 离线重跑", true);
+            this(model, "Vosk 离线重跑", true, "");
         }
 
         public VoskOffline(VoskModel model, String engine) {
-            this(model, engine, true);
+            this(model, engine, true, "");
         }
 
         public VoskOffline(VoskModel model, String engine, boolean wordLevel) {
+            this(model, engine, wordLevel, "");
+        }
+
+        public VoskOffline(VoskModel model, String engine, boolean wordLevel, String wakeWord) {
             this.model = model;
             this.engine = engine;
             this.wordLevel = wordLevel;
+            this.wakeWord = wakeWord == null ? "" : wakeWord;
         }
 
         @Override
@@ -142,7 +154,43 @@ public final class TextRefiners {
                 //   关掉它时 Vosk 只取单条最优路径，与流式预览几乎同质。
                 rec.setWords(wordLevel);
                 rec.accept(pcm, pcm.length);
-                String text = TextUtils.collapseWhitespace(rec.finalResult());
+                String json = wordLevel ? rec.finalResultJson() : null;
+                String text = TextUtils.collapseWhitespace(
+                        json != null ? VoskModel.Recognizer.textOf(json) : rec.finalResult());
+
+                // ★ 裁掉唤醒词那一段音频，再重跑一次。
+                //   为什么值得多跑一遍：段落音频天然以唤醒词开头，而唤醒词**最容易被听错**
+                //   （实测「子曰」被听成「在」）。文本层无法判断「在」是唤醒词还是正文——
+                //   删了可能吃掉正文，不删就多一个字。但音频层面能**精确**定位它：
+                //   词级时间戳告诉我们「子曰」这声结束在第几秒，把那段切掉，
+                //   精化就根本看不到它，于是正文干净、也不会再多一个字。
+                if (json != null && wakeWord != null && !wakeWord.isBlank()) {
+                    double wakeEnd = wakeWordEndSeconds(json, wakeWord);
+                    if (wakeEnd > 0) {
+                        int cutBytes = (int) Math.round(wakeEnd * 32000.0) & ~1;
+                        // 留一点余量，避免把正文第一个字的起音切掉
+                        cutBytes = Math.max(0, Math.min(cutBytes - 1600, pcm.length / 2));
+                        if (cutBytes > 0) {
+                            byte[] trimmed = java.util.Arrays.copyOfRange(pcm, cutBytes, pcm.length);
+                            if (trimmed.length >= 32000 / 5) {
+                                try (VoskModel.Recognizer rec2 = model.createRecognizer(16000.0f)) {
+                                    rec2.setWords(wordLevel);
+                                    rec2.accept(trimmed, trimmed.length);
+                                    String t2 = TextUtils.collapseWhitespace(wordLevel
+                                            ? VoskModel.Recognizer.textOf(rec2.finalResultJson())
+                                            : rec2.finalResult());
+                                    if (!t2.isEmpty()) {
+                                        log.info("已裁掉唤醒词音频段（{}s）：文本 {} -> {}",
+                                                String.format("%.2f", wakeEnd),
+                                                Logging.describeWithFingerprint(text),
+                                                Logging.describeWithFingerprint(t2));
+                                        text = t2;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 long ms = (System.nanoTime() - t0) / 1_000_000;
                 if (text.isEmpty()) {
                     // 离线重跑没出字：这不是「精化成功但结果为空」，而是失败。
@@ -184,9 +232,48 @@ public final class TextRefiners {
             return engine;
         }
 
+        /**
+         * 用词级时间戳算出**唤醒词那声说完的时刻**（秒）。
+         *
+         * <p>做法：按顺序遍历识别出的词，与唤醒词**逐字比对**，比中多少字就累计到哪个词的结束时间。
+         * 这样即使唤醒词被分词（「子曰」→「子」「曰」两个词）也能算对。
+         *
+         * <p>遇到不匹配的字立刻停止并返回已匹配部分的结束时间——
+         * 只认「从头开始连续匹配」的那一段，避免把正文里偶然出现相同字的地方当成唤醒词。
+         *
+         * @return 唤醒词结束的秒数；无法确定时返回 0（调用方据此不裁）
+         */
+        private static double wakeWordEndSeconds(String json, String wakeWord) {
+            java.util.List<VoskModel.WordTime> words = VoskModel.Recognizer.wordsOf(json);
+            if (words.isEmpty() || wakeWord == null || wakeWord.isBlank()) {
+                return 0;
+            }
+            int target = wakeWord.codePointCount(0, wakeWord.length());
+            int matched = 0;
+            double end = 0;
+            for (VoskModel.WordTime w : words) {
+                String word = w.word();
+                for (int i = 0; i < word.length() && matched < target; ) {
+                    int cp = word.codePointAt(i);
+                    i += Character.charCount(cp);
+                    int expect = wakeWord.codePointAt(wakeWord.offsetByCodePoints(0, matched));
+                    if (cp != expect) {
+                        return matched > 0 ? end : 0;
+                    }
+                    matched++;
+                    end = w.end();
+                }
+                if (matched >= target) {
+                    break;
+                }
+            }
+            return matched > 0 ? end : 0;
+        }
+
         @Override
         public String describe() {
             return engine + "（Vosk 整段重跑 + 词级重打分"
+                    + (wakeWord.isBlank() ? "" : "+ 裁唤醒词音频")
                     + (wordLevel ? "" : "（词级已关闭）") + "，非 SenseVoice）";
         }
 

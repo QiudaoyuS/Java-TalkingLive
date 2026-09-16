@@ -238,10 +238,76 @@ class TextUtilsTest {
         }
 
         @Test
-        @DisplayName("引擎把唤醒词转成正文时也能清掉")
-        void stripsWordsAnywhere() {
+        @DisplayName("**只删首/尾边界**，正文里相同的词必须保留")
+        void stripsOnlyAtBoundaries() {
             PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
-            assertEquals("开门见山说重点。", p.process("子曰开门见山到此为止说重点"));
+            // 「到此为止」出现在正文中间时是用户真正说的话，删掉就是改字
+            assertEquals("开门见山说到此为止说重点。",
+                    p.process("子曰开门见山说到此为止说重点到此为止"));
+        }
+
+        @Test
+        @DisplayName("容忍缺字：词里少一个字也能删掉（实测的主要误差形态）")
+        void toleratesDroppedCharInWords() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            // 「到此为止」→「此为止」（丢了首字）是最常见的形态，必须能删
+            assertEquals("今天天气不错。", p.process("子曰今天天气不错此为止"));
+        }
+
+        @Test
+        @DisplayName("唤醒词被听成毫无关系的字时：**故意不删**（证据不足，宁可留一个字）")
+        void leavesUnrecognisableWakeWordAlone() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            // 实测：精化把「子曰」听成了「在」。文本层无法可靠区分它与正文，
+            // 因此保留。多留一个字的代价远小于删掉用户正文的代价。
+            // 正解在音频层面（App 裁掉唤醒词那段音频，精化根本看不到它）。
+            String refined = "在现在进行卖封测四到此为止";
+            String out = p.process(refined);
+            assertEquals("在现在进行卖封测四。", out,
+                    "「在」应保留（证据不足），「到此为止」应删除。实际：" + out);
+        }
+
+        @Test
+        @DisplayName("不能过度删除：正文开头与唤醒词相近时也不能吃掉正文")
+        void doesNotOverDeleteText() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            // 这条是回归守卫：曾经用「编辑距离 ≤ 1~2」的判据，
+            // 结果「子曰今天天气不错」被当成距离 1 的唤醒词删成了「今天天气不」。
+            // 现在的判据只允许「删掉目标词里的字」，长度差超过 1 直接否掉。
+            assertEquals("今天天气不错。", p.process("子曰今天天气不错"));
+            assertEquals("今天天气不错。", p.process("今天天气不错"));
+        }
+
+        @Test
+        @DisplayName("容忍词尾缺字：结束词少了尾字也能删掉")
+        void toleratesTruncatedEndWord() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            assertEquals("今天天气不错。", p.process("子曰今天天气不错到此为"));
+            assertEquals("今天天气不错。", p.process("子曰今天天气不错到此"));
+        }
+
+        @Test
+        @DisplayName("边界容错不会误伤正文：只删边界窗口内的片段")
+        void toleranceDoesNotEatRealText() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            // 「到」是结束词的单字片段，但出现在正文中间，不能删
+            String out = p.process("子曰今天到底怎么样");
+            assertEquals("今天到底怎么样。", out,
+                    "正文里的「到」不能被当成结束词的残缺片段删掉。实际：" + out);
+        }
+
+        @Test
+        @DisplayName("唤醒词与结束词都没出现时不动正文")
+        void noWordsNoChange() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            assertEquals("今天天气不错。", p.process("今天天气不错"));
+        }
+
+        @Test
+        @DisplayName("两边都带标点时也能清掉")
+        void stripsWithSurroundingPunctuation() {
+            PunctuationProcessor p = PunctuationProcessor.forWakeAndEndWords("子曰", "到此为止");
+            assertEquals("今天天气不错。", p.process("。子曰，今天天气不错。到此为止。"));
         }
 
         @Test

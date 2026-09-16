@@ -1,5 +1,6 @@
 package com.talkinglive.engine;
 
+import com.talkinglive.core.Logging;
 import com.talkinglive.text.TextUtils;
 import java.io.IOException;
 import org.slf4j.Logger;
@@ -25,6 +26,19 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
     /** 已经定稿的部分（来自各次 FINAL 结果，按顺序拼接）。 */
     private final StringBuilder finalized = new StringBuilder();
 
+    /**
+     * 本段累计喂进来的音频字节数。
+     *
+     * <p>用于排查「录了 4 秒却一个字都没预览出来」这种情况：有了它就能区分
+     * <b>音频没到识别器</b>（计数为 0）与<b>识别器不吐字</b>（计数正常但输出为空）。
+     * 实测遇到过后者——同一段音频离线精化能出 12 个字，流式预览却是空的。
+     */
+    private long fedBytes;
+    /** 本段累计产生过多少次非空输出（FINAL + PARTIAL）。 */
+    private int nonEmptyOutputs;
+    /** 本段是否命中过端点（FINAL）。 */
+    private int finalCount;
+
     private VoskModel.Recognizer recognizer;
     private volatile boolean closed;
 
@@ -41,14 +55,21 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         }
         byte[] data = (offset == 0 && length == pcm.length)
                 ? pcm : java.util.Arrays.copyOfRange(pcm, offset, offset + length);
+        fedBytes += data.length;
         if (recognizer.accept(data, data.length)) {
+            finalCount++;
             String t = recognizer.result();
             if (!t.isEmpty()) {
+                nonEmptyOutputs++;
                 finalized.append(t);
             }
             listener.onText(Kind.FINAL, finalized.toString());
         } else {
-            listener.onText(Kind.PARTIAL, finalized + recognizer.partialResult());
+            String partial = recognizer.partialResult();
+            if (!partial.isEmpty()) {
+                nonEmptyOutputs++;
+            }
+            listener.onText(Kind.PARTIAL, finalized + partial);
         }
     }
 
@@ -61,16 +82,35 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         // 这里把预览的全程文本记为 out，再 reset 识别器——
         // 避免 Vosk 把已经计入 finalized 的内容再吐一遍造成重复。
         String out = TextUtils.collapseWhitespace(finalized.toString());
-        recognizer.finalResult();
+        String tail = recognizer.finalResult();
+        if (out.isEmpty() && tail != null && !tail.isBlank()) {
+            // 兜底：流式期间一个字都没定稿，但收尾时 Vosk 吐出了内容。
+            // 实测存在这种情况（用户说了一整句，accept 全程返回 false、partial 也空），
+            // 若不接住这一段就白录了。
+            out = TextUtils.collapseWhitespace(tail);
+            nonEmptyOutputs++;
+        }
         recognizer.reset();
         listener.onText(Kind.FINAL, out);
-        log.debug("预览段落定稿：{}", com.talkinglive.core.Logging.describeWithFingerprint(out));
+        log.info("预览段落收尾：喂入 {} 字节（≈{}s），端点命中 {} 次，非空输出 {} 次，{}",
+                fedBytes, String.format("%.2f", fedBytes / 32000.0), finalCount, nonEmptyOutputs,
+                out.isEmpty() ? "★ 最终文本为空" : Logging.describeWithFingerprint(out));
+        if (out.isEmpty() && fedBytes > 32000) {
+            // 有音频却一个字都没有：这是流式预览链路的故障，不是「用户没说话」。
+            // 明确记 ERROR，避免被当成正常情况忽略。
+            log.error("流式预览在 {} 秒音频上未产出任何文本——预览链路异常"
+                    + "（同一段音频离线精化通常能出字，可据此对比排查）",
+                    String.format("%.2f", fedBytes / 32000.0));
+        }
         return out;
     }
 
     @Override
     public synchronized void reset() {
         finalized.setLength(0);
+        fedBytes = 0;
+        nonEmptyOutputs = 0;
+        finalCount = 0;
         if (closed) {
             return;
         }

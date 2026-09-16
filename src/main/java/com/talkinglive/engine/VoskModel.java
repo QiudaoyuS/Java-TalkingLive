@@ -4,6 +4,8 @@ import com.sun.jna.Pointer;
 import com.talkinglive.system.VoskNative;
 import com.talkinglive.text.TextUtils;
 import java.io.IOException;
+import java.util.Map;
+import java.util.List;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
@@ -253,6 +255,17 @@ public final class VoskModel implements AutoCloseable {
         }
 
         /**
+         * 同 {@link #finalResult()}，但返回**原始 JSON**。
+         *
+         * <p>需要原始 JSON 是因为词级时间戳在 {@code result[]} 数组里，
+         * 而 {@code finalResult()} 已经把它压成了纯文本（丢了时间信息）。
+         * 精化用它定位唤醒词在音频里的位置。
+         */
+        public String finalResultJson() {
+            return closed ? "" : VoskNative.get().vosk_recognizer_final_result(handle);
+        }
+
+        /**
          * 打开「输出词级信息」。
          *
          * <p>打开后结果里会带上 {@code result[]} 数组（每个词的起止时间与置信度）。
@@ -317,5 +330,58 @@ public final class VoskModel implements AutoCloseable {
             }
             return TextUtils.joinStreamTokens(raw);
         }
+
+        /**
+         * 从结果 JSON 里取出**词级时间戳**。
+         *
+         * <p>需要先 {@link #setWords(boolean) setWords(true)}，否则结果里没有
+         * {@code result[]} 数组。
+         *
+         * <p>用途是解决一个文本层解决不了的问题：**唤醒词被识别成别的字**。
+         * 实测用户说「子曰现在进行麦克风测试到此为止」，精化把开头的「子曰」
+         * 听成了「在」——文本层无法判断「在」是唤醒词还是正文（删了可能吃掉正文，
+         * 不删就多一个字）。但**音频层面能定位**：知道「子曰」这声说话结束在
+         * 第几秒，就能把那段音频裁掉，让精化根本看不到它。
+         *
+         * @return 按出现顺序的词级时间；解析失败返回空列表
+         */
+        public static List<WordTime> wordsOf(String json) {
+            if (json == null || json.isBlank()) {
+                return List.of();
+            }
+            List<WordTime> out = new java.util.ArrayList<>();
+            try {
+                var root = com.talkinglive.core.JsonCodec.parseObject(json);
+                Object arr = root.get("result");
+                if (!(arr instanceof List<?> list)) {
+                    return List.of();
+                }
+                for (Object item : list) {
+                    if (!(item instanceof Map<?, ?> m)) {
+                        continue;
+                    }
+                    Map<String, Object> w = new java.util.LinkedHashMap<>();
+                    m.forEach((k, v) -> w.put(String.valueOf(k), v));
+                    String word = com.talkinglive.core.JsonCodec.str(w, "word", "");
+                    double start = com.talkinglive.core.JsonCodec.num(w, "start", -1);
+                    double end = com.talkinglive.core.JsonCodec.num(w, "end", -1);
+                    if (!word.isEmpty() && start >= 0 && end >= 0) {
+                        out.add(new WordTime(word, start, end));
+                    }
+                }
+            } catch (RuntimeException e) {
+                return List.of();
+            }
+            return out;
+        }
     }
+
+    /**
+     * 一个词的识别结果与时间（秒，相对该段音频起点）。
+     *
+     * @param word  识别出的词（可能被分词，例如「子曰」可能拆成两个词）
+     * @param start 起始秒
+     * @param end   结束秒
+     */
+    public record WordTime(String word, double start, double end) {}
 }

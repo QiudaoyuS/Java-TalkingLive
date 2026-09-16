@@ -481,7 +481,8 @@ public final class App {
         String choice = opts.refiner == null ? "auto" : opts.refiner.trim().toLowerCase();
         return switch (choice) {
             case "none", "off" -> new TextRefiners.Unavailable("精化（已按参数关闭）", "用户以 --refiner none 关闭");
-            case "vosk-offline" -> new TextRefiners.VoskOffline(voskModel);
+            case "vosk-offline" -> new TextRefiners.VoskOffline(voskModel, "Vosk 离线重跑", true,
+                    config.wakeWord());
             default -> {
                 if (voskModel == null) {
                     yield new TextRefiners.Unavailable("精化", "Vosk 模型不可用，无法建立兜底精化路径");
@@ -489,7 +490,11 @@ public final class App {
                 // SenseVoice（sherpa-onnx）当前没有可依赖的 Maven 中央仓 Java 绑定，
                 // 因此这里永远是「显式不可用 + 明确降级」，而不是假装成功。
                 // 接入时只需在此处返回新的 TextRefiner 实现（TECH-PLAN §5.1 唯一替换点）。
-                yield new TextRefiners.VoskOffline(voskModel);
+                // 传入唤醒词：精化会先把它的音频段裁掉再识别。
+                // 理由见 VoskOffline.refine —— 唤醒词最容易被听错（实测「子曰」→「在」），
+                // 而文本层无法可靠区分「被听错的唤醒词」与「正文」，
+                // 音频层裁剪才是正解：让精化根本看不到那一段。
+                yield new TextRefiners.VoskOffline(voskModel, "Vosk 离线重跑", true, config.wakeWord());
             }
         };
     }
@@ -754,8 +759,9 @@ public final class App {
             //   只看长度与指纹判断不出「哪一截是旧的」，必须并排看前缀。
             //   前缀默认不打印（遵守「不记转写内容」），
             //   用 -Dtalkinglive.log.text=true 打开。
-            log.info("提交链路：gen={} 预览[{}] 精化[{}] 注入[{}]",
-                    ctx.generation(), Logging.stamp(s.previewText()),
+            log.info("提交链路：gen={} 来源={} 预览[{}] 精化[{}] 注入[{}]",
+                    ctx.generation(), s.textSource(result.text()),
+                    Logging.stamp(s.previewText()),
                     result.refined() ? Logging.stamp(result.text()) : "（未精化）",
                     Logging.stamp(text));
             if (Boolean.getBoolean("talkinglive.log.text")) {
