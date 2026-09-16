@@ -36,8 +36,8 @@ import org.junit.jupiter.api.Test;
  */
 class IconsTest {
 
-    /** 所有图标都必须能绘制的尺寸：设置页小图标、状态行图标、大图标、托盘。 */
-    private static final int[] SIZES = {Icons.SMALL, Icons.MEDIUM, Icons.LARGE, Icons.TRAY};
+    /** 所有图标都必须能绘制的尺寸：设置页小图标、状态行图标、大图标、应用图标。 */
+    private static final int[] SIZES = {Icons.SMALL, Icons.MEDIUM, Icons.LARGE, Icons.APP_ICON};
 
     private static final Path SRC = Path.of("src", "main", "java", "com", "talkinglive");
 
@@ -313,7 +313,7 @@ class IconsTest {
         void sizeLadderIsMonotonic() {
             assertTrue(Icons.SMALL < Icons.MEDIUM, "SMALL 必须小于 MEDIUM");
             assertTrue(Icons.MEDIUM < Icons.LARGE, "MEDIUM 必须小于 LARGE");
-            assertTrue(Icons.LARGE < Icons.TRAY, "LARGE 必须小于 TRAY");
+            assertTrue(Icons.LARGE < Icons.APP_ICON, "LARGE 必须小于 APP_ICON");
         }
 
         @Test
@@ -325,13 +325,13 @@ class IconsTest {
         }
 
         @Test
-        @DisplayName("托盘图标是 ARGB 且画得出东西")
-        void trayImageIsUsable() {
-            BufferedImage img = Icons.trayImage();
-            assertEquals(Icons.TRAY, img.getWidth());
-            assertEquals(Icons.TRAY, img.getHeight());
+        @DisplayName("应用图标是 ARGB 且画得出东西")
+        void appIconIsUsable() {
+            BufferedImage img = Icons.appIcon();
+            assertEquals(Icons.APP_ICON, img.getWidth());
+            assertEquals(Icons.APP_ICON, img.getHeight());
             assertEquals(BufferedImage.TYPE_INT_ARGB, img.getType());
-            assertNotEquals(null, inkBounds(img), "托盘图标必须画得出东西");
+            assertNotEquals(null, inkBounds(img), "应用图标必须画得出东西");
         }
     }
 }

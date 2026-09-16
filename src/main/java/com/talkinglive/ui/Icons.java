@@ -24,11 +24,11 @@ import javax.swing.Icon;
  * 和矢量图标放一起必然一大一小，这就是「图标大小不一致」的来源。
  *
  * <p>本类的每一条路径都画在 {@value #BASE}×{@value #BASE} 的基准画布上，再由
- * {@link #image} 等比缩放到目标尺寸。于是同一个 {@link Kind} 在托盘（16/32）
- * 和设置页（12/14/28）里是**同一形状的等比缩放**，不会出现粗细跳变。
+ * {@link #image} 等比缩放到目标尺寸。于是同一个 {@link Kind} 在窗口图标（32）
+ * 和设置页（14/18/28）里是**同一形状的等比缩放**，不会出现粗细跳变。
  *
  * <p>描边宽度按缩放系数一并放大，保证小尺寸下线条不会细到看不见
- * （{@link #strokeScale}）。
+ * （见 {@link #stroke}）。
  */
 public final class Icons {
 
@@ -44,8 +44,14 @@ public final class Icons {
     /** 空状态插画级图标的统一尺寸。 */
     public static final int LARGE = 28;
 
-    /** 托盘图标的统一尺寸（Windows 托盘按 DPI 取 16 或 32，这里给 32 让它自己缩）。 */
-    public static final int TRAY = 32;
+    /**
+     * 应用图标的统一尺寸（窗口图标 {@code setIconImage} 用）。
+     *
+     * <p>注意「应用图标」与「悬浮球内容」是两件事：悬浮球里画的是**声浪柱**
+     * （随电平变化，见 {@code FloatingBall}），而这里是给任务栏/Alt+Tab 用的
+     * 静态图标，画**三根柱**（五根在 32px 下会糊在一起）。
+     */
+    public static final int APP_ICON = 32;
 
     private static final Map<Kind, BufferedImage> CACHE = new EnumMap<>(Kind.class);
 
@@ -85,24 +91,24 @@ public final class Icons {
         return new VectorIcon(kind, size, defaultColor(kind));
     }
 
-    /** 取位图（托盘 {@code TrayIcon}、窗口图标 {@code setIconImage} 用）。 */
+    /** 取位图（窗口图标 {@code setIconImage} 用）。 */
     public static BufferedImage image(Kind kind, int size, Color color) {
         int s = Math.max(1, size);
         return draw(kind, s, color);
     }
 
     /**
-     * 托盘 / 窗口图标。
+     * 应用图标：**三根声浪柱**，与悬浮球的内容同源（只是柱数少一点）。
      *
-     * <p>形状与悬浮球的内容一致：**三根声浪柱**（中间高两边低）。这一点比以前更重要 ——
-     * 悬浮球里现在是声浪柱，托盘图标如果还是话筒，用户会在两处看到两个不同的产品形象。
+     * <p>为什么与悬浮球同源：悬浮球里画的就是声浪柱。若应用图标画别的东西
+     * （比如话筒），用户会在任务栏与悬浮球上看到两个不同的产品形象。
      *
-     * <p>用深色柱而不是白底浅柱：托盘区域可能是浅色也可能是深色，
-     * 但**深色在两者上都有对比度**，白底图标在浅色任务栏上会消失。
+     * <p>用深色柱而不是白底浅柱：任务栏可能是浅色也可能是深色，
+     * 而**深色在两者上都有对比度**，白底图标在浅色任务栏上会消失。
      * 这也是 macOS 菜单栏图标的做法（单色、靠形状识别）。
      */
-    public static BufferedImage trayImage() {
-        int size = TRAY;
+    public static BufferedImage appIcon() {
+        int size = APP_ICON;
         BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = img.createGraphics();
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -110,13 +116,13 @@ public final class Icons {
         float k = size / (float) BASE;
         g.scale(k, k);
         g.setColor(Theme.TEXT);
-        paintTrayWave(g, TRAY);
+        paintAppWave(g, APP_ICON);
         g.dispose();
         return img;
     }
 
     /** 三根声浪柱：与悬浮球内容同源，只是柱数少一点（小尺寸下五根会糊在一起）。 */
-    private static void paintTrayWave(Graphics2D g, int size) {
+    private static void paintAppWave(Graphics2D g, int size) {
         g.setStroke(round(stroke(size, 2.0f)));
         float[] hs = {9f, 19f, 9f};
         for (int i = 0; i < hs.length; i++) {

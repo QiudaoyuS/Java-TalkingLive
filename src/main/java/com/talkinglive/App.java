@@ -34,19 +34,14 @@ import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.Icons;
 import com.talkinglive.ui.LoadingWindow;
-import com.talkinglive.ui.MenuActions;
-import com.talkinglive.ui.MenuFactory;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
-import com.talkinglive.ui.TrayMenuAnchor;
 import com.talkinglive.ui.Theme;
 import java.awt.AWTException;
 import java.awt.EventQueue;
 import java.awt.Image;
 import java.awt.MenuItem;
 import java.awt.PopupMenu;
-import java.awt.SystemTray;
-import java.awt.TrayIcon;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -136,7 +131,6 @@ public final class App {
     private volatile MicValidator.Result wordCheck;
     private volatile String micError;
     private volatile String lastInjectionError;
-    private TrayIcon trayIcon;
 
     /** 同类提示的去重时间戳（见 {@link #showNotice}）。 */
     private final java.util.Map<String, Long> lastNoticeAt = new java.util.concurrent.ConcurrentHashMap<>();
@@ -283,7 +277,7 @@ public final class App {
                 String msg = "TalkingLive 已经在运行了。\n"
                         + "桌面上应该已经有一颗悬浮球 —— 请用它（左键开始/结束听写，右键菜单）。\n"
                         + "如果找不到它，它可能被拖到屏幕边缘贴边收起了，或者被全屏程序遮住；\n"
-                        + "此时可以用托盘图标，或先结束旧的 TalkingLive 进程再启动。\n"
+                        + "此时请先结束旧的 TalkingLive 进程再启动。\n"
                         + "（确实要同时跑多份，请加 --allow-multiple）";
                 log.warn("检测到已有实例在运行，本次启动中止");
                 if (!opts.headless && !opts.selfCheck && !opts.micTest) {
@@ -1113,7 +1107,7 @@ public final class App {
         }
 
         onUi(() -> {
-            ball = new FloatingBall(null, new BallActions(), menus);
+            ball = new FloatingBall(null, new BallActions());
             // 不抢焦点必须在窗口**第一次显示之前**设好，否则会先闪一下焦点（§4.4）
             ball.addNotify();
             Win32WindowStyles.applyNoActivateToolWindow(ball);
@@ -1134,7 +1128,6 @@ public final class App {
             settings = new SettingsWindow(new SettingsHost());
             diagnostics = new DiagnosticsWindow(new DiagnosticsHost());
 
-            installTray();
 
             foreground.start();
             if (ball != null) {
@@ -1157,183 +1150,7 @@ public final class App {
         });
     }
 
-    private void installTray() {
-        if (!SystemTray.isSupported()) {
-            log.info("系统托盘不可用，托盘入口略过（悬浮球仍是主要入口）");
-            return;
-        }
-        try {
-            // ★ 托盘菜单的**独立宿主**：1×1 透明窗口，只在弹菜单时挪到托盘位置。
-            //   有了它，托盘菜单完全不依赖悬浮球 —— 悬浮球被挪走/收起/关掉都不影响。
-            //   不抢焦点必须在**第一次显示之前**设好，否则弹菜单那一瞬会把前台窗口
-            //   从用户正在打字的程序上抢走，注入就会被 §7 判定放弃。
-            trayMenuAnchor = new TrayMenuAnchor();
-            trayMenuAnchor.addNotify();
-            Win32WindowStyles.applyNoActivateToolWindow(trayMenuAnchor);
-
-            // ⚠⚠ 托盘菜单这一段前后改了五轮，每一轮的结论都写在下面，改动前务必读完。
-            //
-            // 事实链（每一条都是实测，不是推断）：
-            //   1. 原生 PopupMenu 的菜单项用 `setFont(Theme.menuFont)` → **无效**。
-            //      它是 Win32 原生菜单，不认 AWT 的字体设置。
-            //   2. 用 MouseListener 弹 Swing JPopupMenu（判据 isPopupTrigger → BUTTON3）
-            //      → 中文菜单没出来，出来的是原生菜单。
-            //      根因：挂了 PopupMenu 时，Windows 会**自己**在右键弹它，
-            //      与 MouseListener 是两套并行机制。
-            //   3. 构造时传 null（不挂 PopupMenu）→ 原生菜单消失，但**左右键都没反应**，
-            //      连 MouseListener 里的日志都不出现。
-            //      结论：**这个环境下没有 PopupMenu 就收不到托盘鼠标事件**
-            //      （JDK 的 addMouseListener 本身与 popup 无关，所以限制在原生的
-            //      Windows 消息层：托盘图标的鼠标消息是随弹出菜单机制一起注册的）。
-            //
-            // 所以本轮的做法是"两条路并存、都记日志"，用一次真实点击把结论定下来：
-            //   - 恢复**中文** PopupMenu → 保证有事件通路，且万一原生菜单能画中文
-            //     （它用的是系统菜单字体，理论上支持中文），那它本身就是正确答案；
-            //   - 同时保留 MouseListener → 若事件能到，我们的 Swing 菜单（自绘，
-            //     中文绝对没问题）也会弹，并且会写日志。
-            // 下一次反馈就能确定该留下哪一条 —— 不再靠猜。
-            PopupMenu nativeMenu = new PopupMenu();
-            MenuItem nManual = new MenuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
-            nManual.setEnabled(!paused);
-            nManual.addActionListener(e -> onBallLeftClick());
-            nativeMenu.add(nManual);
-
-            nativeMenu.addSeparator();
-            MenuItem nPause = new MenuItem(paused ? "恢复监听" : "暂停监听");
-            nPause.addActionListener(e -> togglePause());
-            nativeMenu.add(nPause);
-
-            nativeMenu.addSeparator();
-            MenuItem nSettings = new MenuItem("设置...");
-            nSettings.addActionListener(e -> openSettings());
-            nativeMenu.add(nSettings);
-
-            MenuItem nLogs = new MenuItem("查看日志");
-            nLogs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_LOG));
-            nativeMenu.add(nLogs);
-
-            nativeMenu.addSeparator();
-            MenuItem nQuit = new MenuItem("退出");
-            nQuit.addActionListener(e -> shutdown());
-            nativeMenu.add(nQuit);
-
-            trayIcon = new TrayIcon(trayImage(),
-                    "TalkingLive —— " + sm.state().display()
-                            + "\n左键单击：开始 / 结束听写"
-                            + "\n右键单击：菜单（设置 / 退出）",
-                    nativeMenu);
-            trayIcon.setImageAutoSize(true);
-            // 两条路都记日志 —— 下一次反馈即可确定哪条路真的通。
-            trayIcon.addMouseListener(new java.awt.event.MouseAdapter() {
-                @Override
-                public void mousePressed(java.awt.event.MouseEvent e) {
-                    log.info("托盘收到鼠标按下：button={} popupTrigger={}",
-                            e.getButton(), e.isPopupTrigger());
-                    if (e.getButton() == java.awt.event.MouseEvent.BUTTON1) {
-                        onBallLeftClick();
-                    } else if (e.getButton() == java.awt.event.MouseEvent.BUTTON3) {
-                        showTrayMenu();
-                    }
-                }
-            });
-            SystemTray.getSystemTray().add(trayIcon);
-            log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
-                    + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
-            log.info("托盘交互：左键=开始/结束听写，右键=菜单。"
-                    + "原生菜单与 Swing 菜单同时挂着，用日志判断哪条路真的通");
-        } catch (AWTException | RuntimeException e) {
-            log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
-        }
-    }
-
-    /**
-     * 弹出托盘菜单（左键单击托盘图标时调用）。
-     *
-     * <p>菜单是托盘**自己的一份**实例，宿主是 {@link TrayMenuAnchor}
-     * （贴着光标位置的 1×1 透明窗口），因此与悬浮球菜单相互独立。
-     * 文案与行为来自 {@link MenuFactory}，与悬浮球那份保持一致。
-     *
-     * <p>位置取**鼠标真实位置**而不是托盘图标的位置：托盘图标在 Windows 11 上
-     * 可能位于溢出面板里，那个面板自己会关，用图标坐标算出来的位置不可靠；
-     * 而"菜单弹在光标处"永远是符合直觉的。
-     */
-    private void showTrayMenu() {
-        long now = System.currentTimeMillis();
-        if (now - lastTrayMenuAt < 400) {
-            return;
-        }
-        lastTrayMenuAt = now;
-
-        java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
-        if (pi == null) {
-            return;
-        }
-        final java.awt.Point at = pi.getLocation();
-        onUi(() -> {
-            if (trayMenuAnchor == null) {
-                return;
-            }
-            trayMenuAnchor.moveTo(at.x, at.y);
-            if (trayMenu == null) {
-                trayMenu = MenuFactory.build(menus);
-            }
-            JPopupMenu shown = MenuFactory.showAt(trayMenu, trayMenuAnchor, 0, 0);
-            log.info("托盘左键：弹出托盘自己的 Swing 菜单 @ {},{}（{}）",
-                    at.x, at.y, shown == null ? "已有菜单在显示，忽略" : "ok");
-        });
-    }
-
-    /** 上一次托盘弹菜单的时间（去重，见 {@link #showTrayMenu}）。 */
-    private volatile long lastTrayMenuAt;
-
-    /** 托盘菜单自己的实例与宿主窗口（与悬浮球的相互独立）。 */
-    private JPopupMenu trayMenu;
-    private TrayMenuAnchor trayMenuAnchor;
-
-    /**
-     * 菜单动作 —— 两个菜单共用**同一份**实现。
-     *
-     * <p>注意"共用实现"与"共用实例"是两件事：菜单对象各自一份（相互独立），
-     * 但点了之后做什么是同一套逻辑。这样既独立又不会行为漂移。
-     */
-    private final MenuActions menus = new MenuActions() {
-        @Override
-        public void onManualToggle() {
-            onBallLeftClick();
-        }
-
-        @Override
-        public void onTogglePause() {
-            togglePause();
-        }
-
-        @Override
-        public void onOpenSettings() {
-            openSettings();
-        }
-
-        @Override
-        public void onOpenLog() {
-            openDiagnostics(DiagnosticsWindow.TAB_LOG);
-        }
-
-        @Override
-        public void onQuit() {
-            shutdown();
-        }
-
-        @Override
-        public boolean paused() {
-            return App.this.paused;
-        }
-    };
-
-    /** 托盘图标：与悬浮球同源的矢量话筒（{@link Icons}），不再各画一份。 */
-    private static Image trayImage() {
-        return Icons.trayImage();
-    }
-
-    /** 悬浮球与托盘共用的动作。 */
+    /** 悬浮球的鼠标交互与菜单动作（悬浮球是全应用唯一入口）。 */
     private final class BallActions implements FloatingBall.Listener {
 
         @Override
@@ -1379,9 +1196,6 @@ public final class App {
         onUi(() -> {
             if (ball != null) {
                 ball.setPaused(paused);
-            }
-            if (trayIcon != null) {
-                trayIcon.setToolTip("TalkingLive —— " + (paused ? "已暂停" : sm.state().display()));
             }
         });
         log.info("监听{}", paused ? "已暂停" : "已恢复");
@@ -1438,15 +1252,9 @@ public final class App {
         lastNoticeAt.put(title, now);
 
         onUi(() -> {
-            if (trayIcon != null) {
-                try {
-                    trayIcon.displayMessage(title, detail, TrayIcon.MessageType.INFO);
-                    return;
-                } catch (RuntimeException e) {
-                    log.debug("托盘气泡失败，回退到对话框：{}", e.toString());
-                }
-            }
-            // 对话框是非模态的：模态对话框会阻塞调用线程并可能盖住悬浮球
+            // 托盘气泡已随托盘入口一起去掉（2026-09-16，见 removeTray 的说明）。
+            // 现在只剩对话框这一条通路，它本来就是最可靠的那条。
+            // 对话框是**非模态**的：模态对话框会阻塞调用线程并可能盖住悬浮球。
             javax.swing.JOptionPane pane = new javax.swing.JOptionPane(detail, javax.swing.JOptionPane.INFORMATION_MESSAGE);
             javax.swing.JDialog dialog = pane.createDialog(settings, title);
             dialog.setModal(false);
@@ -1724,11 +1532,6 @@ public final class App {
                 injector.available() ? "就绪" : "不可用", injector.available(),
                 injector.available() ? injector.describe() : injector.unavailableReason()));
 
-        // 托盘
-        out.add(new StatusLine("托盘图标",
-                trayIcon != null ? "已安装" : "不可用", trayIcon != null,
-                trayIcon != null ? "⚠ Windows 11 默认折叠它，悬浮球才是主要入口" : null));
-
         if (lastInjectionError != null) {
             out.add(new StatusLine("最近一次注入失败", "见日志", false, lastInjectionError));
         }
@@ -2002,9 +1805,6 @@ public final class App {
         closeQuietly(voskModel);
         persistConfig();
         onUi(() -> {
-            if (trayIcon != null && SystemTray.isSupported()) {
-                SystemTray.getSystemTray().remove(trayIcon);
-            }
             if (ball != null) {
                 ball.dispose();
             }

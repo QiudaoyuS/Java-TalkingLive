@@ -17,6 +17,7 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
 import java.awt.geom.Ellipse2D;
+import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.JWindow;
 import javax.swing.SwingUtilities;
@@ -132,15 +133,14 @@ public class FloatingBall extends JWindow {
     private final BallPanel panel;
 
     /**
-     * @param owner       宿主窗口（悬浮球通常传 null，它是顶层窗口）
-     * @param listener    悬浮球的鼠标交互回调
-     * @param menuActions 右键菜单的动作（文案与行为由 {@link MenuFactory} 统一定义；
-     *                    菜单实例是本球**自己**的一份，与托盘的相互独立）
+     * 悬浮球是**全应用唯一入口**（托盘入口已移除），所以它同时承担鼠标交互与菜单。
+     *
+     * @param owner    宿主窗口（悬浮球通常传 null，它是顶层窗口）
+     * @param listener 鼠标交互与菜单动作回调
      */
-    public FloatingBall(Window owner, Listener listener, MenuActions menuActions) {
+    public FloatingBall(Window owner, Listener listener) {
         super(owner);
         this.listener = listener;
-        this.menuActions = menuActions;
 
         setFocusableWindowState(false);   // 不参与键盘焦点
         setAutoRequestFocus(false);       // 显示时不请求焦点
@@ -363,7 +363,8 @@ public class FloatingBall extends JWindow {
     /**
      * 把悬浮球夹在屏幕范围内。
      *
-     * <p>即使有托盘图标兜底，把球拖到屏幕外也会让人找不到它，所以夹住位置（§4.4）。
+     * <p>悬浮球是**唯一入口**，把它拖到屏幕外就等于让用户找不到程序 ——
+     * 所以必须夹住位置（§4.4）。
      */
     private void setLocationClamped(int x, int y) {
         Rectangle screen = getGraphicsConfiguration().getBounds();
@@ -537,22 +538,71 @@ public class FloatingBall extends JWindow {
      * <p>抽出来是为了能被自动化自检直接调用——「菜单能否从**不抢焦点**的窗口上
      * 弹出来」是这个设计里真实存在的风险点（§4.4）。
      *
-     * <p>菜单由 {@link MenuFactory} 构造、挂在本球窗口上；托盘那份是**另一个实例、
-     * 另一个宿主**（见 {@code MenuFactory} 与 {@code TrayMenuAnchor} 的注释）——
-     * 两个入口因此相互独立，而文案仍然只有一份定义。
+     * <p><b>这里是全应用唯一还存在的菜单入口。</b>历史上托盘也有一个菜单，
+     * 为此还抽出过 {@code MenuActions} / {@code MenuFactory} / {@code TrayMenuAnchor}
+     * 三个类型来保证"两个菜单相互独立"；托盘入口移除后那层抽象只剩成本，
+     * 于是合并回本类（菜单文案本来也只需要一处定义）。
      */
     public void showMenuAt(int x, int y) {
         if (ballMenu == null) {
-            ballMenu = MenuFactory.build(menuActions);
+            ballMenu = buildMenu();
         }
-        MenuFactory.showAt(ballMenu, this, x, y);
+        // 闸门：同一个菜单实例已在显示时不再重复弹（JPopupMenu.show 可以反复调用，
+        // 会造成重叠、也会在被点掉之后又被弹回来）。
+        // 用 isVisible() 而不是自建布尔量：Swing 在菜单被点掉 / Esc / 失焦时会自己
+        // 把 visible 置回 false，自建标志位必然不同步。
+        if (ballMenu.isVisible()) {
+            log.debug("菜单已在显示，忽略这次弹出请求");
+            return;
+        }
+        ballMenu.show(this, x, y);
     }
 
-    /** 悬浮球自己的菜单实例（与托盘的实例相互独立）。 */
+    /** 悬浮球的菜单实例（复用同一个，避免重复构造）。 */
     private JPopupMenu ballMenu;
 
-    /** 菜单能做什么 —— 由 {@code App} 在构造时提供。 */
-    private MenuActions menuActions;
+    /** 构造右键菜单。 */
+    private JPopupMenu buildMenu() {
+        JPopupMenu menu = new JPopupMenu();
+        // 菜单字体走 Theme.menuFont：它保证有中文字形（见该方法的注释）——
+        // 菜单文字曾经成过方块，根因是字体缺字形，不是编码。
+        menu.setFont(Theme.menuFont(12));
+
+        JMenuItem manual = menuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
+        manual.setEnabled(!paused);
+        manual.addActionListener(a -> listener.onLeftClick());
+        menu.add(manual);
+
+        menu.addSeparator();
+
+        JMenuItem pause = menuItem(paused ? "恢复监听" : "暂停监听");
+        pause.addActionListener(a -> listener.onTogglePause());
+        menu.add(pause);
+
+        menu.addSeparator();
+
+        JMenuItem settings = menuItem("设置...");
+        settings.addActionListener(a -> listener.onOpenSettings());
+        menu.add(settings);
+
+        JMenuItem logs = menuItem("查看日志");
+        logs.addActionListener(a -> listener.onOpenLog());
+        menu.add(logs);
+
+        menu.addSeparator();
+
+        JMenuItem quit = menuItem("退出");
+        quit.addActionListener(a -> listener.onQuit());
+        menu.add(quit);
+
+        return menu;
+    }
+
+    private static JMenuItem menuItem(String text) {
+        JMenuItem i = new JMenuItem(text);
+        i.setFont(Theme.menuFont(12));
+        return i;
+    }
 
     // ---------- 自检支撑 ----------
 
@@ -725,7 +775,7 @@ public class FloatingBall extends JWindow {
     /**
      * 暂停图案：一条斜杠。
      *
-     * <p>形状来自 {@link Icons}（与托盘图标同一份路径），这里只负责把它摆到球心、
+     * <p>形状来自 {@link Icons}（与应用图标同一份路径），这里只负责把它摆到球心、
      * 缩到球内合适的大小与颜色。它取代了原来的话筒图标 —— 球的内容现在是声浪柱，
      * 而"暂停"必须与"正在拾音"一眼可分，所以用一个完全不同的形状（斜杠）而不是
      * 改颜色：颜色在灰度/色觉障碍下不可靠，形状可靠。

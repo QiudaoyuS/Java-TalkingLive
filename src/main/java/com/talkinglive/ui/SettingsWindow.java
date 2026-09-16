@@ -26,7 +26,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 设置窗口 —— 从悬浮球（或托盘）右键菜单进入，**按需打开，关掉不等于退出**（§4.4）。
+ * 设置窗口 —— 从悬浮球右键菜单进入，**按需打开，关掉不等于退出**（§4.4）。
  *
  * <p><b>设计原则：只放每天会改的东西。</b>用户第 4 次反馈「设置界面太繁琐」后，
  * 这个窗口被彻底重写为**一屏五行**：
@@ -105,7 +105,7 @@ public class SettingsWindow extends JFrame {
         this.host = host;
 
         setDefaultCloseOperation(WindowConstants.HIDE_ON_CLOSE);   // 关窗 != 退出
-        setIconImage(Icons.image(Icons.Kind.MIC, 64, Theme.ballRing("IDLE", false)));
+        setIconImage(Icons.appIcon());
 
         JPanel root = new JPanel(new BorderLayout());
         root.setBackground(Theme.BG);

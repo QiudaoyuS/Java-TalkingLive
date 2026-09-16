@@ -219,8 +219,10 @@ class ArchitectureTest {
      *   <li>{@code ReproClick} —— 验证「应用运行时别的窗口还能不能收到真实鼠标点击」。
      *       这是用户报告「屏幕被抢占、什么都点不动」时的判据工具：它用 Robot 发真实点击，
      *       覆盖悬浮球常驻 / 浮窗显示中 / 贴边轮询 / 菜单打开四种状态。</li>
-     *   <li>{@code ReproBlock}、{@code ReproTray} —— 同上问题的另两条排查路径：
-     *       分别是「焦点是否被劫持」与「托盘气泡是否阻塞 UI 线程」。</li>
+     *   <li>{@code ReproBlock} —— 同上问题的另一条排查路径：「焦点是否被劫持」。
+     *       （历史上还有 {@code ReproTray} 用于排查「托盘气泡是否阻塞 UI 线程」，
+     *       但托盘入口已被移除：它在本环境下画不出中文、鼠标事件也不可靠。
+     *       现在悬浮球是唯一入口。）</li>
      *   <li>{@code system.LogViewer} —— 用**明确的 UTF-8** 打印日志尾部。
      *       存在的理由是一次实测反馈：「日志中存在乱码」。查下来日志内容本来就是
      *       UTF-8，只是没有 BOM，记事本与 {@code Get-Content} 会按系统 ANSI 去解。
@@ -230,7 +232,7 @@ class ArchitectureTest {
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
             java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
                     "DpiProbe.java", "WindowProbe.java", "BlockSnapshot.java",
-                    "ReproClick.java", "ReproBlock.java", "ReproTray.java",
+                    "ReproClick.java", "ReproBlock.java",
                     "LogViewer.java");
 
     @Test

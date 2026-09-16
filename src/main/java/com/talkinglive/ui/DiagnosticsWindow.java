@@ -86,7 +86,7 @@ public class DiagnosticsWindow extends JFrame {
         this.host = host;
 
         setDefaultCloseOperation(WindowConstants.HIDE_ON_CLOSE);
-        setIconImage(Icons.image(Icons.Kind.WAVE, 64, Theme.ACCENT));
+        setIconImage(Icons.appIcon());
 
         tabs.setFont(Theme.font(12));
         tabs.setBackground(Theme.BG);
