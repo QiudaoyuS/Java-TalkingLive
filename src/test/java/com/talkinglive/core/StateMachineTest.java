@@ -3,6 +3,7 @@ package com.talkinglive.core;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.talkinglive.core.StateMachine.EndReason;
@@ -235,38 +236,62 @@ class StateMachineTest {
     }
 
     // ============================================================ 切窗口
-
     @Nested
-    @DisplayName("切窗口（§7：结束本段但放弃注入）")
+    @DisplayName("切窗口（§7 原为「放弃注入」；实测后改为照常提交 + 注入时还原焦点）")
     class ForegroundChange {
 
         @Test
-        @DisplayName("LISTENING 时切窗口：直接回 IDLE 并放弃本段")
-        void changeAbandonsSegment() {
+        @DisplayName("LISTENING 时切窗口：**照常提交**而不是丢弃整段")
+        void changeCommitsInsteadOfAbandoning() {
             sm.handle(Event.WAKE_WORD);
             sm.handle(Event.FOREGROUND_CHANGED);
+            assertEquals(State.COMMITTING, sm.state(),
+                    "切窗口不再丢弃本段——用户刚说的话不该凭空消失");
+            assertEquals(EndReason.FOREGROUND_CHANGED, rec.lastEndReason);
+            assertNull(rec.lastAbandon, "不该走「放弃」路径");
+        }
+
+        @Test
+        @DisplayName("切窗口后仍会放行注入，但 inject 上下文标为「前台已变」")
+        void changeStillAllowsInjection() {
+            sm.handle(Event.WAKE_WORD);
+            sm.handle(Event.FOREGROUND_CHANGED);
+            sm.handle(Event.REFINE_DONE);
+            assertEquals(1, rec.commits);
+            assertFalse(rec.lastCommit.inject(),
+                    "inject=false 表示目标不是当前前台，由注入层尝试还原焦点");
+        }
+
+        @Test
+        @DisplayName("切窗口提交后回到 IDLE，shouldInject 复位")
+        void changeThenInjectedReturnsToIdle() {
+            sm.handle(Event.WAKE_WORD);
+            sm.handle(Event.FOREGROUND_CHANGED);
+            sm.handle(Event.REFINE_DONE);
+            sm.handle(Event.INJECTED);
             assertEquals(State.IDLE, sm.state());
-            assertEquals(0, rec.commits);
-            assertNotNull(rec.lastAbandon, "必须有面向用户的放弃说明");
-            assertTrue(rec.lastAbandon.contains("放弃"));
+            assertTrue(sm.shouldInject(), "新段落应恢复「可注入」");
         }
 
         @Test
-        @DisplayName("放弃后 shouldInject 复位，下一段不受影响")
-        void abandonedFlagResets() {
+        @DisplayName("切窗口之后重复的窗口变化事件被忽略（不重复提交）")
+        void repeatedChangeIgnored() {
             sm.handle(Event.WAKE_WORD);
             sm.handle(Event.FOREGROUND_CHANGED);
-            assertTrue(sm.idle());
-            sm.handle(Event.WAKE_WORD);
-            assertTrue(sm.shouldInject(), "新段落应当恢复注入");
+            int before = sm.ignoredTotal();
+            sm.handle(Event.FOREGROUND_CHANGED);
+            assertTrue(sm.ignoredTotal() > before);
+            assertEquals(1, rec.events.stream().filter(e -> e.startsWith("end:")).count(),
+                    "只能触发一次段落结束");
         }
 
         @Test
-        @DisplayName("IDLE 时切窗口被忽略")
+        @DisplayName("IDLE 时切窗口被忽略（这是最常见的路径，不能有副作用）")
         void changeWhileIdleIgnored() {
             sm.handle(Event.FOREGROUND_CHANGED);
             assertEquals(1, sm.ignoredTotal());
             assertEquals(0, rec.commits);
+            assertEquals(State.IDLE, sm.state());
         }
 
         @Test

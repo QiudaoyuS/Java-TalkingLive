@@ -685,8 +685,9 @@ public final class App {
             byte[] pcm = s.pcmSnapshot();
             long generation = s.generation();
 
-            log.info("段落结束（{}）：时长 {:.2f}s 预览 {}",
-                    reason.display(), s.recordedSeconds(), Logging.describeWithFingerprint(summary));
+            log.info("段落结束（{}）：时长 {}s 预览 {}", reason.display(),
+                    String.format("%.2f", s.recordedSeconds()),
+                    Logging.describeWithFingerprint(summary));
 
             onUi(() -> {
                 if (previewBar != null) {

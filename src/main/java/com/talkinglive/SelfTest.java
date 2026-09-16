@@ -176,11 +176,16 @@ public final class SelfTest {
 
         @Override
         public void onCommitReady(StateMachine.CommitContext ctx) {
-            if (!ctx.inject() || !sm.shouldInject()) {
+            // ctx.inject()==false 表示「目标不是当前前台」（切窗口路径）。
+            // 真实实现（App + WindowsTextInjector）在这种情况下**仍然注入**：
+            // 先尝试把焦点还原到目标，还原不了就注入到当前焦点并明确提示。
+            // 日志里真实出现过「说了 3.32 秒被丢弃」，所以这里必须反映新行为，
+            // 而不是像早期那样直接 return。
+            String text = post.process(session.resolveFinalText(lastResult.text()));
+            if (text.isEmpty()) {
                 sm.handle(StateMachine.Event.INJECTED);
                 return;
             }
-            String text = post.process(session.resolveFinalText(lastResult.text()));
             CommitPolicy.CommitPlan plan = policy.plan(session.injectedText(), text);
             TextInjector.Result r = injector.inject(plan.backspaces(), plan.text());
             if (r.ok()) {
@@ -394,13 +399,15 @@ public final class SelfTest {
         add("pipeline", "Esc 取消后一个字都没注入", injector.injections() == before,
                 "injections 仍为 " + injector.injections());
 
-        // --- 切窗口：放弃注入 ---
+        // --- 切窗口：**照常提交**（原 §7 的「放弃注入」实测会丢掉整段话，已改） ---
         before = injector.injections();
         sm.handle(StateMachine.Event.WAKE_WORD);
-        preview.setPartial("这段会因为切窗口被放弃");
+        preview.setPartial("这段在切窗口后应当照常提交");
         sm.handle(StateMachine.Event.FOREGROUND_CHANGED);
-        add("pipeline", "切窗口后放弃注入（§7）", injector.injections() == before && sm.idle(),
-                "state=" + sm.state() + " injections=" + injector.injections());
+        add("pipeline", "切窗口后仍照常提交（不再丢弃整段）",
+                injector.injections() == before + 1 && sm.idle(),
+                "state=" + sm.state() + " injections=" + injector.injections()
+                        + "（原行为是丢弃，实测会让用户白说一段）");
 
         // --- 重复唤醒：忽略而不是重启段落 ---
         sm.handle(StateMachine.Event.WAKE_WORD);

@@ -40,8 +40,23 @@ public final class WindowsTextInjector implements TextInjector {
 
     private static final Logger log = LoggerFactory.getLogger(WindowsTextInjector.class);
 
-    /** 每批的码点数。一个码点最多 2 个 INPUT（代理对），故一次最多 512 个事件。 */
+    /** 每批的码点数。一个码点最多 4 个 INPUT（代理对），故一次最多约 1024 个事件。 */
     private static final int BATCH_CODE_POINTS = 256;
+
+    /** 一批写不完整时的重试次数。 */
+    private static final int SEND_RETRIES = 4;
+
+    /**
+     * 字符之间的间隔（毫秒）。
+     *
+     * <p>为什么需要它：中文输入法窗口与自绘输入框（微信、QQ 这类）处理合成按键的速度
+     * 比 {@code SendInput} 灌入的速度慢。一口气灌进去时它们会**丢事件**，
+     * 用户看到的现象就是「说了十个字只出现一个」。留一点间隔比事后重试更管用，
+     * 因为丢事件是目标程序主动丢的，重试也不一定补得回来。
+     *
+     * <p>代价：每批多 1ms。按 256 码点一批算，对 2.5 秒的提交预算毫无压力。
+     */
+    private static final long CHAR_GAP_MILLIS = 1;
 
     private final boolean available;
     private final String unavailableReason;
@@ -169,7 +184,7 @@ public final class WindowsTextInjector implements TextInjector {
         }
         injections.incrementAndGet();
         injectedCodePoints.addAndGet(TextUtils.codePointCount(body));
-        log.info("注入完成：退格={} 文本={} 事件数={}{}{}",
+        log.info("注入完成：退格={} 文本={} 事件数={}（每字 2 事件，可据此判断是否发全）{}{}",
                 backspaces, Logging.describeWithFingerprint(body), events,
                 retargeted ? "（已把焦点还原到目标）" : "",
                 retargetNote == null ? "" : "（焦点还原失败，注入到当前焦点）");
@@ -310,33 +325,85 @@ public final class WindowsTextInjector implements TextInjector {
     private int sendUnicode(String text) {
         int total = 0;
         for (String batch : TextInjector.batchByCodePoints(text, BATCH_CODE_POINTS)) {
-            List<Win32.KeyEvent> keys = new ArrayList<>(batch.length() * 2);
-            int i = 0;
-            while (i < batch.length()) {
-                int cp = batch.codePointAt(i);
-                i += Character.charCount(cp);
-                if (Character.charCount(cp) == 1) {
-                    keys.add(Win32.KeyEvent.unicodeDown((char) cp));
-                    keys.add(Win32.KeyEvent.unicodeUp((char) cp));
-                } else {
-                    // 代理对：按 UTF-16 的两个 code unit 分别发送。
-                    // Windows 会在目标程序侧把高低代理合成一个字符（WM_CHAR 各发一次，
-                    // 支持 Unicode 的控件会正确组合）。
-                    char hi = Character.highSurrogate(cp);
-                    char lo = Character.lowSurrogate(cp);
-                    keys.add(Win32.KeyEvent.unicodeDown(hi));
-                    keys.add(Win32.KeyEvent.unicodeUp(hi));
-                    keys.add(Win32.KeyEvent.unicodeDown(lo));
-                    keys.add(Win32.KeyEvent.unicodeUp(lo));
-                }
-            }
-            int n = send(keys);
+            int n = sendUnicodeBatch(batch);
             if (n < 0) {
                 return -1;
             }
             total += n;
         }
         return total;
+    }
+
+    /**
+     * 发送一批字符，**并保证整批都写进去**。
+     *
+     * <p>这里是「说了十个字只出现一个」的真正原因所在：{@code SendInput} 偶尔会**部分写入**
+     * （实测日志 {@code SendInput 只写入了 19/20 个事件}）。部分写入意味着有一个字符的
+     * 「按下」或「抬起」事件没进队列——那个字符要么完全不出现，要么留下一个卡住的按键状态
+     * 把后面的输入全带歪。
+     *
+     * <p>原实现把部分写入当成成功返回，于是文字静默缺字。现在改成：
+     * <ol>
+     *   <li>按字符两两成对地发，**每对之间留一点间隔**。中文输入法/自绘输入框
+     *       （微信、QQ 这类）处理合成按键的速度比 {@code SendInput} 灌入的速度慢，
+     *       一口气灌 20 个事件时它们会丢事件——这也是「只出第一个字」的常见成因。</li>
+     *   <li>返回 0 或不足时**重试**，最多 {@value #SEND_RETRIES} 次。</li>
+     *   <li>仍不完整就把已写入的部分算清，并如实返回，交由上层提示。</li>
+     * </ol>
+     *
+     * @return 实际写入的事件数；一个都没写进去返回 -1
+     */
+    private int sendUnicodeBatch(String batch) {
+        List<Win32.KeyEvent> events = new ArrayList<>(batch.length() + 4);
+        int i = 0;
+        while (i < batch.length()) {
+            int cp = batch.codePointAt(i);
+            int chars = Character.charCount(cp);
+            i += chars;
+            if (chars == 1) {
+                events.add(Win32.KeyEvent.unicodeDown((char) cp));
+                events.add(Win32.KeyEvent.unicodeUp((char) cp));
+            } else {
+                // 代理对：按 UTF-16 的两个 code unit 分别发送。Windows 会在目标程序侧
+                // 把高低代理合成一个字符（支持 Unicode 的控件会正确组合）。
+                char hi = Character.highSurrogate(cp);
+                char lo = Character.lowSurrogate(cp);
+                events.add(Win32.KeyEvent.unicodeDown(hi));
+                events.add(Win32.KeyEvent.unicodeUp(hi));
+                events.add(Win32.KeyEvent.unicodeDown(lo));
+                events.add(Win32.KeyEvent.unicodeUp(lo));
+            }
+        }
+
+        int written = 0;
+        for (int attempt = 1; attempt <= SEND_RETRIES; attempt++) {
+            int n = send(events.subList(written, events.size()));
+            if (n < 0) {
+                return written == 0 ? -1 : written;
+            }
+            written += n;
+            if (written >= events.size()) {
+                break;
+            }
+            log.warn("SendInput 部分写入（{}/{} 个事件），第 {} 次重试剩余部分",
+                    written, events.size(), attempt);
+            sleep(CHAR_GAP_MILLIS);
+        }
+        if (written < events.size()) {
+            log.error("SendInput 多次重试后仍未写完整（{}/{} 个事件）——目标程序可能正在"
+                    + "拒绝输入（UIPI 隔离 / 输入队列异常）", written, events.size());
+        }
+        // 每个字符之间留一点间隔：自绘输入框处理合成按键较慢，灌太快会丢字
+        sleep(CHAR_GAP_MILLIS);
+        return written;
+    }
+
+    private static void sleep(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /** @return 实际写入的事件数；-1 表示一个都没写进去 */

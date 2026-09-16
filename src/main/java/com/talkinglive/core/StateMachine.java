@@ -85,7 +85,15 @@ public final class StateMachine {
         /** 单段达到时长上限。 */
         MAX_SEGMENT("达到单段时长上限"),
         /** 悬浮球手动结束。 */
-        MANUAL("手动结束");
+        MANUAL("手动结束"),
+        /**
+         * 前台窗口在录音期间变了。
+         *
+         * <p>原设计（§7）规定这条路径「结束本段但**放弃注入**」。实测发现那等于
+         * 把用户刚说的一整段话丢掉——而切窗口往往只是无意的。现在改为照常提交，
+         * 由注入层尝试把焦点还原回目标（{@code WindowsTextInjector.inject}）。
+         */
+        FOREGROUND_CHANGED("前台窗口变化");
 
         private final String display;
 
@@ -97,12 +105,7 @@ public final class StateMachine {
             return display;
         }
 
-        /**
-         * 是否应该注入。
-         *
-         * <p>{@code DESIGN.md} §7：「切窗口 → 结束本段但<b>放弃注入</b>。注入会被误发到别的程序。」
-         * 因此切窗口这条路径不产生 EndReason，而是直接放弃（见 {@link #abandoned()}）。
-         */
+        /** 是否应该注入。四种正常结束原因都注入；是否真的注入由注入时的焦点还原结果决定。 */
         public boolean injects() {
             return true;
         }
@@ -340,12 +343,25 @@ public final class StateMachine {
         switch (state) {
             case IDLE -> ignore(e, "待唤醒状态下切换窗口，忽略");
             case LISTENING -> {
-                // §7：结束本段，但放弃注入。
+                // §7 原规则：结束本段，但放弃注入。
+                //
+                // ⚠️ 实测下来这条规则太狠：它把用户刚说的一整段话直接丢掉。
+                //    日志里真实出现过「说了 3.32 秒、因为前台变了被丢弃」——
+                //    而用户切窗口往往只是想看看别的东西，或者干脆是被
+                //    系统托盘/输入法候选之类的抖动带偏的。
+                //    现在改为**照常提交**，并把「前台变了」作为信息交给上层：
+                //    注入时会尝试把焦点还原回目标（WindowsTextInjector.inject），
+                //    还原不了就注入到当前焦点并明确提示。文字因此不会凭空消失。
+                commitGeneration = generation;
+                commitReason = EndReason.FOREGROUND_CHANGED;
                 foregroundChanged = true;
-                transition(State.IDLE, e);
-                notifyAbandoned("提交时前台窗口已变，为避免把文字误发到别的程序，本段已放弃");
+                commitReadyFired = false;
+                transition(State.COMMITTING, e);
+                for (Listener l : List.copyOf(listeners)) {
+                    l.onSegmentEndRequested(EndReason.FOREGROUND_CHANGED);
+                }
             }
-            case COMMITTING -> ignore(e, "正在提交中，忽略窗口变化（本段注入目标已锁定）");
+            case COMMITTING -> ignore(e, "正在提交中，忽略窗口变化（注入目标已锁定）");
         }
     }
 
