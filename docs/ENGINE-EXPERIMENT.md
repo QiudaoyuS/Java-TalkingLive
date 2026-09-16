@@ -130,46 +130,72 @@ gen=3  预览『现在一麦克风测试现在进行卖空测试』精化『…�
    （文本层只做了必要的唤醒词/结束词剔除），所以「麦克风→麦克风/卖空」
    这类错字**只能靠换更准的模型解决**。
 
-### 已实现的解法：双模型
+### 已实现的解法：双模型（**自动生效，无需配置**）
 
-`AppPaths.asrModelDir()` 允许**听写用模型**与**唤醒用模型**分开配置：
+`AppPaths.detectLargeModelDir()` 会在 `%LOCALAPPDATA%\TalkingLive\models\` 下自动探测
+`vosk-model-cn-0.22` 或 `model-cn`（两个名字都认：官方解压名与我们下载脚本的解压名）。
+**只要目录在，识别就自动用大模型**——不需要改环境变量、不需要改 JSON。
 
 | 职责 | 模型 | 原因 |
 |---|---|---|
-| 唤醒词 / 结束词检测 | **必须**用小模型 | 只有它支持运行时动态词表（附录 B.2；实测 `graph/` 下无 `Hclg.fst`，故能按语法重建解码图） |
-| 实时预览 + 精化 | **越大越好** | 不需要动态词表，只要准确率。大模型 CER 7.43%，比小模型好一倍以上 |
+| 唤醒词 / 结束词 / 退出词检测 | **必须**用小模型 | 只有它支持运行时动态词表（附录 B.2；实测 `graph/` 下无 `Hclg.fst`，故能按语法重建解码图） |
+| 实时预览 + 段落精化 | 大模型（装了就用） | 不需要动态词表，只要准确率。大模型 CER 7.43%，比小模型好一倍以上 |
 
-配置方式（二选一）：
+仍可用系统属性 / 环境变量**显式指定**（优先级高于自动探测）：
 
 ```powershell
-# 系统属性
-java -Dtalkinglive.model.asr="C:\Users\11428\AppData\Local\TalkingLive\models\vosk-model-cn-0.22" -jar target\talkinglive.jar
-
-# 或环境变量
-$env:TALKINGLIVE_ASR_MODEL = "$env:LOCALAPPDATA\TalkingLive\models\vosk-model-cn-0.22"
+java -Dtalkinglive.model.asr="D:\some\other\model" -jar target\talkinglive.jar
+$env:TALKINGLIVE_ASR_MODEL = "D:\some\other\model"
 ```
 
-未配置时（默认）程序会在日志里给出 **WARN**，明确说明「预览与精化都在用小模型、
-两者会错得一样、精化无从纠正」，并给出上面这条配置方法。
-**不做静默降级**——用户必须知道准确率的上限来自哪里。
+#### 为什么需要「后台异步加载」（实测事故记录）
 
-### 大模型的获取（实测记录的困难）
+大模型**同步加载要 21.5 秒**（解压后 2.0GB；`vosk_model_new` 要读 533MB 的
+`HCLG.fst` 与 1.1GB 的 `G.carpa`），而 `DESIGN.md` §6 的冷启动预算是 **3 秒**。
 
-`vosk-model-cn-0.22` 是 **1.3GB**：
+直接接上去会踩两个坑，都实测过一次：
 
-- 官方站点 `alphacephei.com`：**实测约 23 KB/s**，1.3GB 需**约 15 小时**（本次未下完）
-- HF 镜像 `hf-mirror.com`：**没有**大模型（`localstack/vosk-models` 仓只收录 small 系列，
-  实测其文件列表只有各语言的 `vosk-model-small-*`）
-- 因此「换大模型」这条路**在国内网络下成本很高**，这一点应如实计入决策：
-  它不是一个「顺手就能试」的选项。
+1. **启动时同步加载** → 用户等 21 秒才看到悬浮球。
+2. **启动时把模型取出来传给精化器** → 即使加载本身在后台线程，主线程仍会在
+   构造精化器时**等它**，界面同样 21 秒不出现。
+
+因此 `engine.LazyVoskModel` 做两件事：构造时立刻在守护线程上开始加载；
+`TextRefiners.VoskOffline` 收的是 **`Supplier<VoskModel>`** 而不是模型本身，
+模型只在**第一次真正精化**时才解析（那时段落已经录完、用户本来就在等结果）。
+
+实测结果：**窗口 3.3 秒出现**（改动前 24 秒），大模型在 17–21 秒后于后台就绪，
+此后每段精化都用大模型。代价是常驻内存约 **2.4GB**（`DESIGN.md` §6 的
+「空闲内存 < 500MB」这条预算对大模型不再成立——这是准确率换来的，必须如实记录）。
+
+### 大模型的获取（已实测可行的路径）
+
+`vosk-model-cn-0.22` 是 **1.3GB**，实测两条线路的差距是**700 倍**：
+
+| 线路 | 实测速度 | 结论 |
+|---|---|---|
+| `alphacephei.com` 官方 | **18–48 KB/s** | 1.3GB 要 **约 19 小时**，不可用 |
+| `hf-mirror.com/LiangJingyi/vosk-model-cn-0.22`（`model-cn.zip`） | **13 MB/s** | 1.3GB **89 秒**下完 |
+
+```powershell
+$dir = "$env:LOCALAPPDATA\TalkingLive\models"
+$zip = Join-Path $dir 'model-cn.zip'
+Invoke-WebRequest -UseBasicParsing -Uri `
+  'https://hf-mirror.com/LiangJingyi/vosk-model-cn-0.22/resolve/main/model-cn.zip' -OutFile $zip
+Expand-Archive -Path $zip -DestinationPath $dir -Force   # 解出 model-cn/，程序会自动识别
+```
+
+（注意：`localstack/vosk-models` 那个镜像仓**没有**大模型，只有 small 系列；
+要找的是上面的 `LiangJingyi/vosk-model-cn-0.22`。）
 
 ### 结论（本节的判断）
 
 - 代码层面**已无已知的准确率缺陷**：文本处理三版演进后已正确，注入链路已验证
   （逐字符码点核对通过），预览链路诊断已就位。
-- 剩下的准确率差距**来自模型本身**，需要换模型；而换模型受下载条件限制。
-- 因此当前定位应如实表述为：**「能用，但准确率受小模型 CER 17% 限制」**，
-  而不是「准确率已经做好」。
+- 剩下的准确率差距**来自模型本身**，已通过「装好大模型即自动生效」解决；
+  实测 `EngineBench` 于大模型：加载 17–21s、RTF 0.25–0.48、词级查询 0.008ms/词。
+- 大模型**不支持运行时语法**（实测 C 侧输出
+  `WARNING: Runtime graphs are not supported by this model`），
+  所以唤醒/结束词检测仍走小模型——双模型分工不是折中，是**唯一可行的结构**。
 
 ---
 ## 5. 未测项（必须由真实设备补齐）

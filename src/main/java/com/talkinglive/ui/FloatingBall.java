@@ -16,9 +16,7 @@ import java.awt.Window;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
-import java.awt.geom.Arc2D;
 import java.awt.geom.Ellipse2D;
-import java.awt.geom.RoundRectangle2D;
 import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.JWindow;
@@ -77,6 +75,9 @@ public class FloatingBall extends JWindow {
     private static final int WINDOW_SIZE = Theme.BALL_WINDOW;
     private static final int BALL_SIZE = Theme.BALL_DIAMETER;
     private static final int BALL_INSET = (WINDOW_SIZE - BALL_SIZE) / 2;
+
+    /** 球心图标尺寸：略小于球径的一半多一点，留出边缘环的空间。 */
+    private static final int MIC_ICON_SIZE = Math.round(BALL_SIZE * 0.58f);
 
     /** 收起后露出多少像素的**窗口**（球体只占中间 52px，所以要加内边距）。 */
     private static final int PEEK = 20;
@@ -598,23 +599,23 @@ public class FloatingBall extends JWindow {
         }
     }
 
+    /**
+     * 球心的话筒。
+     *
+     * <p>形状来自 {@link Icons}（与托盘图标同一份路径），这里只负责把它摆到球心、
+     * 缩到球内合适的大小。以前这里和 {@code App.trayImage()} 各画一份，
+     * 结果两处形状和粗细都不一样 —— 那正是「图标大小不一致」的一半原因。
+     */
     private void drawMic(Graphics2D g2, int cx, int cy) {
-        int w = 13;
-        int h = 20;
-        g2.setColor(new Color(232, 236, 246, 235));
-        // 话筒本体
-        g2.fill(new RoundRectangle2D.Float(cx - w / 2f, cy - h / 2f - 3, w, h, w, w));
-        // 拾音支架
-        g2.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g2.draw(new Arc2D.Float(cx - 10, cy - 10, 20, 20, 200, 140, Arc2D.OPEN));
-        // 支脚
-        g2.draw(new java.awt.geom.Line2D.Float(cx, cy + 9, cx, cy + 13));
+        drawIcon(g2, Icons.Kind.MIC, cx, cy, MIC_ICON_SIZE, new Color(232, 236, 246, 235));
     }
 
     private void drawPaused(Graphics2D g2, int cx, int cy) {
-        g2.setColor(new Color(210, 216, 230, 235));
-        g2.setStroke(new BasicStroke(2.6f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g2.draw(new java.awt.geom.Line2D.Float(cx - 9, cy + 9, cx + 9, cy - 9));
+        drawIcon(g2, Icons.Kind.PAUSED, cx, cy, MIC_ICON_SIZE, new Color(210, 216, 230, 235));
+    }
+
+    private void drawIcon(Graphics2D g2, Icons.Kind kind, int cx, int cy, int size, Color color) {
+        Icons.of(kind, size, color).paintIcon(null, g2, cx - size / 2, cy - size / 2);
     }
 
     @Override

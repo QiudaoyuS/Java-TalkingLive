@@ -78,13 +78,71 @@ public final class AppPaths {
      * 「预览『…』精化『…』与预览差异=0码点」就是这么出现的）。
      */
     public static Path asrModelDir() {
-        Path override = configuredModelDir("talkinglive.model.asr", "TALKINGLIVE_ASR_MODEL");
+        Path override = configuredAsrOverride();
         return override != null ? override : voskModelDir();
+    }
+
+    /**
+     * **仅**取显式配置的听写模型目录（系统属性 / 环境变量），不做任何回退。
+     *
+     * <p>与 {@link #asrModelDir()} 的区别：后者会在未配置时回退到小模型，
+     * 而调用方（识别大模型的自动探测）需要区分「用户明确指定了」与「什么都没配」——
+     * 只有后者才应该去自动探测已安装的大模型。
+     *
+     * @return 配置的目录；未配置或目录不存在时返回 null
+     */
+    public static Path configuredAsrOverride() {
+        return configuredModelDir("talkinglive.model.asr", "TALKINGLIVE_ASR_MODEL");
     }
 
     /** 精化引擎模型目录（SenseVoice，见 TECH-PLAN §6.7 第 3 项）。 */
     public static Path refinerModelDir() {
         return modelsDir().resolve("sense-voice");
+    }
+
+    /**
+     * 大模型目录名。
+     *
+     * <p>与官方解压出来的目录名一致，也兼容我们自己的下载脚本（把
+     * {@code model-cn.zip} 解成 {@code model-cn}）。两个名字都认，是因为
+     * 用户完全可能自己按官方文档解压并改名 —— 让他为了「被认出来」而重命名目录
+     * 是没必要的摩擦。
+     */
+    public static final java.util.List<String> LARGE_MODEL_DIR_NAMES =
+            java.util.List.of("vosk-model-cn-0.22", "model-cn");
+
+    /**
+     * 探测**已安装的大模型**（用于自动提升识别准确率）。
+     *
+     * <p>为什么要自动探测而不是只留一个配置项：用户反馈的核心问题是
+     * 「识别出来的字不对」，而根因就是小模型的精度上限（CER 17.15% 对 7.43%，
+     * 见 {@code docs/ENGINE-EXPERIMENT.md}）。让用户为了用上更准的模型去改
+     * 环境变量或 JSON，等于把「修好这个问题」变成用户自己的活。
+     * 只要模型在，就自动用它做识别。
+     *
+     * @return 大模型目录；未安装时返回 null
+     */
+    public static Path detectLargeModelDir() {
+        for (String name : LARGE_MODEL_DIR_NAMES) {
+            Path p = modelsDir().resolve(name);
+            if (looksLikeVoskModel(p)) {
+                return p;
+            }
+        }
+        return null;
+    }
+
+    /** 目录结构是否像一个完整的 Vosk 模型（缺一项就说明解压没完成）。 */
+    public static boolean looksLikeVoskModel(Path dir) {
+        if (dir == null || !Files.isDirectory(dir)) {
+            return false;
+        }
+        for (String required : new String[] {"am", "conf", "graph", "ivector"}) {
+            if (!Files.isDirectory(dir.resolve(required))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

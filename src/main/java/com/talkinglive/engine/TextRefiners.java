@@ -106,7 +106,16 @@ public final class TextRefiners {
 
         private static final Logger log = LoggerFactory.getLogger(VoskOffline.class);
 
-        private final VoskModel model;
+        /**
+         * 模型的**提供者**，而不是模型本身。
+         *
+         * <p>为什么是 Supplier：大模型要 21.5 秒才能加载完（见 {@link LazyVoskModel}）。
+         * 如果在构造时就求值，这个开销会落在启动路径上 —— 实测过一次事故：
+         * 界面整整 21 秒不出现。改成 Supplier 之后，模型只在
+         * {@link #refine} 真正被调用时才解析，也就是「段落已录完、正在收尾」的时候，
+         * 那时用户本来就在等结果。
+         */
+        private final java.util.function.Supplier<VoskModel> modelSource;
         private final String engine;
         private volatile boolean closed;
         /** 词级信息（lattice 重打分）开关；默认开，因为它才是精化收益的来源。 */
@@ -120,19 +129,29 @@ public final class TextRefiners {
         private final String wakeWord;
 
         public VoskOffline(VoskModel model) {
-            this(model, "Vosk 离线重跑", true, "");
+            this(() -> model, "Vosk 离线重跑", true, "");
         }
 
         public VoskOffline(VoskModel model, String engine) {
-            this(model, engine, true, "");
+            this(() -> model, engine, true, "");
         }
 
         public VoskOffline(VoskModel model, String engine, boolean wordLevel) {
-            this(model, engine, wordLevel, "");
+            this(() -> model, engine, wordLevel, "");
         }
 
         public VoskOffline(VoskModel model, String engine, boolean wordLevel, String wakeWord) {
-            this.model = model;
+            this(() -> model, engine, wordLevel, wakeWord);
+        }
+
+        /**
+         * 用「模型提供者」构造 —— 大模型接线的正确入口。
+         *
+         * @param modelSource 每次精化时解析一次（实现应自己缓存，例如 {@link LazyVoskModel}）
+         */
+        public VoskOffline(java.util.function.Supplier<VoskModel> modelSource, String engine,
+                boolean wordLevel, String wakeWord) {
+            this.modelSource = modelSource;
             this.engine = engine;
             this.wordLevel = wordLevel;
             this.wakeWord = wakeWord == null ? "" : wakeWord;
@@ -140,6 +159,7 @@ public final class TextRefiners {
 
         @Override
         public Result refine(byte[] pcm, String previewText, boolean previewEnding) {
+            VoskModel model = modelSource == null ? null : modelSource.get();
             if (closed || model == null) {
                 return Result.fallback(previewText, engine, "精化器已关闭");
             }
@@ -219,7 +239,10 @@ public final class TextRefiners {
 
         @Override
         public boolean available() {
-            return !closed && model != null;
+            // 不再要求「此刻已经拿到模型」：模型是惰性解析的（见 modelSource 的说明），
+            // 构造时、以及应用启动时都还没有它。这里的语义是「精化器本身可用」，
+            // 真正的模型是否就绪由 refine 时的解析结果决定（拿不到就按 §7 降级）。
+            return !closed && modelSource != null;
         }
 
         @Override
