@@ -212,6 +212,8 @@ public class FloatingBall extends JWindow {
         int x = screen.x + screen.width - WINDOW_SIZE - (DOCK_THRESHOLD + 20);
         int y = screen.y + screen.height / 2 - WINDOW_SIZE / 2;
         setLocation(x, y);
+        log.info("悬浮球默认位置：屏幕={} 计算=({},{}) 实际落位=({},{}) 尺寸={}x{}",
+                screen, x, y, getX(), getY(), getWidth(), getHeight());
     }
 
     // ---------- 交互 ----------

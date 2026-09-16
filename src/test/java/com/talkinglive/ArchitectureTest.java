@@ -208,10 +208,14 @@ class ArchitectureTest {
      *       都依赖真实模型与原生库，单测覆盖不到，但它们恰恰是最容易出问题的一环。</li>
      *   <li>{@code EngineBench} —— 实测并回填 {@code DESIGN.md} §6 的性能预算。</li>
      *   <li>{@code SampleInjector} —— 注入链路的手工验证入口（见 §9.3 清单第 4 条）。</li>
+     *   <li>{@code system.DpiProbe} —— 核对 Win32 物理像素与 AWT 逻辑像素的坐标空间。
+     *       这条「最容易反复踩的坑」（§4.4）不能靠背结论：进程 DPI awareness 不同，
+     *       结论就相反，必须能当场实测。实测过程中还因此误判过一次窗口位置。</li>
      * </ul>
      */
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
-            java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java");
+            java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
+                    "DpiProbe.java");
 
     @Test
     @DisplayName("产品路径上只有一个 main：App（§4.5）")
