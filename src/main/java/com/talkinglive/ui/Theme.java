@@ -205,20 +205,82 @@ public final class Theme {
     /**
      * 等宽字体，用于日志与自检这类"原始输出"。
      *
-     * <p>家族列表里每个都有中文字形 —— 这是**必须**的：Consolas / Menlo 之类
-     * 纯拉丁等宽字体没有中文字形，中文会退化成乱码方块（实测踩过）。
-     * 所以优先挑"等宽且有中文"的，找不到才退回普通字体（宁可不对齐，不要乱码）。
+     * <p><b>这里踩过两个真实的坑，都值得写清楚。</b>
+     *
+     * <p><b>坑一：字体没有中文字形。</b>第一版按
+     * 「SF Mono / Menlo / Consolas / Cascadia Mono / Microsoft YaHei UI」的顺序挑，
+     * 注释里还写着「家族列表里每个都有中文字形」—— 那句话是**错的**，而且没人验证过。
+     * 实测：{@code mono = Consolas}，而 Consolas 的 {@code canDisplayUpTo("日志")} 返回 0，
+     * 即**第一个字就没有字形** —— 日志里的汉字全成了空方块（□□）。
+     * 它的样子和"编码乱码"一模一样，只看截图分不出来，但根因完全不同。
+     *
+     * <p><b>坑二：为了中文把等宽丢了。</b>只加一条"能显示中文"的条件之后，
+     * 选中的变成了 Microsoft YaHei UI —— 它覆盖中文，但**不是等宽**
+     * （实测 i 宽 3、W 宽 12），日志的列立刻歪掉。
+     *
+     * <p><b>结论：两个条件必须同时满足，而物理字体里没有两全的</b> ——
+     * Consolas/Segoe UI 等宽无中文，YaHei/Noto 有中文不等宽。
+     * 出路是**逻辑字体**：{@code Monospaced} 与 {@code DialogInput} 由 JVM 映射到
+     * 既等宽又覆盖中文的物理字体（本机实测两者都满足）。
+     * 所以逻辑字体放在最前，物理等宽字体只在确认有中文字形时才用。
+     *
+     * <p>这个坑由 {@code FontGlyphCoverageTest} 钉住：它同时断言"覆盖中文"与"确实等宽"，
+     * 任何一边退步都会失败。
      */
     public static Font mono(int baseSize) {
         float size = baseSize * dpiScale();
         for (String family : new String[] {
-            "SF Mono", "Menlo", "Consolas", "Cascadia Mono",
-            "Microsoft YaHei UI", "Microsoft YaHei"}) {
+            "Monospaced", "DialogInput",                 // 逻辑字体：等宽 + 中文都满足
+            "SF Mono", "Menlo", "Cascadia Mono", "Consolas",   // 物理等宽：有中文才用
+            "Microsoft YaHei UI", "Microsoft YaHei"}) {        // 最后才牺牲等宽保中文
             Font f = new Font(family, Font.PLAIN, 12);
-            if (f.getFamily().equalsIgnoreCase(family)) {
+            boolean usable = isRealFamily(f, family) && hasCjkGlyphs(f);
+            if (usable) {
                 return f.deriveFont(size);
             }
         }
-        return font(baseSize);
+        return new Font(Font.MONOSPACED, Font.PLAIN, Math.round(size));
+    }
+
+    /**
+     * 菜单字体（悬浮球的 Swing 菜单与托盘的 AWT 菜单都用它）。
+     *
+     * <p><b>为什么菜单要单独一个入口</b>：用户反馈「托盘右键菜单也是乱码」（方块）。
+     * 两条菜单的实现完全不同 —— 悬浮球用 Swing {@code JPopupMenu}（我们在每个 item 上
+     * 显式 {@code setFont}），托盘用 AWT {@code PopupMenu}（**一个字体都没设**，
+     * 于是走 JVM 默认菜单字体）。默认那个在 150% DPI 下解析不到中文字形，
+     * 菜单里的汉字就成了方块。
+     *
+     * <p>这里把"菜单用哪个字体"变成一个可检查的对象：先挑有中文字形的物理字体，
+     * 挑不到就退回逻辑字体 {@code Dialog}（JVM 会映射到覆盖中文的物理字体）。
+     * 判据仍是 {@link #hasCjkGlyphs} —— 元测试
+     * {@code FontGlyphCoverageTest} 会断言它的返回值得以画出中文。
+     */
+    public static Font menuFont(int baseSize) {
+        float size = baseSize * dpiScale();
+        for (String family : new String[] {"Microsoft YaHei UI", "Microsoft YaHei", "Dialog"}) {
+            Font f = new Font(family, Font.PLAIN, 12);
+            if (isRealFamily(f, family) && hasCjkGlyphs(f)) {
+                return f.deriveFont(size);
+            }
+        }
+        return new Font(Font.DIALOG, Font.PLAIN, Math.round(size));
+    }
+
+    /**
+     * 这个 {@link Font} 是否真的解析到了指定族。
+     *
+     * <p>必须显式判断：{@code new Font("SF Pro Text", ...)} 在不存在的族上**不会抛异常**，
+     * 而是返回回退字体 Dialog —— 而 Dialog 恰好覆盖中文，
+     * 于是"能否显示中文"这条判据会被不存在的字体骗过去。
+     */
+    static boolean isRealFamily(Font f, String family) {
+        return f.getFamily().equalsIgnoreCase(family)
+                || f.getName().equalsIgnoreCase(family);
+    }
+
+    /** 这个字体是否覆盖常用汉字（用 {@code canDisplayUpTo}，它比"渲染后数墨量"可靠）。 */
+    static boolean hasCjkGlyphs(Font f) {
+        return f.canDisplayUpTo("\u65e5\u5fd7\u6d4b\u8bd5\u72b6\u6001\u8bca\u65ad") < 0;
     }
 }

@@ -533,7 +533,10 @@ public class FloatingBall extends JWindow {
      */
     public void showMenuAt(int x, int y) {
         JPopupMenu menu = new JPopupMenu();
-        menu.setFont(Theme.font(12));
+        // 菜单字体走 Theme.menuFont：它保证有中文字形（详情见 Theme.menuFont 的注释）——
+        // 这里曾经用 Theme.font，两者在本机恰好都指向 YaHei UI，但语义不同：
+        // menuFont 是"给菜单用的、已确认能画中文的字体"。
+        menu.setFont(Theme.menuFont(12));
 
         JMenuItem manual = item(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
         manual.setEnabled(!paused);
@@ -567,7 +570,7 @@ public class FloatingBall extends JWindow {
 
     private static JMenuItem item(String text) {
         JMenuItem i = new JMenuItem(text);
-        i.setFont(Theme.font(12));
+        i.setFont(Theme.menuFont(12));
         return i;
     }
 

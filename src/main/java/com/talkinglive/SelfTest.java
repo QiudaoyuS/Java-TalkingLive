@@ -663,6 +663,28 @@ public final class SelfTest {
                 uiBall.setState("IDLE");
             });
             robot.delay(200);
+            // F0) 字体覆盖中文
+            //     来自真实反馈「日志还是乱码」：日志**内容**没问题（文件是带 BOM 的
+            //     UTF-8），出问题的是**画不出来** —— Theme.mono() 当时选到 Consolas，
+            //     而它没有中文字形，每个汉字都成了带问号的方块（截图确认）。
+            //     这里对所有会被渲染的字体做一次 canDisplayUpTo 检查（-1 = 全有字形）。
+            String cjkSample = "日志测试状态诊断唤醒词结束词静音麦克风模型配置";
+            java.awt.Font bodyFont = Theme.font(12);
+            java.awt.Font monoFont = Theme.mono(11);
+            StringBuilder fontDetail = new StringBuilder();
+            boolean fontsOk = true;
+            for (String[] pair : new String[][] {
+                    {"正文", null}, {"等宽", null}}) {
+                java.awt.Font f = "等宽".equals(pair[0]) ? monoFont : bodyFont;
+                int bad = f.canDisplayUpTo(cjkSample);
+                fontDetail.append(pair[0]).append('=').append(f.getFamily())
+                        .append(bad < 0 ? "(OK) " : "(**缺字形**) ");
+                if (bad >= 0) {
+                    fontsOk = false;
+                }
+            }
+            add("UI", "F0. 界面字体覆盖中文（日志方块事故）", fontsOk, fontDetail.toString());
+
             // 大声时柱子更高 → 柱子像素必须明显更多；且两张图必须不同
             add("UI", "F1. 声浪柱随电平变化（安静 vs 大声）",
                     levels[1] > levels[0] && differs[0] && ink[1] > ink[0],

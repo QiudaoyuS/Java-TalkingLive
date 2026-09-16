@@ -1160,28 +1160,39 @@ public final class App {
         }
         try {
             PopupMenu menu = new PopupMenu();
+            // ★ 托盘菜单必须显式设字体。
+            //   它是 AWT 的 PopupMenu（不是 Swing 的 JPopupMenu），原来**一个字体都没设**，
+            //   于是走 JVM 默认菜单字体；那个默认在 150% DPI 下解析不到中文字形，
+            //   菜单里的汉字全成了方块（用户反馈「托盘右键菜单也是乱码」）。
+            //   Theme.menuFont 保证选到有中文字形的字体，两条菜单现在用同一个。
+            java.awt.Font menuFont = Theme.menuFont(12);
 
             MenuItem manual = new MenuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
+            manual.setFont(menuFont);
             manual.setEnabled(!paused);
             manual.addActionListener(e -> onBallLeftClick());
             menu.add(manual);
 
             menu.addSeparator();
             MenuItem pause = new MenuItem(paused ? "恢复监听" : "暂停监听");
+            pause.setFont(menuFont);
             pause.addActionListener(e -> togglePause());
             menu.add(pause);
 
             menu.addSeparator();
             MenuItem settingsItem = new MenuItem("设置...");
+            settingsItem.setFont(menuFont);
             settingsItem.addActionListener(e -> openSettings());
             menu.add(settingsItem);
 
             MenuItem logs = new MenuItem("状态与诊断…");
+            logs.setFont(menuFont);
             logs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_STATUS));
             menu.add(logs);
 
             menu.addSeparator();
             MenuItem quit = new MenuItem("退出");
+            quit.setFont(menuFont);
             quit.addActionListener(e -> shutdown());
             menu.add(quit);
 
