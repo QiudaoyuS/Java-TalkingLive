@@ -202,27 +202,24 @@ class ArchitectureTest {
      * 诊断入口的**白名单**（{@code DESIGN.md} §4.5：App 是唯一有 main 的类）。
      *
      * <p>白名单必须显式列出而不是「凡是不叫 App 的都放过」：那等于没有约束。
-     * 这里三个都是**只在开发/验证时手动运行**的诊断入口，不在产品运行路径上：
+     *
+     * <p><b>这里只留"长期有价值"的入口。</b>0.9.0 的清理把一批**为已解决问题临时建的**
+     * 入口删掉了（{@code ReproClick} / {@code ReproBlock} / {@code BlockSnapshot} /
+     * {@code WindowProbe}，以及 tools 下 5 个 {@code apply-*.ps1}）——
+     * 那些结论已经固化进产品代码与文档，留着只是脚手架，却一直占着这张白名单、
+     * 每次重构都要顺带改它们（托盘那次就是）。删掉的原因、它们当初解决什么问题、
+     * 以及**下次怎么重建**，都记在 {@code docs/RETIRED-TOOLS.md} 里。
+     *
+     * <p>现在这张表里每一项都是"长期有用"的：
      * <ul>
      *   <li>{@code EngineSmoke} —— 验证 Vosk 原生库加载、词表查询、受限语法。这三件事
      *       都依赖真实模型与原生库，单测覆盖不到，但它们恰恰是最容易出问题的一环。</li>
-     *   <li>{@code EngineBench} —— 实测并回填 {@code DESIGN.md} §6 的性能预算。</li>
+     *   <li>{@code EngineBench} —— 实测并回填 {@code DESIGN.md} §6 的性能预算。
+     *       换模型、换机器时要重跑。</li>
      *   <li>{@code SampleInjector} —— 注入链路的手工验证入口（见 §9.3 清单第 4 条）。</li>
      *   <li>{@code system.DpiProbe} —— 核对 Win32 物理像素与 AWT 逻辑像素的坐标空间。
      *       这条「最容易反复踩的坑」（§4.4）不能靠背结论：进程 DPI awareness 不同，
      *       结论就相反，必须能当场实测。实测过程中还因此误判过一次窗口位置。</li>
-     *   <li>{@code system.WindowProbe} —— 探测屏幕某位置实际归属哪个窗口，
-     *       用于排查「点了没反应」。</li>
-     *   <li>{@code system.BlockSnapshot} —— 「点不动」问题的现场快照：一次性抓下
-     *       大窗口/置顶窗口、卡住的修饰键、前台窗口、光标下的窗口。
-     *       这类问题的现场只存在几秒（重启就没了），事后无法复现，必须能当场取证。</li>
-     *   <li>{@code ReproClick} —— 验证「应用运行时别的窗口还能不能收到真实鼠标点击」。
-     *       这是用户报告「屏幕被抢占、什么都点不动」时的判据工具：它用 Robot 发真实点击，
-     *       覆盖悬浮球常驻 / 浮窗显示中 / 贴边轮询 / 菜单打开四种状态。</li>
-     *   <li>{@code ReproBlock} —— 同上问题的另一条排查路径：「焦点是否被劫持」。
-     *       （历史上还有 {@code ReproTray} 用于排查「托盘气泡是否阻塞 UI 线程」，
-     *       但托盘入口已被移除：它在本环境下画不出中文、鼠标事件也不可靠。
-     *       现在悬浮球是唯一入口。）</li>
      *   <li>{@code system.LogViewer} —— 用**明确的 UTF-8** 打印日志尾部。
      *       存在的理由是一次实测反馈：「日志中存在乱码」。查下来日志内容本来就是
      *       UTF-8，只是没有 BOM，记事本与 {@code Get-Content} 会按系统 ANSI 去解。
@@ -231,9 +228,7 @@ class ArchitectureTest {
      */
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
             java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
-                    "DpiProbe.java", "WindowProbe.java", "BlockSnapshot.java",
-                    "ReproClick.java", "ReproBlock.java",
-                    "LogViewer.java");
+                    "DpiProbe.java", "LogViewer.java");
 
     @Test
     @DisplayName("产品路径上只有一个 main：App（§4.5）")

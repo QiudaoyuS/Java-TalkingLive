@@ -1,31 +1,50 @@
 # tools/
 
-这里的 `apply-*.ps1` 是**一次性脚本**，已经执行完毕，**不要重复运行**
-（它们做的是字符串替换，第二次跑会因为找不到目标文本而报 SKIP，无害但无意义）。
+手工诊断与启动辅助。**全部不在产品运行路径上**，只在排查时用。
 
-## 为什么把一次性脚本留在仓库里
+| 文件 | 作用 |
+|---|---|
+| `verify-batch-bug.ps1` | 复现并证明「代理对跨批边界时 `batchByCodePoints` 死循环」—— 那个 bug 正是用户报告的「点不动任何东西」（死循环卡住 UI 线程）。想把前端点留证据时跑它 |
+| `ListMics.java` | 列出系统所有录音设备（排查「没有可用录音设备」/ 选错设备） |
+| `ProbeMixer.java` | 探测音频混音器的支持格式（排查设备格式与 16kHz 目标格式不匹配） |
+| `run-console.cmd` | 用 `java.exe` 启动，**保留控制台**。正常启动走 `TalkingLive.vbs`（无控制台），需要看输出时用这个 |
+| `run-diagnose.cmd` | 同上，并加 `-Dtalkinglive.log.text=true` 打开日志里的转写内容（仅在排查识别问题时用） |
 
-这些脚本记录的是「`docs/DESIGN.md` 与 `docs/TECH-PLAN.md` 到底按哪一份清单、改了哪几句」。
-文档修订本身在文档的修订记录里，但**逐句的前后对照**只存在于脚本里。
-将来若要核对「技术方案 §9 的 16 项修订是否真的都落实了」，跑一遍这些脚本
-（在干净检出上）就能得到逐项 OK/SKIP 的清单，比人工比对可靠。
+## 诊断入口（在 `src/main/java` 里，不在本目录）
 
-| 脚本 | 作用 | 对应 |
-|---|---|---|
-| `apply-design-revisions.ps1` | `DESIGN.md` 修订清单第一批（#4 #5 #6 #7 #8 #9 #10 #11 #12） | `TECH-PLAN.md` §9 |
-| `apply-design-revisions-2.ps1` | 第二批（#13 #14 #15 #16） | 同上 |
-| `apply-design-revisions-3.ps1` | 追加 `DESIGN.md` 修订记录行与「相关文档」表 | — |
-| `apply-techplan-revisions.ps1` | 关闭 `TECH-PLAN.md` 附录 A.5 最后一项并追加修订记录 | `ENGINE-EXPERIMENT.md` §2 |
+这些类的 `main` 需要手动运行，用法统一是：
 
-## 两个操作上的坑（都踩过）
+```powershell
+java -cp "target\talkinglive.jar;target\lib\*" com.talkinglive.<类名> [参数]
+```
 
-1. **脚本文件必须带 UTF-8 BOM。**
+| 类 | 作用 |
+|---|---|
+| `App --doctor` | 环境自检：模型 / 词表校验 / 麦克风 / 注入能力，跑完退出 |
+| `App --self-check` | 结构化自检（44+ 项，含真实 Robot 驱动的 UI 断言） |
+| `App --mic-test` | 麦克风实测：实时音量条 + 预览文字 + 唤醒命中计数 |
+| `engine.EngineSmoke` | 验证原生库加载、词表查询、受限语法（单测覆盖不到的那一环） |
+| `engine.EngineBench` | 实测性能并回填 `DESIGN.md` §6 预算 |
+| `SampleInjector` | 注入链路手工验证（§9.3 清单第 4 条） |
+| `system.DpiProbe` | 核对 Win32 物理像素与 AWT 逻辑像素的坐标空间 |
+| `system.LogViewer` | 用**明确 UTF-8** 打印日志尾部（不必再和编码打交道） |
+
+## 已退休的工具
+
+一批**为已解决问题临时建的**诊断入口已在 0.9.0 清理中删除
+（`ReproClick` / `ReproBlock` / `BlockSnapshot` / `WindowProbe` / `snapshot.cmd` /
+5 个 `apply-*.ps1`）。它们当初解决什么问题、结论是什么、**下次怎么重建**，
+见 `docs/RETIRED-TOOLS.md`。
+
+## 两个操作上的坑（都踩过，值得记住）
+
+1. **脚本文件若含中文，必须带 UTF-8 BOM。**
    Windows PowerShell 5.1 对**无 BOM** 的 `.ps1` 按 ANSI（中文 Windows 上是 GBK）解码，
    脚本里的中文会变成乱码，进而因为全角字符被误解析而报
    `Expressions are only allowed as the first element of a pipeline`。
-   仓库里的这几个脚本都已经带 BOM。
+   同理：**`.cmd` / `.bat` 一律只用 ASCII** —— cmd.exe 在切换代码页之前就解析整个文件，
+   UTF-8 或 GBK 字节都会把命令解析搞坏（实测把文件变成了乱码）。
 
-2. **不要用编辑工具逐行改 `DESIGN.md` 里的 ASCII 流程图。**
+2. **不要用文本编辑工具逐行改 `docs/DESIGN.md` 里的 ASCII/框线图。**
    那些行含全角字符与制表框线（`│ ┌ └`），且前导空格数不规整，
-   字面量替换很容易「看起来一样但匹配不上」。脚本里改用
-   `IndexOf`/`Replace` 或按行号定位，可靠得多。
+   字面量替换很容易「看起来一样但匹配不上」。按行号或 `IndexOf` 定位可靠得多。
