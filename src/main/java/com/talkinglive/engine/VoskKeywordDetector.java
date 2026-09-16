@@ -40,8 +40,6 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     private final VoskModel.Recognizer recognizer;
     private final String wakeWord;
     private final String endWord;
-    /** 连续模式的退出词；空串表示不启用语音退出。 */
-    private final String stopWord;
     private final HitListener listener;
 
     private double secondsSinceReset;
@@ -59,19 +57,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
      */
     public VoskKeywordDetector(VoskModel model, String wakeWord, String endWord, HitListener listener)
             throws IOException {
-        this(model, wakeWord, endWord, "", listener);
-    }
-
-    /**
-     * 四参构造：多一个**退出词**（连续模式用）。
-     *
-     * @param stopWord 退出词；空串表示不启用语音退出
-     */
-    public VoskKeywordDetector(VoskModel model, String wakeWord, String endWord,
-            String stopWord, HitListener listener) throws IOException {
         this.wakeWord = wakeWord == null ? "" : wakeWord.trim();
         this.endWord = endWord == null ? "" : endWord.trim();
-        this.stopWord = stopWord == null ? "" : stopWord.trim();
         this.listener = listener;
 
         Map<String, String> unknown = new LinkedHashMap<>();
@@ -85,14 +72,11 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         } else if (!model.findWord(this.endWord)) {
             unknown.put("结束词", this.endWord);
         }
-        if (!this.stopWord.isEmpty() && !model.findWord(this.stopWord)) {
-            unknown.put("退出词", this.stopWord);
-        }
         if (!unknown.isEmpty()) {
             throw new VocabularyException(unknown);
         }
 
-        String grammar = buildGrammar(this.wakeWord, this.endWord, this.stopWord);
+        String grammar = buildGrammar(this.wakeWord, this.endWord);
         if (!model.supportsRuntimeGrammar()) {
             // 受限语法是唤醒词可自定义的前提（附录 B.2：只有小模型支持运行时改词表）。
             // 走到这里说明装的是大模型或词表静态的模型 —— 必须明确拒绝，不能假装能用。
@@ -120,18 +104,11 @@ public final class VoskKeywordDetector implements WakeWordDetector {
      *
      * <p>公开为静态方法是为了**可单测**：语法的形状（词的顺序、是否含 {@code [unk]}）
      * 是这个类里唯一能在无麦克风环境下验证的逻辑。
+     *
+     * <p>词表顺序有讲究：**唤醒词在前**。受限语法下引擎会偏向匹配靠前的词，
+     * 而用户说唤醒词的频率远高于结束词。
      */
     public static String buildGrammar(String wakeWord, String endWord) {
-        return buildGrammar(wakeWord, endWord, "");
-    }
-
-    /**
-     * 三参版本：多一个**退出词**（连续模式）。
-     *
-     * <p>词表顺序有讲究：唤醒词在前（受限语法下引擎偏向靠前的词，而唤醒词命中频率最高），
-     * 结束词次之，退出词最后（它最少用）。
-     */
-    public static String buildGrammar(String wakeWord, String endWord, String stopWord) {
         java.util.List<String> phrases = new java.util.ArrayList<>();
         String w = wakeWord == null ? "" : wakeWord.trim();
         String e = endWord == null ? "" : endWord.trim();
@@ -140,10 +117,6 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         }
         if (!e.isEmpty() && !e.equals(w)) {
             phrases.add(e);
-        }
-        String s = stopWord == null ? "" : stopWord.trim();
-        if (!s.isEmpty() && !s.equals(w) && !s.equals(e)) {
-            phrases.add(s);
         }
         phrases.add(UNK);
         return phrases.stream()
@@ -221,9 +194,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         if (t.isEmpty()) {
             return null;
         }
-        if (!stopWord.isEmpty() && t.contains(stopWord)) {
-            return new Hit(Kind.STOP, stopWord, 0);
-        }
+        // 先查结束词再查唤醒词——两者的字不重叠，但真出现同时包含的情况时，
+        // 结束词在语义上更紧急（避免把已经说完的段落继续录下去）。
         if (!endWord.isEmpty() && t.contains(endWord)) {
             return new Hit(Kind.END, endWord, 0);
         }
@@ -253,8 +225,7 @@ public final class VoskKeywordDetector implements WakeWordDetector {
 
     @Override
     public String describe() {
-        return "小 Vosk · 受限语法（wake=" + wakeWord + ", end=" + endWord
-                + (stopWord.isEmpty() ? "" : ", stop=" + stopWord) + "）";
+        return "小 Vosk · 受限语法（wake=" + wakeWord + ", end=" + endWord + "）";
     }
 
     @Override
@@ -300,7 +271,6 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     /** 便捷：给配置用的默认值构造。 */
     public static VoskKeywordDetector forConfig(VoskModel model, AppConfig config, HitListener listener)
             throws IOException {
-        return new VoskKeywordDetector(model, config.wakeWord(), config.endWord(),
-                config.stopWord(), listener);
+        return new VoskKeywordDetector(model, config.wakeWord(), config.endWord(), listener);
     }
 }

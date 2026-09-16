@@ -124,18 +124,15 @@ public class SettingsWindow extends JFrame {
     /** 词表校验徽标：直接贴在对应输入框旁边，不再单独排一段。 */
     private final JLabel wakeMark = new JLabel();
     private final JLabel endMark = new JLabel();
-    private final JLabel stopMark = new JLabel();
 
     private JTextField wakeField;
     private JTextField endField;
-    private JTextField stopWordField;
     private JTextField silenceField;
     private JTextField maxSegmentField;
     private JTextField gapField;
     private JCheckBox autoSendBox;
     private JCheckBox sendOnSilenceBox;
     private JCheckBox itnBox;
-    private JCheckBox continuousBox;
     private JComboBox<String> sendKeyBox;
     private JPanel advancedBody;
     private JButton advancedToggle;
@@ -198,13 +195,12 @@ public class SettingsWindow extends JFrame {
 
         wakeField = field(cfg.wakeWord(), 10);
         endField = field(cfg.endWord(), 10);
-        stopWordField = field(cfg.stopWord(), 8);
         silenceField = field(String.valueOf(cfg.silenceSeconds()), 5);
         maxSegmentField = field(String.valueOf(cfg.maxSegmentSeconds()), 5);
         gapField = field(String.valueOf(cfg.charGapMillis()), 5);
 
         // ---- 语音指令：整个产品只有用户开口这一条控制通道（§2.2「无按键」），
-        //      所以这三个词是**第一等重要**的设置，放在最上面。
+        //      所以这两个词是**第一等重要**的设置，放在最上面。
         JPanel commands = card("语音指令", Icons.Kind.MIC,
                 "说出唤醒词开始听写，说出结束词结束本段。词必须存在于 Vosk 词表内，"
                         + "否则引擎会静默忽略它（表现为「说了没反应」）。");
@@ -226,23 +222,8 @@ public class SettingsWindow extends JFrame {
 
         // ---- 听写
         JPanel dictation = card("听写", Icons.Kind.WAVE,
-                "控制一段录音在什么时候自己结束。连续输入模式下，静音是「分段依据」"
-                        + "而不是「兜底」——说完一段停顿一下就会立刻落字。");
-        continuousBox = check("连续输入模式", cfg.continuousMode(), v -> {
-            cfg.setContinuousMode(v);
-            commit(cfg);
-        });
-        addRow(dictation, "连续输入", continuousBox, null,
-                "唤醒一次后可以一段接一段地说，不必每句都喊唤醒词。"
-                        + "开启后静音阈值自动放宽到 3 秒，且必须说退出词才会完全结束。");
-
-        addRow(dictation, "退出词", stopWordField, stopMark,
-                "连续输入模式下说它结束整个会话（回到待唤醒）。"
-                        + "留空则关闭语音退出，只能靠悬浮球暂停。");
-        bindText(stopWordField, v -> {
-            cfg.setStopWord(v);
-            commit(cfg);
-        });
+                "控制一段录音在什么时候自己结束。说结束词会**立刻**停止录音；"
+                        + "静音超时只是兜底 —— 用户忘了说结束词时的那层保险。");
 
         bindNumber(silenceField, v -> cfg.setSilenceSeconds(v),
                 AppConfig.MIN_SILENCE_SECONDS, AppConfig.MAX_SILENCE_SECONDS);
@@ -361,7 +342,6 @@ public class SettingsWindow extends JFrame {
         AppConfig cfg = host.config();
         setIfIdle(wakeField, cfg.wakeWord());
         setIfIdle(endField, cfg.endWord());
-        setIfIdle(stopWordField, cfg.stopWord());
         setIfIdle(silenceField, String.valueOf(cfg.silenceSeconds()));
         setIfIdle(maxSegmentField, String.valueOf(cfg.maxSegmentSeconds()));
         setIfIdle(gapField, String.valueOf(cfg.charGapMillis()));
@@ -373,9 +353,6 @@ public class SettingsWindow extends JFrame {
         }
         if (itnBox != null) {
             itnBox.setSelected(cfg.itn());
-        }
-        if (continuousBox != null) {
-            continuousBox.setSelected(cfg.continuousMode());
         }
         if (sendKeyBox != null) {
             sendKeyBox.setSelectedItem(cfg.sendKey().display());
@@ -398,8 +375,6 @@ public class SettingsWindow extends JFrame {
                 wakeField == null ? host.config().wakeWord() : wakeField.getText().trim());
         applyWordMark(endMark, "结束词",
                 endField == null ? host.config().endWord() : endField.getText().trim());
-        applyWordMark(stopMark, "退出词",
-                stopWordField == null ? host.config().stopWord() : stopWordField.getText().trim());
     }
 
     private void applyWordMark(JLabel label, String field, String word) {
@@ -543,7 +518,7 @@ public class SettingsWindow extends JFrame {
         JLabel note = hint("<html><body style='width:" + (HINT_WIDTH + 40) + "px'>"
                 + "Vosk 对词表外的词是<b>静默忽略</b>的：语法能建起来、不报错，"
                 + "但那个词永远不会被识别到，表现就是「改了配置没反应」。"
-                + "所以唤醒词/结束词/退出词在常规页显示的是<b>硬校验结论</b>，不是普通提示。"
+                + "所以唤醒词与结束词在常规页显示的是<b>硬校验结论</b>，不是普通提示。"
                 + "</body></html>");
         p.add(note, BorderLayout.CENTER);
         return p;
@@ -775,14 +750,13 @@ public class SettingsWindow extends JFrame {
 
     /** 哪些标签对应一个词表校验徽标。 */
     private boolean hasMark(String label) {
-        return "唤醒词".equals(label) || "结束词".equals(label) || "退出词".equals(label);
+        return "唤醒词".equals(label) || "结束词".equals(label);
     }
 
     private JLabel markFor(String label) {
         return switch (label) {
             case "唤醒词" -> wakeMark;
             case "结束词" -> endMark;
-            case "退出词" -> stopMark;
             default -> new JLabel();
         };
     }

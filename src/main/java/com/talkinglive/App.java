@@ -302,9 +302,8 @@ public final class App {
         loadEngines(opts);
 
         // ④ 系统
-        silence.setTimeoutSeconds(config.effectiveSilenceSeconds());
+        silence.setTimeoutSeconds(config.silenceSeconds());
         injector.setCharGapMillis(config.charGapMillis());
-        sm.setContinuousMode(config.continuousMode());
         foreground = new ForegroundWatcher((from, to) -> sm.handle(StateMachine.Event.FOREGROUND_CHANGED));
 
         // ⑤ 音频
@@ -485,7 +484,7 @@ public final class App {
         // 唤醒 / 结束词检测
         try {
             wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
-                    config.stopWord(), hit -> onKeywordHit(hit));
+                    hit -> onKeywordHit(hit));
             log.info("唤醒检测就绪：{}", wakeDetector.describe());
         } catch (IOException | RuntimeException e) {
             wakeDetectorError = e.getMessage();
@@ -672,7 +671,6 @@ public final class App {
         sm.handle(switch (hit.kind()) {
             case WAKE -> StateMachine.Event.WAKE_WORD;
             case END -> StateMachine.Event.END_WORD;
-            case STOP -> StateMachine.Event.STOP_INPUT;
         });
     }
 
@@ -1261,9 +1259,6 @@ public final class App {
                 java.util.Map<String, String> pairs = new java.util.LinkedHashMap<>();
                 pairs.put("唤醒词", candidate.wakeWord());
                 pairs.put("结束词", candidate.endWord());
-                if (!candidate.stopWord().isBlank()) {
-                    pairs.put("退出词", candidate.stopWord());
-                }
                 MicValidator.Result r = MicValidator.validate(voskModel::findWord, pairs);
                 wordCheck = r;
                 if (!r.ok()) {
@@ -1275,12 +1270,10 @@ public final class App {
         }
         // 热更新：静音秒数、词表（需要重建识别器）
         boolean wordsChanged = !candidate.wakeWord().equals(config.wakeWord())
-                || !candidate.endWord().equals(config.endWord())
-                || !candidate.stopWord().equals(config.stopWord());
+                || !candidate.endWord().equals(config.endWord());
         this.config = candidate;
-        silence.setTimeoutSeconds(candidate.effectiveSilenceSeconds());
+        silence.setTimeoutSeconds(candidate.silenceSeconds());
         injector.setCharGapMillis(candidate.charGapMillis());
-        sm.setContinuousMode(candidate.continuousMode());
         if (wordsChanged) {
             rebuildKeywordDetector();
             rebuildPostProcess();
@@ -1371,10 +1364,6 @@ public final class App {
         // 词表校验逐项
         addWordLine(out, "唤醒词", config.wakeWord());
         addWordLine(out, "结束词", config.endWord());
-        // 退出词也必须校验：它和唤醒/结束词一样要被编译进 Vosk 的受限语法，
-        // 词表外的词会被**静默忽略** —— 表现就是「明明设了退出词，说了却没反应」。
-        // 实测默认的「完毕」这个词条根本就不在词表里，所以这一行尤其重要。
-        addWordLine(out, "退出词", config.stopWord());
 
         // 唤醒检测
         out.add(new SettingsWindow.StatusLine("唤醒/结束词检测",
