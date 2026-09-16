@@ -86,7 +86,13 @@ public final class App {
     private String modelError;
 
     // ---- 系统 ----
-    private final TextInjector injector = new WindowsTextInjector();
+    /**
+     * 文本注入器。
+     *
+     * <p>在 {@link #start} 里按配置设置字符间隔——微信/QQ 这类自绘输入框灌太快会丢字，
+     * 间隔必须能调（见 {@link WindowsTextInjector#setCharGapMillis}）。
+     */
+    private final WindowsTextInjector injector = new WindowsTextInjector();
     private AudioCapture capture;
     private ForegroundWatcher foreground;
     private final SilenceDetector silence =
@@ -277,6 +283,7 @@ public final class App {
 
         // ④ 系统
         silence.setTimeoutSeconds(config.silenceSeconds());
+        injector.setCharGapMillis(config.charGapMillis());
         foreground = new ForegroundWatcher((from, to) -> sm.handle(StateMachine.Event.FOREGROUND_CHANGED));
 
         // ⑤ 音频
@@ -1162,6 +1169,7 @@ public final class App {
                 || !candidate.endWord().equals(config.endWord());
         this.config = candidate;
         silence.setTimeoutSeconds(candidate.silenceSeconds());
+        injector.setCharGapMillis(candidate.charGapMillis());
         if (wordsChanged) {
             rebuildKeywordDetector();
             rebuildPostProcess();

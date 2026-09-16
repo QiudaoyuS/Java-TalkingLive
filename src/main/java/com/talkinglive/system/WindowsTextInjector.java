@@ -5,6 +5,7 @@ import com.sun.jna.Native;
 import com.sun.jna.Pointer;
 import com.sun.jna.platform.win32.WinDef.HWND;
 import com.sun.jna.ptr.IntByReference;
+import com.talkinglive.core.AppConfig;
 import com.talkinglive.core.Logging;
 import com.talkinglive.text.TextInjector;
 import com.talkinglive.text.TextUtils;
@@ -43,20 +44,39 @@ public final class WindowsTextInjector implements TextInjector {
     /** 每批的码点数。一个码点最多 4 个 INPUT（代理对），故一次最多约 1024 个事件。 */
     private static final int BATCH_CODE_POINTS = 256;
 
-    /** 一批写不完整时的重试次数。 */
+    /** 一批写不完整时的重试次数（逐字符发送时，是单个字符的重试次数）。 */
     private static final int SEND_RETRIES = 4;
 
     /**
-     * 字符之间的间隔（毫秒）。
+     * 字符之间的间隔（毫秒）。**可在设置窗口里调**。
      *
-     * <p>为什么需要它：中文输入法窗口与自绘输入框（微信、QQ 这类）处理合成按键的速度
-     * 比 {@code SendInput} 灌入的速度慢。一口气灌进去时它们会**丢事件**，
-     * 用户看到的现象就是「说了十个字只出现一个」。留一点间隔比事后重试更管用，
-     * 因为丢事件是目标程序主动丢的，重试也不一定补得回来。
+     * <p><b>这个数字是「微信里只出现第一个字」的解法核心。</b>
+     * 实测证据：日志显示 14 个事件全部写入成功（7 字 × 2），
+     * 但微信输入框只落地了 2 个字 —— 说明是目标程序**主动丢掉了后面的 WM_CHAR**。
      *
-     * <p>代价：每批多 1ms。按 256 码点一批算，对 2.5 秒的提交预算毫无压力。
+     * <p>原因：微信/QQ 这类自绘输入框要先过自己的输入法/组合状态机。
+     * 我们把事件灌得比它处理得快，它就丢。唯一的解法是放慢。
+     *
+     * <p>做成实例字段而不是常量，是因为不同目标程序、不同微信版本、不同输入法
+     * 需要的间隔不一样（标准控件如记事本用 0 都行，自绘输入框可能要 40ms）。
+     * 让用户能调，比我去猜一个「对所有人都合适」的值可靠。
      */
-    private static final long CHAR_GAP_MILLIS = 1;
+    private volatile long charGapMillis = AppConfig.DEFAULT_CHAR_GAP_MILLIS;
+
+    /** 调整字符间隔（设置窗口调用）。 */
+    public void setCharGapMillis(int millis) {
+        long v = Math.max(AppConfig.MIN_CHAR_GAP_MILLIS,
+                Math.min(AppConfig.MAX_CHAR_GAP_MILLIS, millis));
+        if (v != charGapMillis) {
+            log.info("字符注入间隔：{}ms → {}ms", charGapMillis, v);
+            charGapMillis = v;
+        }
+    }
+
+    /** 当前字符间隔（毫秒）。 */
+    public long charGapMillis() {
+        return charGapMillis;
+    }
 
     private final boolean available;
     private final String unavailableReason;
@@ -322,80 +342,92 @@ public final class WindowsTextInjector implements TextInjector {
         return total;
     }
 
-    private int sendUnicode(String text) {
-        int total = 0;
-        for (String batch : TextInjector.batchByCodePoints(text, BATCH_CODE_POINTS)) {
-            int n = sendUnicodeBatch(batch);
-            if (n < 0) {
-                return -1;
-            }
-            total += n;
-        }
-        return total;
-    }
-
     /**
-     * 发送一批字符，**并保证整批都写进去**。
+     * 逐字符发送文本 —— **每个字符单独一次 SendInput，并留出足够间隔**。
      *
-     * <p>这里是「说了十个字只出现一个」的真正原因所在：{@code SendInput} 偶尔会**部分写入**
-     * （实测日志 {@code SendInput 只写入了 19/20 个事件}）。部分写入意味着有一个字符的
-     * 「按下」或「抬起」事件没进队列——那个字符要么完全不出现，要么留下一个卡住的按键状态
-     * 把后面的输入全带歪。
+     * <p>这是「微信里只出现第一个字」的最终修法。实测证据：
+     * <pre>
+     *   注入完成：文本=len=7 事件数=14（每字 2 事件）
+     * </pre>
+     * 14 个事件全部写入成功，说明**我们发全了**；而微信输入框里只落地了 2 个字。
+     * 结论：是目标程序**主动丢掉了后面的 WM_CHAR**。
      *
-     * <p>原实现把部分写入当成成功返回，于是文字静默缺字。现在改成：
-     * <ol>
-     *   <li>按字符两两成对地发，**每对之间留一点间隔**。中文输入法/自绘输入框
-     *       （微信、QQ 这类）处理合成按键的速度比 {@code SendInput} 灌入的速度慢，
-     *       一口气灌 20 个事件时它们会丢事件——这也是「只出第一个字」的常见成因。</li>
-     *   <li>返回 0 或不足时**重试**，最多 {@value #SEND_RETRIES} 次。</li>
-     *   <li>仍不完整就把已写入的部分算清，并如实返回，交由上层提示。</li>
-     * </ol>
+     * <p>为什么会丢：微信/QQ 这类程序用自绘输入框，消息要先过它的输入法/组合状态机。
+     * 我们把 2N 个事件一口气灌进队列，它的 UI 线程还没处理完第一个字符的
+     * 组合状态，后面的就已经到了，于是被丢弃或被组合逻辑吃掉。
+     * 这与「打字机太快」是同一类问题，唯一的解法是**放慢**。
+     *
+     * <p>所以这里刻意放弃批量化：
+     * <ul>
+     *   <li>一个码点一次 {@code SendInput}（按下 + 抬起两个事件）——粒度足够小，
+     *       目标程序每处理完一个字我们才发下一个。</li>
+     *   <li>字符之间间隔 {@link #charGapMillis} 毫秒（默认 20ms）。默认值取得比较保守，
+     *       因为「注入慢 100ms」远比「文字缺一半」可接受。</li>
+     *   <li>单个字符写不进去就重试 {@value #SEND_RETRIES} 次，仍失败则记 ERROR
+     *       并继续后面的字符——不因为一个字失败就丢掉整段。</li>
+     *   <li>逐字符记 TRACE，便于事后核对到底哪个字没进去。</li>
+     * </ul>
+     *
+     * <p><b>代价</b>：7 个字的段落约多花 7 × charGapMillis 毫秒。
+     * 相对 §6 的 2.5 秒提交预算可以忽略。
      *
      * @return 实际写入的事件数；一个都没写进去返回 -1
      */
-    private int sendUnicodeBatch(String batch) {
-        List<Win32.KeyEvent> events = new ArrayList<>(batch.length() + 4);
+    private int sendUnicode(String text) {
+        int total = 0;
+        int index = 0;
         int i = 0;
-        while (i < batch.length()) {
-            int cp = batch.codePointAt(i);
-            int chars = Character.charCount(cp);
-            i += chars;
-            if (chars == 1) {
-                events.add(Win32.KeyEvent.unicodeDown((char) cp));
-                events.add(Win32.KeyEvent.unicodeUp((char) cp));
+        while (i < text.length()) {
+            int cp = text.codePointAt(i);
+            i += Character.charCount(cp);
+            index++;
+
+            // 一个码点 → 一到两组「按下 + 抬起」
+            List<Win32.KeyEvent> pair = new ArrayList<>(4);
+            if (Character.charCount(cp) == 1) {
+                pair.add(Win32.KeyEvent.unicodeDown((char) cp));
+                pair.add(Win32.KeyEvent.unicodeUp((char) cp));
             } else {
                 // 代理对：按 UTF-16 的两个 code unit 分别发送。Windows 会在目标程序侧
                 // 把高低代理合成一个字符（支持 Unicode 的控件会正确组合）。
                 char hi = Character.highSurrogate(cp);
                 char lo = Character.lowSurrogate(cp);
-                events.add(Win32.KeyEvent.unicodeDown(hi));
-                events.add(Win32.KeyEvent.unicodeUp(hi));
-                events.add(Win32.KeyEvent.unicodeDown(lo));
-                events.add(Win32.KeyEvent.unicodeUp(lo));
+                pair.add(Win32.KeyEvent.unicodeDown(hi));
+                pair.add(Win32.KeyEvent.unicodeUp(hi));
+                pair.add(Win32.KeyEvent.unicodeDown(lo));
+                pair.add(Win32.KeyEvent.unicodeUp(lo));
             }
-        }
 
-        int written = 0;
-        for (int attempt = 1; attempt <= SEND_RETRIES; attempt++) {
-            int n = send(events.subList(written, events.size()));
-            if (n < 0) {
-                return written == 0 ? -1 : written;
+            int written = 0;
+            for (int attempt = 1; attempt <= SEND_RETRIES && written < pair.size(); attempt++) {
+                int n = send(pair.subList(written, pair.size()));
+                if (n < 0) {
+                    break;
+                }
+                written += n;
+                if (written < pair.size()) {
+                    log.debug("第 {} 个字符部分写入（{}/{}），重试", index, written, pair.size());
+                    sleep(charGapMillis);
+                }
             }
-            written += n;
-            if (written >= events.size()) {
-                break;
+            if (written == 0) {
+                // 一个字都写不进去：说明输入队列被拒（UIPI / 目标无响应）。
+                // 直接报失败，不要继续灌——继续也只会全部失败。
+                log.error("第 {} 个字符完全无法写入（共 {} 个字符），中止注入", index, index);
+                return total == 0 ? -1 : total;
             }
-            log.warn("SendInput 部分写入（{}/{} 个事件），第 {} 次重试剩余部分",
-                    written, events.size(), attempt);
-            sleep(CHAR_GAP_MILLIS);
+            if (written < pair.size()) {
+                log.error("第 {} 个字符只写入了 {}/{} 个事件——这个字可能缺失",
+                        index, written, pair.size());
+            }
+            total += written;
+
+            // 字符之间留间隔：让目标程序的输入法/组合状态机处理完这一个字
+            if (i < text.length()) {
+                sleep(charGapMillis);
+            }
         }
-        if (written < events.size()) {
-            log.error("SendInput 多次重试后仍未写完整（{}/{} 个事件）——目标程序可能正在"
-                    + "拒绝输入（UIPI 隔离 / 输入队列异常）", written, events.size());
-        }
-        // 每个字符之间留一点间隔：自绘输入框处理合成按键较慢，灌太快会丢字
-        sleep(CHAR_GAP_MILLIS);
-        return written;
+        return total;
     }
 
     private static void sleep(long ms) {

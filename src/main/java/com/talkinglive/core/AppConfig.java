@@ -136,6 +136,25 @@ public final class AppConfig {
     private boolean sendOnSilenceTimeout = false;
     private int maxSegmentSeconds = DEFAULT_MAX_SEGMENT_SECONDS;
     private boolean itn = true;
+
+    /**
+     * 注入时**每个字符之间的间隔（毫秒）**。
+     *
+     * <p>为什么它是配置项而不是硬编码常量：不同目标程序对合成输入的耐受度差别很大。
+     * 实测微信/QQ 这类自绘输入框在灌太快时会**主动丢掉后面的 WM_CHAR**
+     * （日志表现为「14 个事件全部写入成功，但输入框里只有 2 个字」）。
+     * 需要的间隔随微信版本、输入法、机器负载而变，因此必须让用户能调。
+     *
+     * <p>默认 {@value #DEFAULT_CHAR_GAP_MILLIS}ms；范围 0–200。
+     * 调大更稳（代价是注入变慢），调 0 则退化为「尽快灌入」
+     * （标准控件如记事本、浏览器用 0 也没问题）。
+     */
+    private int charGapMillis = DEFAULT_CHAR_GAP_MILLIS;
+
+    /** 每字之间的默认间隔：见 {@link #charGapMillis}。 */
+    public static final int DEFAULT_CHAR_GAP_MILLIS = 20;
+    public static final int MIN_CHAR_GAP_MILLIS = 0;
+    public static final int MAX_CHAR_GAP_MILLIS = 200;
     private final Ball ball = new Ball();
 
     // ------------------------------------------------------------ 访问器
@@ -211,6 +230,15 @@ public final class AppConfig {
         this.itn = v;
     }
 
+    /** 注入时每个字符之间的间隔（毫秒）。见 {@link #charGapMillis}。 */
+    public int charGapMillis() {
+        return charGapMillis;
+    }
+
+    public void setCharGapMillis(int v) {
+        this.charGapMillis = v;
+    }
+
     public Ball ball() {
         return ball;
     }
@@ -240,6 +268,10 @@ public final class AppConfig {
         if (maxSegmentSeconds < 5 || maxSegmentSeconds > 600) {
             problems.add("单段最长时长必须在 5–600 秒之间，实际是 " + maxSegmentSeconds);
         }
+        if (charGapMillis < MIN_CHAR_GAP_MILLIS || charGapMillis > MAX_CHAR_GAP_MILLIS) {
+            problems.add("字符注入间隔必须在 " + MIN_CHAR_GAP_MILLIS + "–" + MAX_CHAR_GAP_MILLIS
+                    + " 毫秒之间，实际是 " + charGapMillis);
+        }
         if (!problems.isEmpty()) {
             throw new ConfigException(String.join("；", problems));
         }
@@ -257,6 +289,7 @@ public final class AppConfig {
         m.put("sendOnSilenceTimeout", sendOnSilenceTimeout);
         m.put("maxSegmentSeconds", maxSegmentSeconds);
         m.put("itn", itn);
+        m.put("charGapMillis", charGapMillis);
         m.put("ball", ball.toJson());
         return m;
     }
@@ -282,6 +315,7 @@ public final class AppConfig {
         c.sendOnSilenceTimeout = JsonCodec.bool(m, "sendOnSilenceTimeout", false);
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
         c.itn = JsonCodec.bool(m, "itn", true);
+        c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
         Object ballObj = m.get("ball");
         if (ballObj instanceof Map<?, ?> bm) {
             Map<String, Object> b = new LinkedHashMap<>();

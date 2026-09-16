@@ -21,12 +21,20 @@ import java.util.concurrent.TimeUnit;
  * 因为这些正是失败时最需要的信息：UIPI 隔离与「前台窗口已变」是两条最容易被
  * 误判成「程序坏了」的失败路径。
  *
+ * <p><b>调字符间隔</b>：微信/QQ 这类自绘输入框在灌太快时会主动丢掉后面的字符
+ * （实测：14 个事件全部写入成功，但输入框里只有 2 个字）。
+ * 用第三个参数可以现场试不同的间隔，找到「不再丢字」的最小值：
+ * <pre>
+ *   java -cp "..." com.talkinglive.SampleInjector "今天天气不错" 5 40
+ *                                                              ↑ 倒计时 5 秒，每字间隔 40ms
+ * </pre>
+ *
  * <p>用法：
  * <pre>
- * java -cp "target\classes;target\lib\*" com.talkinglive.SampleInjector "要注入的文字" [倒计时秒数]
+ * java -cp "target\classes;target\lib\*" com.talkinglive.SampleInjector ["文字"] [倒计时秒] [字符间隔ms]
  * </pre>
  * 不带参数时注入一段包含中文、英文、数字与 emoji 的默认样例——
- * 这样能一次覆盖「中文输入法无关的 Unicode 注入」「代理对」「ASCII 混排」三种情况。
+ * 这样能一次覆盖「中文注入」「代理对」「ASCII 混排」三种情况。
  */
 public final class SampleInjector {
 
@@ -39,6 +47,7 @@ public final class SampleInjector {
     public static void main(String[] args) throws Exception {
         String text = args.length > 0 ? args[0] : DEFAULT_SAMPLE;
         int countdown = args.length > 1 ? Integer.parseInt(args[1]) : 5;
+        Integer gap = args.length > 2 ? Integer.parseInt(args[2]) : null;
 
         System.out.println("=== TalkingLive 注入链路手工验证 ===");
         System.out.println("注入内容长度 : " + Logging.describeWithFingerprint(text) + "（内容不在此打印）");
@@ -46,6 +55,13 @@ public final class SampleInjector {
                 + "（UTF-16 长度 " + text.length() + "，两者不等说明含代理对）");
 
         WindowsTextInjector injector = new WindowsTextInjector();
+        if (gap != null) {
+            injector.setCharGapMillis(gap);
+            System.out.println("字符间隔     : 已设为 " + injector.charGapMillis()
+                    + "ms（用于现场试出目标程序不丢字的最小值）");
+        } else {
+            System.out.println("字符间隔     : 用默认值 " + injector.charGapMillis() + "ms");
+        }
         System.out.println("注入器可用   : " + injector.available()
                 + (injector.available() ? "  " + injector.describe() : "  " + injector.unavailableReason()));
         if (!injector.available()) {

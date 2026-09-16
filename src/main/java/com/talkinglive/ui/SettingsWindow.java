@@ -100,6 +100,7 @@ public class SettingsWindow extends JFrame {
     private JTextField endField;
     private JTextField silenceField;
     private JTextField maxSegmentField;
+    private JTextField gapField;
     private JCheckBox autoSendBox;
     private JCheckBox sendOnSilenceBox;
     private JCheckBox itnBox;
@@ -245,6 +246,26 @@ public class SettingsWindow extends JFrame {
         row++;
         c.gridx = 0; c.gridy = row; c.gridwidth = 4; p.add(itnBox, c);
         c.gridwidth = 1;
+
+        // 字符注入间隔：微信/QQ 这类自绘输入框灌太快会丢字，需要放慢。
+        // 这是实测出来的可调项（见 WindowsTextInjector.setCharGapMillis），
+        // 必须让用户能调——不然「说了十个字只出来两个字」就只能靠改代码解决。
+        row++;
+        c.gridx = 0; c.gridy = row; p.add(label("注入间隔"), c);
+        c.gridx = 1;
+        gapField = field(String.valueOf(cfg.charGapMillis()), 4);
+        p.add(gapField, c);
+        c.gridx = 2; c.gridwidth = 2;
+        p.add(hint("毫秒/每字（0–200）。微信/QQ 丢字时调大，记事本用 0 即可"), c);
+        c.gridwidth = 1;
+        bind(gapField, v -> {
+            try {
+                cfg.setCharGapMillis(Integer.parseInt(v.trim()));
+                commit(cfg);
+            } catch (NumberFormatException ignored) {
+                // 输入尚未完成
+            }
+        });
 
         row++;
         c.gridx = 0; c.gridy = row; c.gridwidth = 4; c.insets = new Insets(16, 4, 2, 10);
