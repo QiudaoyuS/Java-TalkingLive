@@ -113,12 +113,25 @@ class MicValidatorTest {
         }
 
         @Test
-        @DisplayName("空词被判为不合法，并提示备选")
-        void emptyWordsRejected() {
-            MicValidator.Result r = MicValidator.validate(vocab(), "", "");
+        @DisplayName("空唤醒词被判为不合法，并提示备选")
+        void emptyWakeWordRejected() {
+            MicValidator.Result r = MicValidator.validate(vocab(), "", "到此为止");
             assertFalse(r.ok());
-            assertEquals(2, r.problems().size());
+            assertEquals(1, r.problems().size());
             assertEquals("(空)", r.problems().get(0).word());
+            assertEquals("唤醒词", r.problems().get(0).field());
+        }
+
+        @Test
+        @DisplayName("空结束词**不再**被判为不合法（它是选项，不是漏填）")
+        void emptyEndWordAccepted() {
+            // 与 AppConfig.validate() 放开的规则必须一致：配置层说可以、词表层说不行，
+            // 用户看到的就是"改了没反应"。
+            MicValidator.Result r = MicValidator.validate(vocab(), "子曰", "");
+            assertTrue(r.ok(), r.message());
+            assertTrue(r.problems().isEmpty());
+            // 而且要明确跳过它，不能偷偷当成"查过了"
+            assertEquals(1, r.checked(), "空结束词不该被计入查过的词");
         }
 
         @Test
@@ -233,11 +246,15 @@ class MicValidatorTest {
             return MicValidator.ofVocabulary(SPELLABLE_VOCAB);
         }
 
-        /** 与生产代码同形状的判定：整词不在表内、但每个字都在。 */
+        /** 与生产代码同形状的判定：整词不在表内、但每个字都在 → 逐字拆开。 */
         private static MicValidator.SpellCheck speller() {
-            return word -> word.codePoints()
-                    .mapToObj(cp -> new String(Character.toChars(cp)))
-                    .allMatch(SPELLABLE_VOCAB::contains);
+            return word -> {
+                java.util.List<String> tokens = word.codePoints()
+                        .mapToObj(cp -> new String(Character.toChars(cp)))
+                        .toList();
+                return tokens.size() > 1 && SPELLABLE_VOCAB.containsAll(tokens)
+                        ? tokens : java.util.List.of();
+            };
         }
 
         @Test
@@ -303,6 +320,31 @@ class MicValidatorTest {
                     lookup(), "小秘书", "到此为止", speller());
             assertFalse(r.ok(), "「小秘书」的「秘」「书」不在表内，拆不开");
             assertEquals("唤醒词", r.problems().get(0).field());
+        }
+
+        @Test
+        @DisplayName("提示带着**真实 token**，界面才能显示「已拆成单字「飞」「瑞」」")
+        void noticeCarriesRealTokens() {
+            MicValidator.Problem p = MicValidator.validate(
+                    lookup(), "飞瑞", "到此为止", speller()).spelled().get(0);
+            // token 由引擎决定，界面不许自己再拆一遍（否则会有两份实现）
+            assertEquals(List.of("飞", "瑞"), p.tokens());
+            String brief = p.brief();
+            assertTrue(brief.contains("飞") && brief.contains("瑞"), brief);
+            assertTrue(brief.contains("拆成单字"), brief);
+        }
+
+        @Test
+        @DisplayName("brief 比 describe **短得多**（标签是固定宽度的，长版本会被截成省略号）")
+        void briefIsMuchShorter() {
+            MicValidator.Problem p = MicValidator.validate(
+                    lookup(), "飞瑞", "到此为止", speller()).spelled().get(0);
+            // 实测完整版有 555px 宽，而状态标签只有约 292px —— 直接用会被 Swing
+            // 截成「唤醒词「飞瑞」整体不在词表内，已...」，用户恰恰看不到
+            // "拆成了哪几个字"，而那正是这条提示唯一要说的事。
+            assertTrue(p.brief().length() < p.describe().length(), 
+                    "brief=" + p.brief().length() + " describe=" + p.describe().length());
+            assertTrue(p.brief().length() <= 30, "brief 应短到一行放得下：" + p.brief());
         }
 
         @Test

@@ -314,9 +314,47 @@ public final class SelfTest {
                     "它的四个字虽在表内，但拆开后真实语音里无法稳定命中");
             MicValidator.Result spelledCheck = MicValidator.validate(model::findWord,
                     "飞瑞", "到此为止",
-                    word -> com.talkinglive.engine.WakePhrase.resolve(model::findWord, word).isPresent());
+                    word -> com.talkinglive.engine.WakePhrase.resolve(model::findWord, word)
+                            .map(com.talkinglive.engine.WakePhrase::tokens)
+                            .orElse(java.util.List.of()));
             add("engine", "词表校验放行逐字可用的唤醒词", spelledCheck.ok(),
                     spelledCheck.problems().isEmpty() ? "已放行并留下提示" : spelledCheck.message());
+            add("engine", "拆字提示里带着**真实 token**（界面据此显示拆成了哪几个字）",
+                    spelledCheck.spelled().size() == 1
+                            && spelledCheck.spelled().get(0).tokens().equals(
+                                    java.util.List.of("飞", "瑞")),
+                    spelledCheck.spelled().isEmpty()
+                            ? "没有拆字提示！"
+                            : spelledCheck.spelled().get(0).brief());
+
+            // --- 结束词是**可选项**：留空就该能用 ---
+            //
+            // 用户指出「可以有结束词，也意味着可以没有结束词，现在的限制是不能没有」。
+            // 结束词只是三种收尾方式之一（另两种是静音超时、切换窗口），设成必填
+            // 等于强迫用户接受一种不需要的收尾方式。这一段把"留空可用"焊死成断言，
+            // 避免哪天又被哪一层单独拦回去（配置层、词表层、检测器是三处独立判断）。
+            try {
+                AppConfig blank = new AppConfig();
+                blank.setEndWord("");
+                blank.validate(); // 不抛异常才算通过
+                add("engine", "结束词留空能通过配置校验", true, "结束词 = 「」（未启用）");
+            } catch (Exception e) {
+                add("engine", "结束词留空能通过配置校验", false, e.getMessage());
+            }
+            add("engine", "结束词留空时语法只剩唤醒词 + [unk]",
+                    com.talkinglive.engine.VoskKeywordDetector
+                            .buildGrammar("子曰", "").equals("[\"子曰\",\"[unk]\"]"),
+                    com.talkinglive.engine.VoskKeywordDetector.buildGrammar("子曰", ""));
+            MicValidator.Result noEnd = MicValidator.validate(model::findWord, "子曰", "");
+            add("engine", "结束词留空不被词表校验报错", noEnd.ok(),
+                    noEnd.ok() ? "已跳过（空 = 不用它，不是漏填）" : noEnd.message());
+            try (var d = new com.talkinglive.engine.VoskKeywordDetector(
+                    model, "子曰", "", hit -> { })) {
+                add("engine", "结束词留空时检测器仍可用（只报唤醒，不报结束）",
+                        d.available(), d.describe());
+            } catch (Exception e) {
+                add("engine", "结束词留空时检测器仍可用（只报唤醒，不报结束）", false, e.toString());
+            }
         } catch (Exception e) {
             add("engine", "Vosk 模型加载", false,
                     e.getMessage() + "（模型缺失时产品仍应常驻并明确提示）");

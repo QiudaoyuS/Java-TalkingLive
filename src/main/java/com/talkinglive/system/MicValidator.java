@@ -25,21 +25,27 @@ public final class MicValidator {
     }
 
     /**
-     * 「这个词能不能逐字拼出来」的判定能力（可选）。
+     * 「这个词能拆成哪几个 token」的判定能力（可选）。
      *
      * <p>受限语法接受的是一串 token，而 token 的粒度是**词表条目**。所以一个词
      * 整体不在词表内，只要它的**每个字**都在，就能拆成单字序列用——这正是
-     * 「用汉字拼出英语发音」的解法（{@code Firay ≈ 飞瑞}）。真实的解析逻辑在
-     * {@code engine.WakePhrase}，这里只保留一个函数式接口，
+     * 「用汉字拼出英语发音」的解法（{@code Firay ≈ 飞瑞}，见 {@code DESIGN.md} 附录 B.4）。
+     * 真实的解析逻辑在 {@code engine.WakePhrase}，这里只保留一个函数式接口，
      * 好让本类（{@code system} 层，纯逻辑、可单测）不依赖引擎层。
+     *
+     * <p>返回的是**词序列**而不是布尔值：界面要如实显示"被拆成了哪几个字"，
+     * 而拆法（哪些字、什么顺序）由引擎决定。让界面自己再拆一遍就会有两份实现，
+     * 迟早不一致。
      *
      * <p>**只有唤醒词走这条路。** 结束词不拆字：它的后果是"立刻停止录音"，
      * 而单字在正常说话里出现得太频繁，代价太大（判断在
      * {@code VoskKeywordDetector} 的构造函数里）。
+     *
+     * @return 拆开后的 token 序列；不可用（或只有 1 个 token）时返回空列表
      */
     @FunctionalInterface
     public interface SpellCheck {
-        boolean canSpell(String word);
+        java.util.List<String> spell(String word);
     }
 
     /**
@@ -60,11 +66,42 @@ public final class MicValidator {
      * @param spelled 该项整体不在词表内，但**逐字都在**——即它其实能用（被拆成单字序列）。
      *                留着它是因为消息完全不同：不该说"永远不会被识别到"，
      *                而该告诉用户"要用它就得逐字说清楚"。
+     * @param tokens  拆开后的单字序列（仅 {@code spelled} 时有意义）。带着真实 token
+     *                而不是让界面自己去拆一遍：拆法（哪些字、什么顺序）由
+     *                {@code engine.WakePhrase} 决定，界面重算就会有两份实现。
      */
-    public record Problem(String field, String word, String suggestion, boolean spelled) {
+    public record Problem(String field, String word, String suggestion, boolean spelled,
+            List<String> tokens) {
+
+        public Problem {
+            tokens = tokens == null ? List.of() : List.copyOf(tokens);
+        }
 
         public Problem(String field, String word, String suggestion) {
-            this(field, word, suggestion, false);
+            this(field, word, suggestion, false, List.of());
+        }
+
+        public Problem(String field, String word, String suggestion, boolean spelled) {
+            this(field, word, suggestion, spelled, List.of());
+        }
+
+        /**
+         * 一行放得下的短版本，供设置窗口的固定高度状态标签使用。
+         *
+         * <p>**必须存在**：状态标签是按固定尺寸排版的（让文字撑开布局会让窗口跳动），
+         * 而完整说明有 555px 宽、标签只有约 292px —— 实测被 Swing 截成
+         * 「唤醒词「飞瑞」整体不在词表内，已...」，用户恰恰看不到"被拆成了哪几个字"，
+         * 而那正是这条提示唯一要说的事。完整说明走 tooltip。
+         */
+        public String brief() {
+            if (spelled) {
+                return tokens.isEmpty()
+                        ? field + "「" + word + "」已按单字拆开使用"
+                        : field + "「" + word + "」已拆成单字 " + tokens.stream()
+                                .map(t -> "「" + t + "」")
+                                .collect(java.util.stream.Collectors.joining());
+            }
+            return field + "「" + word + "」不在词表内，不会被识别到";
         }
 
         public String describe() {
@@ -153,6 +190,12 @@ public final class MicValidator {
             String field = e.getKey();
             String word = e.getValue() == null ? "" : e.getValue().trim();
             if (word.isEmpty()) {
+                // **结束词空着是合法的**（表示不用结束词），不是"漏填"。
+                // 把它报成问题会与 AppConfig.validate() 放开的那条自相矛盾：
+                // 配置层说可以，词表层说不行，用户看到的是"改了没反应"。
+                if (com.talkinglive.core.WordSuggestions.FIELD_END.equals(field)) {
+                    continue;
+                }
                 problems.add(new Problem(field, "(空)", firstSuggestion(field)));
                 continue;
             }
@@ -169,12 +212,14 @@ public final class MicValidator {
                 continue;
             }
             // 整体不在表内，但可以逐字拼（只有唤醒词允许）。这类词**能用**，
-            // 所以不进 problems——只在下面 message 里给一句用法提示。
+            // 所以不进 problems——只在 spelled 里留一条用法提示。
             if (spellCheck != null
-                    && com.talkinglive.core.WordSuggestions.FIELD_WAKE.equals(field)
-                    && safeSpellCheck(spellCheck, word)) {
-                spelled.add(new Problem(field, word, null, true));
-                continue;
+                    && com.talkinglive.core.WordSuggestions.FIELD_WAKE.equals(field)) {
+                List<String> tokens = safeSpellCheck(spellCheck, word);
+                if (tokens.size() > 1) {
+                    spelled.add(new Problem(field, word, null, true, tokens));
+                    continue;
+                }
             }
             problems.add(new Problem(field, word, firstSuggestion(field)));
         }
@@ -195,11 +240,12 @@ public final class MicValidator {
      * 已经确知不在表内了，按不合法处理是正确且安全的方向（比放行一个
      * 可能失效的配置好）。
      */
-    private static boolean safeSpellCheck(SpellCheck spellCheck, String word) {
+    private static List<String> safeSpellCheck(SpellCheck spellCheck, String word) {
         try {
-            return spellCheck.canSpell(word);
+            List<String> tokens = spellCheck.spell(word);
+            return tokens == null ? List.of() : tokens;
         } catch (RuntimeException e) {
-            return false;
+            return List.of();
         }
     }
 

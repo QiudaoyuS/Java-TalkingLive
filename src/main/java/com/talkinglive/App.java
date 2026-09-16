@@ -125,13 +125,13 @@ public final class App {
     private volatile boolean paused;
     private volatile MicValidator.Result wordCheck;
     /**
-     * 上一次配置保存**成功**时想告诉用户的话；null 表示无话可说。
+     * 上一次配置保存**成功**时想告诉用户的事；null 表示无话可说。
      *
      * <p>目前只有一个来源：唤醒词整体不在词表内、被逐字拆成了单字序列。
      * 它必须与"失败原因"分开走——合在一起会让每次保存都显示"修改被拒绝"，
      * 正好把事情说反（功能是可用的）。
      */
-    private volatile String wakeNotice;
+    private volatile MicValidator.Problem wakeNotice;
     private volatile String micError;
     private volatile String lastInjectionError;
 
@@ -470,7 +470,8 @@ public final class App {
         try {
             wordCheck = MicValidator.validate(voskModel::findWord,
                     wakeEndPairs(config.wakeWord(), config.endWord()),
-                    word -> WakePhrase.resolve(voskModel::findWord, word).isPresent());
+                    word -> WakePhrase.resolve(voskModel::findWord, word)
+                        .map(WakePhrase::tokens).orElse(java.util.List.of()));
             if (!wordCheck.ok()) {
                 String msg = wordCheck.message();
                 log.error("词表校验失败：{}", msg.replace("\n", " / "));
@@ -821,10 +822,21 @@ public final class App {
                 if (previewBar == null) {
                     return;
                 }
-                previewBar.render("", "", "听写中 · 说「" + config.endWord() + "」或静音 "
-                        + config.silenceSeconds() + " 秒结束", anchorPoint());
+                // 提示语必须跟着"有没有结束词"变：没有结束词时还说「说「」或静音…」
+                // 会让用户以为自己漏配了（结束词是可选项，见 AppConfig.validate）。
+                previewBar.render("", "", listeningHint(), anchorPoint());
                 foreground.ignore(Win32WindowStyles.hwndOf(previewBar));
             });
+        }
+
+        /** 听写中的收尾提示；按"有没有结束词"给不同说法。 */
+        private String listeningHint() {
+            String silence = "静音 " + config.silenceSeconds() + " 秒";
+            String end = config.endWord();
+            if (end.isBlank()) {
+                return "听写中 · " + silence + "后自动结束";
+            }
+            return "听写中 · 说「" + end + "」或" + silence + "结束";
         }
 
         /**
@@ -1353,21 +1365,27 @@ public final class App {
         } catch (AppConfig.ConfigException e) {
             return e.getMessage();
         }
+        // 合法但可能意外的组合（例如结束词留空 + 静音也关着）。**只记日志不拦**：
+        // 那是用户有权做的选择，拦住就成了新的"限制"。日志会进诊断窗口。
+        for (String w : candidate.warnings()) {
+            log.warn("配置提醒：{}", w);
+        }
         // 词表校验（附录 C）：只有在模型可用时才能查，查不了不阻止保存但会提示。
         if (voskModel != null) {
             try {
                 MicValidator.Result r = MicValidator.validate(voskModel::findWord,
                         wakeEndPairs(candidate.wakeWord(), candidate.endWord()),
-                        word -> WakePhrase.resolve(voskModel::findWord, word).isPresent());
+                        word -> WakePhrase.resolve(voskModel::findWord, word)
+                        .map(WakePhrase::tokens).orElse(java.util.List.of()));
                 wordCheck = r;
                 if (!r.ok()) {
                     return r.message();
                 }
                 // 唤醒词被逐字拆开时不是错误，但要如实告诉用户拆成了哪几个字。
                 // 走 wakeNotice 而不是返回值：返回值非 null 会被当成失败。
-                if (r.message() != null) {
-                    wakeNotice = r.message();
-                    log.info("{}", wakeNotice.replace("\n", " / "));
+                if (!r.spelled().isEmpty()) {
+                    wakeNotice = r.spelled().get(0);
+                    log.info("{}", wakeNotice.describe());
                 }
             } catch (RuntimeException e) {
                 log.warn("词表校验无法执行，配置仍被保存：{}", e.toString());
@@ -1431,7 +1449,7 @@ public final class App {
         }
 
         @Override
-        public String lastApplyNotice() {
+        public MicValidator.Problem lastApplyNotice() {
             return App.this.wakeNotice;
         }
 
@@ -1517,7 +1535,11 @@ public final class App {
             return Boolean.FALSE;
         }
         try {
-            return WakePhrase.resolve(voskModel::findWord, word).isPresent();
+            // 必须**真的被拆开**（token 多于一个）才算「可拆」：只有一个 token 说明
+            // 整词命中，那属于普通情况，不该在界面上显示成警告。
+            return WakePhrase.resolve(voskModel::findWord, word)
+                    .map(p -> p.tokens().size() > 1)
+                    .orElse(false);
         } catch (RuntimeException e) {
             log.warn("拆字判定失败：{}", e.toString());
             return null;
@@ -1603,6 +1625,13 @@ public final class App {
 
     private void addWordLine(List<StatusLine> out, String field, String word) {
         String key = "词表:" + field;
+        // 空结束词 = 用户选择不用结束词，是**正常配置**，不是"不在词表内"的故障。
+        // 早期这里会把它报成红项，诊断窗口看上去像坏了（实测发现）。
+        if (word == null || word.isBlank()) {
+            out.add(new StatusLine(key, "未启用", true,
+                    "留空表示不用它收尾；段落改由静音超时或切换窗口结束"));
+            return;
+        }
         if (voskModel == null) {
             out.add(new StatusLine(key, word, false, "模型不可用，无法校验"));
             return;

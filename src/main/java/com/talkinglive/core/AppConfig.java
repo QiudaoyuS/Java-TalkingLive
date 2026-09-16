@@ -296,6 +296,28 @@ public final class AppConfig {
     // ------------------------------------------------------------ 校验
 
     /**
+     * 合法但可能让用户意外的组合，用一句话说明白。
+     *
+     * <p>与 {@link #validate()} 的区别：那些是**不合法**（必须拒绝），这些是
+     * **能用但结果可能不是用户想要的**（要说清楚，但绝不能拦）。混在一起会让
+     * 用户以为配置错了。
+     *
+     * <p>目前只有一条：结束词留空 + 静音超时关闭。这是完全合法的选择
+     * （本产品的定位就是"全程语音操控"，用户有权不要这两种收尾方式），
+     * 但此时**只剩单段时长上限**兜底 —— 长了会被从中间截断落字。
+     * 不说的话，用户会以为是软件把话吃了。
+     */
+    public List<String> warnings() {
+        List<String> out = new ArrayList<>();
+        if (endWord.isBlank() && silenceSeconds == 0) {
+            out.add("结束词留空、静音超时也关着 —— 此时只能由「单段最长时长」（"
+                    + maxSegmentSeconds + " 秒）收尾，超过就会被从中间截断并落字。"
+                    + "建议至少保留一种收尾方式。");
+        }
+        return out;
+    }
+
+    /**
      * 配置合法性校验（不含词表校验——那需要引擎，见 {@code system.MicValidator}）。
      *
      * @throws ConfigException 第一条不通过的规则
@@ -305,9 +327,12 @@ public final class AppConfig {
         if (wakeWord.isBlank()) {
             problems.add("唤醒词不能为空");
         }
-        if (endWord.isBlank()) {
-            problems.add("结束词不能为空");
-        }
+        // 结束词**允许为空** —— 空值表示"不用结束词"，段落改由静音超时或切换窗口收尾。
+        //
+        // 早期这里要求非空，逻辑上站不住：结束词是三种收尾方式之一，把它设成必填
+        // 就等于强迫用户接受一种自己不需要的收尾方式（而且他没法用按钮，见 §2.2
+        // 「全程语音操控」）。配套的三处放开：VoskKeywordDetector 不再因空结束词
+        // 抛错、MicValidator 跳过它、预览条不再显示「说「」或静音」。
         if (!wakeWord.isBlank() && wakeWord.equals(endWord)) {
             problems.add("唤醒词与结束词不能相同（会立刻自我结束）");
         }

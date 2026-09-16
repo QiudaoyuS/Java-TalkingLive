@@ -90,11 +90,33 @@ class AppConfigTest {
         }
 
         @Test
-        @DisplayName("空结束词被拒绝")
-        void emptyEndWordRejected() {
+        @DisplayName("空结束词**被接受** —— 结束词是选项，不是必填")
+        void emptyEndWordAccepted() {
+            // 用户指出：「可以有结束词，也意味着可以没有结束词，现在的限制是不能没有」。
+            // 结束词只是三种收尾方式之一（另两种是静音超时、切换窗口），设成必填
+            // 等于强迫用户接受一种自己不需要的收尾方式。
+            // 旧行为（要求非空）的测试就在这里，已按新行为反转。
             AppConfig c = new AppConfig();
             c.setEndWord("");
-            assertThrows(ConfigException.class, c::validate);
+            c.validate(); // 不抛异常
+            assertEquals("", c.endWord());
+            // 空白也算空（setEndWord 里 trim 过），同样接受
+            c.setEndWord("   ");
+            c.validate();
+            assertEquals("", c.endWord());
+        }
+
+        @Test
+        @DisplayName("空结束词与空唤醒词不同：唤醒词仍然必填")
+        void emptyWakeWordStillRejectedWhenEndBlank() {
+            // 两者别一起放开：没有唤醒词就没有任何方式"开始"听写，
+            // 而悬浮球虽然能手动开始，但本产品的定位是全程语音操控。
+            AppConfig c = new AppConfig();
+            c.setWakeWord("");
+            c.setEndWord("");
+            ConfigException e = assertThrows(ConfigException.class, c::validate);
+            assertTrue(e.getMessage().contains("唤醒词"), e.getMessage());
+            assertFalse(e.getMessage().contains("结束词"), e.getMessage());
         }
 
         @Test
@@ -147,8 +169,51 @@ class AppConfigTest {
             c.setSilenceSeconds(99);
             ConfigException e = assertThrows(ConfigException.class, c::validate);
             assertTrue(e.getMessage().contains("唤醒词"));
-            assertTrue(e.getMessage().contains("结束词"));
             assertTrue(e.getMessage().contains("静音"));
+            // 空结束词**不再是**问题（它是选项，见 emptyEndWordAccepted）
+            assertFalse(e.getMessage().contains("结束词不能为空"), e.getMessage());
+        }
+    }
+
+    @Nested
+    @DisplayName("合法但可能意外的组合（提醒，不拦）")
+    class Warnings {
+
+        @Test
+        @DisplayName("默认配置没有提醒")
+        void defaultsAreQuiet() {
+            assertTrue(new AppConfig().warnings().isEmpty());
+        }
+
+        @Test
+        @DisplayName("结束词留空**本身**不提醒（那是用户的选择）")
+        void blankEndWordAloneIsQuiet() {
+            AppConfig c = new AppConfig();
+            c.setEndWord("");
+            assertTrue(c.warnings().isEmpty(), "只留空结束词不该唠叨");
+        }
+
+        @Test
+        @DisplayName("结束词留空 + 静音也关着 → 提醒只剩单段上限兜底")
+        void noEndWordAndNoSilenceWarns() {
+            // 这个组合会让 60 秒上限成为唯一收尾，长句被从中间截断落字。
+            // 不说的话用户会以为软件把话吃了。
+            AppConfig c = new AppConfig();
+            c.setEndWord("");
+            c.setSilenceSeconds(0);
+            List<String> w = c.warnings();
+            assertEquals(1, w.size(), w.toString());
+            assertTrue(w.get(0).contains("单段最长时长"), w.get(0));
+            // 关键：它是提醒不是拒绝
+            c.validate();
+        }
+
+        @Test
+        @DisplayName("只有静音关着也不提醒（结束词还能收尾）")
+        void silenceOffAloneIsQuiet() {
+            AppConfig c = new AppConfig();
+            c.setSilenceSeconds(0);
+            assertTrue(c.warnings().isEmpty());
         }
     }
 

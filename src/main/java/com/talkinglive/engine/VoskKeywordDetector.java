@@ -96,13 +96,20 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         // 结束词：**故意不拆字**。拆字会放宽匹配（每个字都常见），而结束词命中的
         // 后果是"立刻停止录音"——一个常见字（比如「结」「束」）被随口说出来就会
         // 误停止，代价比"结束词得换个说法"大得多。整词严格匹配。
-        this.endPhrase = this.endWord.isEmpty()
-                ? null
-                : (model.findWord(this.endWord)
-                        ? new WakePhrase(this.endWord, java.util.List.of(this.endWord))
-                        : null);
-        if (this.endPhrase == null) {
-            unknown.put("结束词", this.endWord.isEmpty() ? "（空）" : this.endWord);
+        //
+        // **空结束词是合法的**：表示用户不想用结束词，段落改由静音超时或切换窗口
+        // 收尾。这时语法里就只有唤醒词 + [unk]，检测器永远不会报 END 命中 ——
+        // 这是一条明确的降级路径，不是漏配。
+        if (this.endWord.isEmpty()) {
+            this.endPhrase = null;
+            log.info("未配置结束词 —— 本段只能由静音超时或切换窗口收尾（不是降级失败，是用户的选择）");
+        } else {
+            this.endPhrase = model.findWord(this.endWord)
+                    ? new WakePhrase(this.endWord, java.util.List.of(this.endWord))
+                    : null;
+            if (this.endPhrase == null) {
+                unknown.put("结束词", this.endWord);
+            }
         }
 
         if (!unknown.isEmpty()) {
@@ -110,7 +117,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         }
 
         String grammar = buildGrammar(
-                this.wakePhrase.tokens(), this.endPhrase.tokens());
+                this.wakePhrase.tokens(),
+                this.endPhrase == null ? java.util.List.of() : this.endPhrase.tokens());
         if (!model.supportsRuntimeGrammar()) {
             // 受限语法是唤醒词可自定义的前提（附录 B.2：只有小模型支持运行时改词表）。
             // 走到这里说明装的是大模型或词表静态的模型 —— 必须明确拒绝，不能假装能用。

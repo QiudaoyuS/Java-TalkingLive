@@ -1,6 +1,7 @@
 package com.talkinglive.ui;
 
 import com.talkinglive.core.AppConfig;
+import com.talkinglive.system.MicValidator;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -83,15 +84,19 @@ public class SettingsWindow extends JFrame {
         String applyConfig(AppConfig candidate);
 
         /**
-         * 上一次 {@link #applyConfig} **成功**时想要告诉用户的话；没有则返回 null。
+         * 上一次 {@link #applyConfig} **成功**时想要告诉用户的事；没有则返回 null。
          *
          * <p>为什么需要一条独立于返回值的通道：有一种"成功了但用户必须知道"的情况——
          * 唤醒词整体不在词表内、被逐字拆成了单字序列（见 {@code engine.WakePhrase}）。
          * 这既不是错误（功能可用，不该显示红 ✗），也不该被静默吞掉
          * （用户不知道要被听成哪几个字，出问题时无从排查）。
          * 早期把它并进返回值，结果是**每次都显示"修改被拒绝"**，正好把事情说反了。
+         *
+         * <p>返回 {@code Problem} 而不是字符串：界面需要用它的 {@code brief()} 显示一行
+         * 短版本、用 {@code describe()} 做 tooltip。实测完整说明有 555px 宽，而状态标签
+         * 只有约 292px，直接用会被截成「…已...」，用户恰恰看不到"拆成了哪几个字"。
          */
-        default String lastApplyNotice() {
+        default MicValidator.Problem lastApplyNotice() {
             return null;
         }
 
@@ -335,8 +340,8 @@ public class SettingsWindow extends JFrame {
             showProblem(err);
             log.info("配置改动被拒绝：{}", err.replace("\n", " / "));
         } else {
-            String notice = host.lastApplyNotice();
-            if (notice == null || notice.isBlank()) {
+            MicValidator.Problem notice = host.lastApplyNotice();
+            if (notice == null) {
                 showSaved();
             } else {
                 // 成功了，但有话要说（唤醒词被逐字拆开）。不能显示成错误：
@@ -365,39 +370,61 @@ public class SettingsWindow extends JFrame {
      * 否则会出现"说了没反应"而以为自己配错了。
      *
      * <p>**不自动淡出**：它携带的是行动指引（该怎么念），用户需要能反复看。
+     *
+     * <p>标签用 {@code brief()} 的短版本，完整说明挂 tooltip：实测完整版有 555px 宽，
+     * 而状态标签只有约 292px，直接用会被 Swing 截成「…已...」，用户看不到重点。
      */
-    private void showNotice(String notice) {
+    private void showNotice(MicValidator.Problem notice) {
         savedTimer.stop();
         problemLabel.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
-        problemLabel.setText(shortNotice(notice));
+        problemLabel.setText(fittingText(notice.brief()));
         problemLabel.setForeground(Theme.WARN);
-        problemLabel.setToolTipText(notice);
+        problemLabel.setToolTipText(notice.describe());
     }
 
     /**
-     * 把提示压缩到一行能放下的长度。
+     * 把文本截到状态标签放得下的长度。
      *
-     * <p>{@code problemLabel} 是按固定高度排版的（见字段注释：让文字撑开布局会让
-     * 窗口跳动），所以放不下整段话。原文不丢——它整段挂在 tooltip 上，
-     * 鼠标停上去就能看到完整解释。
+     * <p>这里是**按实际字体的像素宽度量**，不是按字符数估算 —— 同一个字符串在
+     * 雅黑与 Segoe UI 下宽度能差 1.5 倍（实测同一条提示 555px 对 361px），
+     * 按字符数猜必然在某个字体或 DPI 下失手，而失手的表现就是用户又看到一个省略号。
+     *
+     * <p>截断时在**码点**边界切，避免把代理对切成半个字。
      */
-    private static String shortNotice(String notice) {
-        String one = notice.replace("\n", "  ").trim();
-        // 取到第一个句号/分号为止：提示正文的第一句就已经说清了"你输入的词被怎么处理了"。
-        for (String stop : new String[] {"。", "；", ";"}) {
-            int i = one.indexOf(stop);
-            if (i > 0) {
-                return one.substring(0, i);
-            }
+    private String fittingText(String text) {
+        java.awt.FontMetrics fm = problemLabel.getFontMetrics(problemLabel.getFont());
+        if (fm == null) {
+            return text;
         }
-        return one.length() <= 42 ? one : one.substring(0, 42) + "…";
+        // 留 8px 余量：标签有内边距，且不同 DPI 下取整会再吃掉一点。
+        int limit = Math.max(40, problemLabel.getPreferredSize().width
+                - problemLabel.getInsets().left - problemLabel.getInsets().right - 8);
+        if (fm.stringWidth(text) <= limit) {
+            return text;
+        }
+        int[] cps = text.codePoints().toArray();
+        StringBuilder sb = new StringBuilder();
+        for (int cp : cps) {
+            String next = sb.toString() + new String(Character.toChars(cp)) + "…";
+            if (fm.stringWidth(next) > limit) {
+                break;
+            }
+            sb.appendCodePoint(cp);
+        }
+        return sb.length() == 0 ? text : sb + "…";
     }
 
-    /** 显示失败原因（面向用户，保留到下一次改动）。 */
+    /**
+     * 显示失败原因（面向用户，保留到下一次改动）。
+     *
+     * <p>同样要过 {@link #fittingText}：拒绝原因常常是词表校验那种长句
+     * （实测「本段结束」那条在雅黑下 344px，超出标签宽度），不截的话用户看到的
+     * 是省略号而不是问题本身。完整文本始终挂在 tooltip 上。
+     */
     private void showProblem(String err) {
         savedTimer.stop();
         problemLabel.setIcon(Icons.of(Icons.Kind.CROSS, Icons.SMALL));
-        problemLabel.setText(err.replace("\n", "  "));
+        problemLabel.setText(fittingText(err.replace("\n", "  ")));
         problemLabel.setForeground(Theme.ERR);
         problemLabel.setToolTipText(err);
     }
