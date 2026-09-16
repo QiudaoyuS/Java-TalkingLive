@@ -290,8 +290,9 @@ public final class App {
         loadEngines(opts);
 
         // ④ 系统
-        silence.setTimeoutSeconds(config.silenceSeconds());
+        silence.setTimeoutSeconds(config.effectiveSilenceSeconds());
         injector.setCharGapMillis(config.charGapMillis());
+        sm.setContinuousMode(config.continuousMode());
         foreground = new ForegroundWatcher((from, to) -> sm.handle(StateMachine.Event.FOREGROUND_CHANGED));
 
         // ⑤ 音频
@@ -459,7 +460,7 @@ public final class App {
         // 唤醒 / 结束词检测
         try {
             wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
-                    hit -> onKeywordHit(hit));
+                    config.stopWord(), hit -> onKeywordHit(hit));
             log.info("唤醒检测就绪：{}", wakeDetector.describe());
         } catch (IOException | RuntimeException e) {
             wakeDetectorError = e.getMessage();
@@ -610,9 +611,11 @@ public final class App {
             return;
         }
         log.info("命中{}词：{}", hit.kind() == WakeWordDetector.Kind.WAKE ? "唤醒" : "结束", hit.word());
-        sm.handle(hit.kind() == WakeWordDetector.Kind.WAKE
-                ? StateMachine.Event.WAKE_WORD
-                : StateMachine.Event.END_WORD);
+        sm.handle(switch (hit.kind()) {
+            case WAKE -> StateMachine.Event.WAKE_WORD;
+            case END -> StateMachine.Event.END_WORD;
+            case STOP -> StateMachine.Event.STOP_INPUT;
+        });
     }
 
     private void onPreviewText(SpeechRecognizer.Kind kind, String fullText) {
@@ -1209,8 +1212,13 @@ public final class App {
         // 词表校验（附录 C）：只有在模型可用时才能查，查不了不阻止保存但会提示。
         if (voskModel != null) {
             try {
-                MicValidator.Result r = MicValidator.validate(voskModel::findWord,
-                        candidate.wakeWord(), candidate.endWord());
+                java.util.Map<String, String> pairs = new java.util.LinkedHashMap<>();
+                pairs.put("唤醒词", candidate.wakeWord());
+                pairs.put("结束词", candidate.endWord());
+                if (!candidate.stopWord().isBlank()) {
+                    pairs.put("退出词", candidate.stopWord());
+                }
+                MicValidator.Result r = MicValidator.validate(voskModel::findWord, pairs);
                 wordCheck = r;
                 if (!r.ok()) {
                     return r.message();
@@ -1221,10 +1229,12 @@ public final class App {
         }
         // 热更新：静音秒数、词表（需要重建识别器）
         boolean wordsChanged = !candidate.wakeWord().equals(config.wakeWord())
-                || !candidate.endWord().equals(config.endWord());
+                || !candidate.endWord().equals(config.endWord())
+                || !candidate.stopWord().equals(config.stopWord());
         this.config = candidate;
-        silence.setTimeoutSeconds(candidate.silenceSeconds());
+        silence.setTimeoutSeconds(candidate.effectiveSilenceSeconds());
         injector.setCharGapMillis(candidate.charGapMillis());
+        sm.setContinuousMode(candidate.continuousMode());
         if (wordsChanged) {
             rebuildKeywordDetector();
             rebuildPostProcess();

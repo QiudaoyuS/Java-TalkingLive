@@ -73,7 +73,17 @@ public final class StateMachine {
         /** 内部：精化完成，可以注入。 */
         REFINE_DONE,
         /** 内部：注入与自动发送都已完成。 */
-        INJECTED
+        INJECTED,
+        /**
+         * 听到**退出词**（连续模式）。
+         *
+         * <p>与 {@link #END_WORD} 的区别：结束词只结束**当前这一段**，
+         * 退出词结束**整个聆听会话**（回到待唤醒）。
+         *
+         * <p>它的存在是为了「全程语音操控」——有些用户无法按按钮/用鼠标，
+         * 所以「停止听写」必须有语音通路，不能只放在菜单里。
+         */
+        STOP_INPUT
     }
 
     /** 本段结束的原因，决定「要不要真的注入」。 */
@@ -89,11 +99,20 @@ public final class StateMachine {
         /**
          * 前台窗口在录音期间变了。
          *
-         * <p>原设计（§7）规定这条路径「结束本段但**放弃注入**」。实测发现那等于
-         * 把用户刚说的一整段话丢掉——而切窗口往往只是无意的。现在改为照常提交，
+         * <p>原设计（§7）规定这条路径「结束本段但**放弃注入**」。
+         * 实测发现那等于把用户刚说的一整段话丢掉，而切窗口往往只是无意的
+         * （输入法候选框、通知、或手滑点别处）。现在改为**照常提交**，
          * 由注入层尝试把焦点还原回目标（{@code WindowsTextInjector.inject}）。
          */
-        FOREGROUND_CHANGED("前台窗口变化");
+        FOREGROUND_CHANGED("前台窗口变化"),
+
+        /**
+         * 听到**退出词**（连续模式）：结束当前段并结束整个聆听会话。
+         *
+         * <p>单独一个原因而不是复用 {@link #END_WORD}，是因为两者对「接下来去哪」
+         * 的答案不同：结束词回到聆听继续下一段，退出词回到待唤醒。
+         */
+        STOP_WORD("听到退出词");
 
         private final String display;
 
@@ -166,6 +185,23 @@ public final class StateMachine {
 
     private State state = State.IDLE;
     private boolean paused = false;
+
+    /**
+     * **连续输入模式**开关。
+     *
+     * <p>开启后：唤醒一次进入聆听，每段提交完**回到 LISTENING 继续听**，
+     * 直到说退出词（{@link Event#STOP_INPUT}）或长时间无语音才回 IDLE。
+     *
+     * <p>关闭时保持原有契约：一轮一句，每句都要重新喊唤醒词。
+     * 默认关闭，这样老用户的行为预期不变。
+     */
+    private boolean continuousMode = false;
+
+    /** 连续模式下本次聆听会话已落下的段落数（用于提示与日志）。 */
+    private int continuousSegments = 0;
+
+    /** 本段提交完成后是否回到 IDLE（收到退出词时置位）。 */
+    private boolean exitAfterCommit = false;
     private boolean foregroundChanged = false;
     private long generation = 0;
     /** 当前提交中的段落代数与结束原因；{@link Event#REFINE_DONE} 时用来组装 CommitContext。 */
@@ -264,6 +300,7 @@ public final class StateMachine {
                 case RESUME -> onResume(event);
                 case REFINE_DONE -> onRefineDone(event);
                 case INJECTED -> onInjected(event);
+                case STOP_INPUT -> onStopInput(event);
             }
         }
     }
@@ -279,6 +316,7 @@ public final class StateMachine {
             case IDLE -> {
                 foregroundChanged = false;
                 generation++;
+                resetSessionState();
                 transition(State.LISTENING, e);
                 notifyStart();
             }
@@ -289,6 +327,62 @@ public final class StateMachine {
         }
     }
 
+    /**
+     * 设置连续输入模式。
+     *
+     * <p>运行期可改（设置窗口），但**只在 IDLE 时立即生效**：会话中途切换会让
+     * 「这一句结束之后回哪里」变得含糊，所以中途改只影响下一次进入。
+     */
+    public synchronized void setContinuousMode(boolean on) {
+        if (continuousMode != on) {
+            log.info("连续输入模式：{}", on ? "开启（唤醒一次连续落字）" : "关闭（一轮一句）");
+        }
+        this.continuousMode = on;
+    }
+
+    public synchronized boolean continuousMode() {
+        return continuousMode;
+    }
+
+    /** 本次聆听会话已落下的段落数。 */
+    public synchronized int continuousSegments() {
+        return continuousSegments;
+    }
+
+    /**
+     * 听到退出词：结束整个聆听会话，回到待唤醒。
+     *
+     * <p>与结束词的区别见 {@link Event#STOP_INPUT}。它存在的意义是
+     * **全程语音操控**——有些用户无法按按钮，所以「停止听写」必须有语音通路。
+     *
+     * <p>若当前正在录一段，会**先把这段提交掉**再退出：用户说「…说完了，完毕」时，
+     * 「说完了」那部分内容不该被丢掉。
+     */
+    /**
+     * 复位「一次聆听会话」的状态。
+     *
+     * <p>包括：已落段计数、「提交后退出」标志。唤醒进入会话时、以及会话结束时都要调，
+     * 这样任何一次会话都不会带上一次会话的残留。
+     */
+    private void resetSessionState() {
+        continuousSegments = 0;
+        exitAfterCommit = false;
+    }
+    private void onStopInput(Event e) {
+        switch (state) {
+            case IDLE -> ignore(e, "待唤醒状态下听到退出词，忽略");
+            case LISTENING -> {
+                // 先提交当前段，标记「提交后回 IDLE」
+                exitAfterCommit = true;
+                endSegment(EndReason.STOP_WORD, e);
+            }
+            case COMMITTING -> {
+                // 已经在提交了：只需记住提交完不要继续聆听
+                exitAfterCommit = true;
+                log.info("收到退出词，本段提交完成后将回到待唤醒");
+            }
+        }
+    }
     private void onToggle(Event e) {
         if (paused) {
             ignore(e, "已暂停监听，忽略手动听写");
@@ -366,6 +460,10 @@ public final class StateMachine {
     }
 
     private void onCancel(Event e) {
+        // 取消是「结束整个聆听会话」，不只是丢掉当前段：
+        // 连续模式下的段计数与「提交后退出」标志都必须复位，
+        // 否则会在下一次会话里带出上一次的残留状态。
+        resetSessionState();
         switch (state) {
             case IDLE -> ignore(e, "待唤醒状态下按 Esc，忽略");
             case LISTENING -> {
@@ -432,6 +530,21 @@ public final class StateMachine {
             ignore(e, "不在提交中，忽略注入完成");
             return;
         }
+        // 只有连续模式下这个计数才有意义（关闭时每段都是独立会话，计数恒 0）。
+        if (continuousMode) {
+            continuousSegments++;
+        }
+        // 连续模式且用户没有要求退出 → 回到 LISTENING 继续听下一段。
+        // 这就是「唤醒一次、连续落字」的核心：不再要求每句重喊唤醒词。
+        if (continuousMode && !exitAfterCommit && !paused) {
+            foregroundChanged = false;
+            generation++;
+            transition(State.LISTENING, e);
+            notifyStart();
+            log.info("连续输入：第 {} 段已落字，继续聆听（说退出词可结束）", continuousSegments);
+            return;
+        }
+        resetSessionState();
         transition(State.IDLE, e);
     }
 

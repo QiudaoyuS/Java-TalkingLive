@@ -104,6 +104,8 @@ public class SettingsWindow extends JFrame {
     private JCheckBox autoSendBox;
     private JCheckBox sendOnSilenceBox;
     private JCheckBox itnBox;
+    private JCheckBox continuousBox;
+    private JTextField stopWordField;
     private JComboBox<String> sendKeyBox;
     private AutoCloseable logSubscription;
 
@@ -246,6 +248,31 @@ public class SettingsWindow extends JFrame {
         row++;
         c.gridx = 0; c.gridy = row; c.gridwidth = 4; p.add(itnBox, c);
         c.gridwidth = 1;
+
+        // 连续输入模式：唤醒一次后持续落字。默认关闭，保持旧契约不变。
+        // 放在这里而不是藏进 JSON，因为它是「说长内容」的主要可用性开关。
+        row++;
+        c.gridx = 0; c.gridy = row; c.gridwidth = 4;
+        continuousBox = check("连续输入模式：唤醒一次，连续落字（说退出词才结束）",
+                cfg.continuousMode(), v -> {
+                    cfg.setContinuousMode(v);
+                    commit(cfg);
+                });
+        p.add(continuousBox, c);
+        c.gridwidth = 1;
+
+        row++;
+        c.gridx = 0; c.gridy = row; p.add(label("退出词"), c);
+        c.gridx = 1;
+        stopWordField = field(cfg.stopWord(), 6);
+        p.add(stopWordField, c);
+        c.gridx = 2; c.gridwidth = 2;
+        p.add(hint("说它结束整个会话（需在词表内；留空则不启用语音退出）"), c);
+        c.gridwidth = 1;
+        bind(stopWordField, v -> {
+            cfg.setStopWord(v);
+            commit(cfg);
+        });
 
         // 字符注入间隔：微信/QQ 这类自绘输入框灌太快会丢字，需要放慢。
         // 这是实测出来的可调项（见 WindowsTextInjector.setCharGapMillis），

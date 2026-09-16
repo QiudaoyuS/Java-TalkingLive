@@ -19,6 +19,28 @@ public final class AppConfig {
     public static final int MIN_SILENCE_SECONDS = 0;
     public static final int MAX_SILENCE_SECONDS = 15;
 
+    /**
+     * **连续输入模式**下的默认静音阈值（秒）。
+     *
+     * <p>为什么和单段模式不同：单段模式下静音超时是「兜底」（用户忘了说结束词时的保险），
+     * 5 秒合理；连续模式下静音**就是分段依据**，5 秒会让人觉得「怎么还没落字」。
+     * 3 秒是「说完一句的自然停顿」与「想一下再继续说」之间的折中。
+     *
+     * <p>想一下的时候仍可以说结束词【立刻】结束当前段——静音阈值是兜底、
+     * 结束词是明确手段，两者互补（纯静音会把思考切成两段，纯结束词又要用户时刻记得说）。
+     */
+    public static final int DEFAULT_CONTINUOUS_SILENCE_SECONDS = 3;
+
+    /**
+     * 连续输入模式的**退出词**默认值。
+     *
+     * <p>存在的理由：本产品的目标是**全程语音操控**（有些用户无法使用鼠标/按键），
+     * 所以「停止听写」这件事不能只放在悬浮球菜单里，必须有语音通路。
+     *
+     * <p>取「完毕」而不是「结束」：附录 B.1 实测两者都在词表内，但「结束」太常用、
+     * 容易在正文里被误命中；「完毕」两字独立、误触发率低。
+     */
+    public static final String DEFAULT_STOP_WORD = "完毕";
     /** 发送按键（附录 A）。 */
     public enum SendKey {
         ENTER("Enter"),
@@ -138,6 +160,37 @@ public final class AppConfig {
     private boolean itn = true;
 
     /**
+     * **连续输入模式**：唤醒一次后持续聆听，不再要求每句重喊唤醒词。
+     *
+     * <p>默认**关闭**（保持原有「一轮一句」契约不变，避免改变老用户的行为预期）。
+     *
+     * <p>开启后的契约：
+     * <pre>
+     *   说唤醒词 → 进入连续聆听 → 每说完一段（结束词 / 静音）就落一段字，并**继续聆听**
+     *           → 说退出词（{@link #DEFAULT_STOP_WORD}）才回到待唤醒
+     * </pre>
+     *
+     * <p>为什么需要它：说长内容（发一段微信、写一段笔记）时，逐句喊唤醒词
+     * 会把表达打断；对无法频繁操作的用户更是负担。
+     */
+    private boolean continuousMode = false;
+
+    /**
+     * 连续模式的退出词。空串表示不启用语音退出
+     * （此时只能用悬浮球/托盘菜单退出，或靠静音长时间无语音后自动退出）。
+     */
+    private String stopWord = DEFAULT_STOP_WORD;
+
+    /**
+     * 连续模式下「长时间无语音」自动退出待唤醒的秒数。
+     *
+     * <p>为什么还要这一层：用户说完就去做别的事了，忘了说退出词。
+     * 若不自动退出，麦克风会一直处于聆听状态（等于一直在录音），
+     * 既不礼貌也浪费资源。0 表示不自动退出。
+     */
+    private int continuousIdleSeconds = 60;
+
+    /**
      * 注入时**每个字符之间的间隔（毫秒）**。
      *
      * <p>为什么它是配置项而不是硬编码常量：不同目标程序对合成输入的耐受度差别很大。
@@ -230,6 +283,45 @@ public final class AppConfig {
         this.itn = v;
     }
 
+    /** 连续输入模式开关。见 {@link #continuousMode}。 */
+    public boolean continuousMode() {
+        return continuousMode;
+    }
+
+    public void setContinuousMode(boolean v) {
+        this.continuousMode = v;
+    }
+
+    /** 连续模式的退出词；空串表示不启用语音退出。 */
+    public String stopWord() {
+        return stopWord;
+    }
+
+    public void setStopWord(String v) {
+        this.stopWord = v == null ? "" : v.trim();
+    }
+
+    /** 连续模式下无语音自动退出待唤醒的秒数；0 表示不自动退出。 */
+    public int continuousIdleSeconds() {
+        return continuousIdleSeconds;
+    }
+
+    public void setContinuousIdleSeconds(int v) {
+        this.continuousIdleSeconds = v;
+    }
+
+    /**
+     * 本模式下实际生效的静音阈值（秒）。
+     *
+     * <p>连续模式有自己的默认值（{@value #DEFAULT_CONTINUOUS_SILENCE_SECONDS} 秒），
+     * 因为那时静音是分段依据而不是兜底。这样用户不必手动改两次配置。
+     */
+    public int effectiveSilenceSeconds() {
+        if (continuousMode && silenceSeconds == DEFAULT_SILENCE_SECONDS) {
+            return DEFAULT_CONTINUOUS_SILENCE_SECONDS;
+        }
+        return silenceSeconds;
+    }
     /** 注入时每个字符之间的间隔（毫秒）。见 {@link #charGapMillis}。 */
     public int charGapMillis() {
         return charGapMillis;
@@ -272,6 +364,13 @@ public final class AppConfig {
             problems.add("字符注入间隔必须在 " + MIN_CHAR_GAP_MILLIS + "–" + MAX_CHAR_GAP_MILLIS
                     + " 毫秒之间，实际是 " + charGapMillis);
         }
+        if (continuousIdleSeconds < 0 || continuousIdleSeconds > 3600) {
+            problems.add("连续模式无语音自动退出时长必须在 0–3600 秒之间（0 表示不自动退出），"
+                    + "实际是 " + continuousIdleSeconds);
+        }
+        if (continuousMode && !stopWord.isBlank() && stopWord.equals(wakeWord)) {
+            problems.add("连续模式的退出词不能与唤醒词相同");
+        }
         if (!problems.isEmpty()) {
             throw new ConfigException(String.join("；", problems));
         }
@@ -290,6 +389,9 @@ public final class AppConfig {
         m.put("maxSegmentSeconds", maxSegmentSeconds);
         m.put("itn", itn);
         m.put("charGapMillis", charGapMillis);
+        m.put("continuousMode", continuousMode);
+        m.put("stopWord", stopWord);
+        m.put("continuousIdleSeconds", continuousIdleSeconds);
         m.put("ball", ball.toJson());
         return m;
     }
@@ -316,6 +418,9 @@ public final class AppConfig {
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
         c.itn = JsonCodec.bool(m, "itn", true);
         c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
+        c.continuousMode = JsonCodec.bool(m, "continuousMode", false);
+        c.stopWord = JsonCodec.str(m, "stopWord", DEFAULT_STOP_WORD).trim();
+        c.continuousIdleSeconds = JsonCodec.intVal(m, "continuousIdleSeconds", 60);
         Object ballObj = m.get("ball");
         if (ballObj instanceof Map<?, ?> bm) {
             Map<String, Object> b = new LinkedHashMap<>();
