@@ -34,9 +34,6 @@ import java.util.regex.Pattern;
  */
 public final class HotwordCorrector implements TextPostProcessor {
 
-    /** 配置里一项替换的写法：{@code 说的词=想要的写法}。 */
-    private static final String PAIR_SEPARATOR = "=";
-
     /**
      * 连续单字母序列：至少两个单字母 token，允许中间是空格。
      *
@@ -52,19 +49,6 @@ public final class HotwordCorrector implements TextPostProcessor {
         // 保持插入顺序：多条规则命中同一段文本时，先配的先改（行为可预测）
         this.hotwords = hotwords == null ? new LinkedHashMap<>()
                 : new LinkedHashMap<>(hotwords);
-    }
-
-    /** 空表：只做字母拼合，不做替换。 */
-    public static HotwordCorrector lettersOnly() {
-        return new HotwordCorrector(Map.of());
-    }
-
-    public Map<String, String> hotwords() {
-        return Map.copyOf(hotwords);
-    }
-
-    public boolean isEmpty() {
-        return hotwords.isEmpty();
     }
 
     @Override
@@ -108,55 +92,6 @@ public final class HotwordCorrector implements TextPostProcessor {
             m.appendReplacement(sb, Matcher.quoteReplacement(joined));
         }
         m.appendTail(sb);
-        return sb.toString();
-    }
-
-    // ------------------------------------------------------------ 配置解析
-
-    /**
-     * 解析配置串：{@code "诶爱=AI, 皮迪艾夫=PDF"}。
-     *
-     * <p>容忍的分隔符：逗号、中文逗号、分号、换行——用户在 JSON 里写多行更自然。
-     * 格式不对的项**跳过而不是报错**：热词是锦上添花，不该让配置整体校验失败
-     * 而导致程序起不来（对比：唤醒词为空是致命错误，必须拒绝启动）。
-     *
-     * @return 可读的替换表；输入为空时返回空表
-     */
-    public static Map<String, String> parse(String spec) {
-        Map<String, String> out = new LinkedHashMap<>();
-        if (spec == null || spec.isBlank()) {
-            return out;
-        }
-        for (String item : spec.split("[,，;；\\n\\r]+")) {
-            String s = item.strip();
-            if (s.isEmpty()) {
-                continue;
-            }
-            int i = s.indexOf(PAIR_SEPARATOR);
-            if (i <= 0 || i == s.length() - 1) {
-                continue;   // 缺 = 或缺一侧：跳过
-            }
-            String from = s.substring(0, i).strip();
-            String to = s.substring(i + 1).strip();
-            if (!from.isEmpty() && !to.isEmpty() && !from.equals(to)) {
-                out.put(from, to);
-            }
-        }
-        return out;
-    }
-
-    /** 反向：把替换表写成配置串（保存配置时用）。 */
-    public static String format(Map<String, String> map) {
-        if (map == null || map.isEmpty()) {
-            return "";
-        }
-        StringBuilder sb = new StringBuilder();
-        map.forEach((k, v) -> {
-            if (sb.length() > 0) {
-                sb.append(", ");
-            }
-            sb.append(k).append(PAIR_SEPARATOR).append(v);
-        });
         return sb.toString();
     }
 }

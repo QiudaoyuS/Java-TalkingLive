@@ -109,51 +109,40 @@ public final class TextRefiners {
         /**
          * 模型的**提供者**，而不是模型本身。
          *
-         * <p>为什么是 Supplier：大模型要 21.5 秒才能加载完（见 {@link LazyVoskModel}）。
-         * 如果在构造时就求值，这个开销会落在启动路径上 —— 实测过一次事故：
-         * 界面整整 21 秒不出现。改成 Supplier 之后，模型只在
-         * {@link #refine} 真正被调用时才解析，也就是「段落已录完、正在收尾」的时候，
-         * 那时用户本来就在等结果。
+         * <p>为什么是 Supplier：大模型要 17–21 秒才能加载完。如果在构造时就求值，
+         * 这个开销会落在启动路径上 —— 实测过一次事故：界面 21 秒不出现。
+         * 改成 Supplier 之后，模型只在 {@link #refine} 真正被调用时才解析；
+         * 而在调用点（精化阶段）大模型其实早已加载完成，所以这一步只是取值。
          */
         private final java.util.function.Supplier<VoskModel> modelSource;
         private final String engine;
         private volatile boolean closed;
-        /** 词级信息（lattice 重打分）开关；默认开，因为它才是精化收益的来源。 */
-        private final boolean wordLevel;
         /**
          * 唤醒词；用于把它的音频段裁掉（见 {@link #refine} 里的说明）。
          *
-         * <p>空串表示不裁。设为空时行为与旧的「不裁」一致，
-         * 便于对照排查。
+         * <p>空串表示不裁。设为空时行为与旧的「不裁」一致，便于对照排查。
          */
         private final String wakeWord;
 
-        public VoskOffline(VoskModel model) {
-            this(() -> model, "Vosk 离线重跑", true, "");
-        }
-
-        public VoskOffline(VoskModel model, String engine) {
-            this(() -> model, engine, true, "");
-        }
-
-        public VoskOffline(VoskModel model, String engine, boolean wordLevel) {
-            this(() -> model, engine, wordLevel, "");
-        }
-
-        public VoskOffline(VoskModel model, String engine, boolean wordLevel, String wakeWord) {
-            this(() -> model, engine, wordLevel, wakeWord);
-        }
-
         /**
-         * 用「模型提供者」构造 —— 大模型接线的正确入口。
+         * 用「模型提供者」构造 —— 唯一的构造入口。
          *
-         * @param modelSource 每次精化时解析一次（实现应自己缓存，例如 {@link LazyVoskModel}）
+         * <p>历史上还有三个收 {@code VoskModel} 的便捷重载，以及一个
+         * {@code wordLevel}（词级信息开关）参数，都已删除：
+         * <ul>
+         *   <li>三个重载**没有任何调用点**（调用方一律用这个 Supplier 版本）。</li>
+         *   <li>{@code wordLevel} 的两个调用点都硬编码 {@code true}，也就是
+         *       "可开关"的抽象只有一种实际取值。而词级重打分**就是精化的收益来源**
+         *       本身（见类注释：关掉它时 Vosk 只取单条最优路径，与流式预览同质），
+         *       把它做成可关只是留了个没人用的分支。</li>
+         * </ul>
+         *
+         * @param modelSource 每次精化时解析一次（实现应自己缓存，例如按需加载的大模型）
          */
         public VoskOffline(java.util.function.Supplier<VoskModel> modelSource, String engine,
-                boolean wordLevel, String wakeWord) {
+                String wakeWord) {
             this.modelSource = modelSource;
             this.engine = engine;
-            this.wordLevel = wordLevel;
             this.wakeWord = wakeWord == null ? "" : wakeWord;
         }
 
@@ -171,12 +160,12 @@ public final class TextRefiners {
             long t0 = System.nanoTime();
             try (VoskModel.Recognizer rec = model.createRecognizer(16000.0f)) {
                 // ★ 打开词级信息：这是这一步真正能纠错的原因（见类注释）。
-                //   关掉它时 Vosk 只取单条最优路径，与流式预览几乎同质。
-                rec.setWords(wordLevel);
+                //   关掉它时 Vosk 只取单条最优路径，与流式预览几乎同质 ——
+                //   也就是说它是精化的**收益来源**本身，不是一个可选项。
+                rec.setWords(true);
                 rec.accept(pcm, pcm.length);
-                String json = wordLevel ? rec.finalResultJson() : null;
-                String text = TextUtils.collapseWhitespace(
-                        json != null ? VoskModel.Recognizer.textOf(json) : rec.finalResult());
+                String json = rec.finalResultJson();
+                String text = TextUtils.collapseWhitespace(VoskModel.Recognizer.textOf(json));
 
                 // ★ 裁掉唤醒词那一段音频，再重跑一次。
                 //   为什么值得多跑一遍：段落音频天然以唤醒词开头，而唤醒词**最容易被听错**
@@ -184,7 +173,7 @@ public final class TextRefiners {
                 //   删了可能吃掉正文，不删就多一个字。但音频层面能**精确**定位它：
                 //   词级时间戳告诉我们「子曰」这声结束在第几秒，把那段切掉，
                 //   精化就根本看不到它，于是正文干净、也不会再多一个字。
-                if (json != null && wakeWord != null && !wakeWord.isBlank()) {
+                if (wakeWord != null && !wakeWord.isBlank()) {
                     double wakeEnd = wakeWordEndSeconds(json, wakeWord);
                     if (wakeEnd > 0) {
                         int cutBytes = (int) Math.round(wakeEnd * 32000.0) & ~1;
@@ -194,11 +183,10 @@ public final class TextRefiners {
                             byte[] trimmed = java.util.Arrays.copyOfRange(pcm, cutBytes, pcm.length);
                             if (trimmed.length >= 32000 / 5) {
                                 try (VoskModel.Recognizer rec2 = model.createRecognizer(16000.0f)) {
-                                    rec2.setWords(wordLevel);
+                                    rec2.setWords(true);
                                     rec2.accept(trimmed, trimmed.length);
-                                    String t2 = TextUtils.collapseWhitespace(wordLevel
-                                            ? VoskModel.Recognizer.textOf(rec2.finalResultJson())
-                                            : rec2.finalResult());
+                                    String t2 = TextUtils.collapseWhitespace(
+                                            VoskModel.Recognizer.textOf(rec2.finalResultJson()));
                                     if (!t2.isEmpty()) {
                                         log.info("已裁掉唤醒词音频段（{}s）：文本 {} -> {}",
                                                 String.format("%.2f", wakeEnd),
@@ -225,10 +213,10 @@ public final class TextRefiners {
                 int changed = Math.max(
                         TextUtils.codePointCount(text) - common,
                         TextUtils.codePointCount(previewText) - common);
-                log.info("精化完成：音频={}s 耗时={}ms RTF={} 词级={} 与预览差异={}码点 结果={}",
+                log.info("精化完成：音频={}s 耗时={}ms RTF={} 与预览差异={}码点 结果={}",
                         String.format("%.2f", seconds), ms,
                         String.format("%.3f", ms / 1000.0 / Math.max(seconds, 0.001)),
-                        wordLevel, changed, Logging.describeWithFingerprint(text));
+                        changed, Logging.describeWithFingerprint(text));
                 return Result.ok(text, ms, engine);
             } catch (IOException | RuntimeException e) {
                 long ms = (System.nanoTime() - t0) / 1_000_000;
@@ -297,7 +285,7 @@ public final class TextRefiners {
         public String describe() {
             return engine + "（Vosk 整段重跑 + 词级重打分"
                     + (wakeWord.isBlank() ? "" : "+ 裁唤醒词音频")
-                    + (wordLevel ? "" : "（词级已关闭）") + "，非 SenseVoice）";
+                    + "，非 SenseVoice）";
         }
 
         @Override

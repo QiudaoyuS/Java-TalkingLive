@@ -16,6 +16,11 @@ import org.junit.jupiter.api.Test;
  * 没有任何英文（实测 A–Z、AI、APP、CPU 全部不在表内，用 {@code vosk_model_find_word}
  * 查询得到 -1），所以流式预览永远输出不了「AI」；大模型认识 AI，但可能按字母拆成「A I」。
  *
+ * <p>注意：**配置串的解析不在这里测** —— 它属于"配置怎么读"，实现在
+ * {@code core.AppConfig.hotwordMap()}，测试在 {@code AppConfigTest.Hotwords}。
+ * 本类历史上也有一份 {@code parse}/{@code format}，测试曾经保护着那份、
+ * 而生产真正在用的 AppConfig 那份没人测；已删除重复实现并把测试搬过去。
+ *
  * <p>因此这里测的不是「猜得准不准」，而是两条**确定性规则**：
  * <ol>
  *   <li>被拆开的字母串要拼回去（这是格式问题，不是语义问题）；</li>
@@ -121,61 +126,11 @@ class HotwordCorrectorTest {
         @Test
         @DisplayName("空表 = 只做字母拼合")
         void lettersOnly() {
-            assertTrue(new HotwordCorrector(Map.of()).isEmpty());
-            assertEquals("用AI写", HotwordCorrector.lettersOnly().process("用A I写"));
-        }
-    }
-
-    @Nested
-    @DisplayName("配置串解析")
-    class Parsing {
-
-        @Test
-        @DisplayName("逗号、中文逗号、分号、换行都能分隔")
-        void separators() {
-            assertEquals(map("a", "1", "b", "2").keySet(),
-                    HotwordCorrector.parse("a=1,b=2").keySet());
-            assertEquals(map("a", "1", "b", "2").keySet(),
-                    HotwordCorrector.parse("a=1，b=2").keySet());
-            assertEquals(map("a", "1", "b", "2").keySet(),
-                    HotwordCorrector.parse("a=1;b=2").keySet());
-            assertEquals(map("a", "1", "b", "2").keySet(),
-                    HotwordCorrector.parse("a=1\nb=2").keySet());
-        }
-
-        @Test
-        @DisplayName("格式不对的项**跳过而不是报错** —— 热词不该让配置整体校验失败")
-        void malformedEntriesAreSkipped() {
-            Map<String, String> m = HotwordCorrector.parse("a=1, 没有等号, =2, b=, a=1");
-            assertEquals(1, m.size());
-            assertEquals("1", m.get("a"));
-        }
-
-        @Test
-        @DisplayName("值里的等号保留（只在第一个等号处切分）")
-        void valueMayContainEquals() {
-            assertEquals("x=y", HotwordCorrector.parse("k=x=y").get("k"));
-        }
-
-        @Test
-        @DisplayName("空输入返回空表")
-        void emptyInput() {
-            assertTrue(HotwordCorrector.parse(null).isEmpty());
-            assertTrue(HotwordCorrector.parse("").isEmpty());
-            assertTrue(HotwordCorrector.parse("   ").isEmpty());
-        }
-
-        @Test
-        @DisplayName("format 与 parse 互为逆运算")
-        void roundTrip() {
-            Map<String, String> m = map("诶爱", "AI", "皮迪艾夫", "PDF");
-            assertEquals(m, HotwordCorrector.parse(HotwordCorrector.format(m)));
-        }
-
-        @Test
-        @DisplayName("自己映射到自己不算一条（避免无谓的替换）")
-        void selfMappingIgnored() {
-            assertTrue(HotwordCorrector.parse("AI=AI").isEmpty());
+            // 空表仍然要工作：字母拼合不依赖热词表。
+            // （这条以前断言 isEmpty()，但那个方法生产零引用，已随之删除 ——
+            //   断言"空表也能正确拼合"才是真正要守住的行为。）
+            assertEquals("用AI写", new HotwordCorrector(Map.of()).process("用A I写"));
+            assertEquals("现在是AI输入", new HotwordCorrector(Map.of()).process("现在是A I输入"));
         }
     }
 
@@ -186,7 +141,7 @@ class HotwordCorrectorTest {
         @Test
         @DisplayName("null / 空串安全")
         void nullSafe() {
-            HotwordCorrector c = HotwordCorrector.lettersOnly();
+            HotwordCorrector c = new HotwordCorrector(Map.of());
             assertEquals("", c.process(null));
             assertEquals("", c.process(""));
         }
@@ -211,6 +166,6 @@ class HotwordCorrectorTest {
     }
 
     private static String correct(String input) {
-        return HotwordCorrector.lettersOnly().process(input);
+        return new HotwordCorrector(Map.of()).process(input);
     }
 }

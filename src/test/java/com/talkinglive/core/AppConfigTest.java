@@ -428,4 +428,62 @@ class AppConfigTest {
             assertEquals("x", JsonCodec.str(m, "k", "x"));
         }
     }
+
+    @Nested
+    @DisplayName("热词表解析（生产真正用的那份：AppConfig.hotwordMap）")
+    class Hotwords {
+
+        private AppConfig cfgWith(String spec) {
+            AppConfig c = new AppConfig();
+            c.setHotwords(spec);
+            return c;
+        }
+
+        @Test
+        @DisplayName("逗号、中文逗号、分号、换行都能分隔")
+        void separators() {
+            for (String spec : new String[] {"a=1,b=2", "a=1，b=2", "a=1;b=2", "a=1\nb=2"}) {
+                java.util.Map<String, String> m = cfgWith(spec).hotwordMap();
+                assertEquals(2, m.size(), spec);
+                assertEquals("1", m.get("a"), spec);
+                assertEquals("2", m.get("b"), spec);
+            }
+        }
+
+        @Test
+        @DisplayName("格式不对的项**跳过而不是报错** —— 热词不该让配置整体校验失败")
+        void malformedEntriesAreSkipped() {
+            java.util.Map<String, String> m = cfgWith("a=1, 没有等号, =2, b=, a=1").hotwordMap();
+            assertEquals(1, m.size());
+            assertEquals("1", m.get("a"));
+        }
+
+        @Test
+        @DisplayName("值里的等号保留（只在第一个等号处切分）")
+        void valueMayContainEquals() {
+            assertEquals("x=y", cfgWith("k=x=y").hotwordMap().get("k"));
+        }
+
+        @Test
+        @DisplayName("空输入返回空表")
+        void emptyInput() {
+            assertTrue(cfgWith(null).hotwordMap().isEmpty());
+            assertTrue(cfgWith("").hotwordMap().isEmpty());
+            assertTrue(cfgWith("   ").hotwordMap().isEmpty());
+        }
+
+        @Test
+        @DisplayName("自己映射到自己不算一条（避免无谓的替换）")
+        void selfMappingIgnored() {
+            assertTrue(cfgWith("AI=AI").hotwordMap().isEmpty());
+        }
+
+        @Test
+        @DisplayName("配置往返：写出去再读回来，热词表不变")
+        void survivesRoundTrip() {
+            AppConfig out = cfgWith("诶爱=AI, 皮迪艾夫=PDF");
+            AppConfig back = AppConfig.fromJsonText(out.toJsonText());
+            assertEquals(out.hotwordMap(), back.hotwordMap());
+        }
+    }
 }

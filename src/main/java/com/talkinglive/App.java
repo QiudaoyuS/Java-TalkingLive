@@ -605,7 +605,7 @@ public final class App {
         return switch (choice) {
             case "none", "off" -> new TextRefiners.Unavailable("精化（已按参数关闭）", "用户以 --refiner none 关闭");
             case "vosk-offline" -> new TextRefiners.VoskOffline(this::refinerModelOrFallback,
-                    "Vosk 离线重跑", true, config.wakeWord());
+                    "Vosk 离线重跑", config.wakeWord());
             default -> {
                 if (voskModel == null) {
                     yield new TextRefiners.Unavailable("精化", "Vosk 模型不可用，无法建立兜底精化路径");
@@ -621,7 +621,7 @@ public final class App {
                 // ★ 传的是**方法引用**而不是现取的模型：大模型要 21.5 秒才加载完，
                 //   在这里求值就等于把 21 秒加回启动时间（实测过一次：界面 21 秒不出现）。
                 yield new TextRefiners.VoskOffline(this::refinerModelOrFallback,
-                        "Vosk 离线重跑", true, config.wakeWord());
+                        "Vosk 离线重跑", config.wakeWord());
             }
         };
     }
