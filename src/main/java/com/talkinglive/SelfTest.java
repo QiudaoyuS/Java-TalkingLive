@@ -5,6 +5,7 @@ import com.talkinglive.audio.WavFile;
 import com.talkinglive.core.AppConfig;
 import com.talkinglive.core.DictationSession;
 import com.talkinglive.core.StateMachine;
+import com.talkinglive.core.StatusLine;
 import com.talkinglive.engine.TextRefiner;
 import com.talkinglive.system.MicValidator;
 import com.talkinglive.system.Win32WindowStyles;
@@ -14,6 +15,7 @@ import com.talkinglive.text.PunctuationProcessor;
 import com.talkinglive.text.TextInjector;
 import com.talkinglive.text.TextUtils;
 import com.talkinglive.text.WholeSegmentPolicy;
+import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
@@ -611,15 +613,59 @@ public final class SelfTest {
 
             // F) 设置窗口能打开（关掉不等于退出由 HIDE_ON_CLOSE 保证）
             final boolean[] settingsOk = {false};
+            final String[] settingsDetail = {""};
             onEdt(() -> {
                 SettingsWindow w = new SettingsWindow(new StubHost());
                 w.setVisible(true);
                 settingsOk[0] = w.isVisible() && w.getDefaultCloseOperation()
                         == javax.swing.WindowConstants.HIDE_ON_CLOSE;
+                // 精简后的契约：只有 5 个可改项、没有页签。用户第 4 次反馈「太繁琐」，
+                // 这条断言是防止界面又长回去的闸门。
+                settingsDetail[0] = "HIDE_ON_CLOSE, 尺寸=" + w.getWidth() + "x" + w.getHeight()
+                        + ", 可改项=" + w.editableControlCount();
                 w.dispose();
             });
             robot.delay(300);
-            add("UI", "F. 设置窗口可打开且关闭 != 退出", settingsOk[0], "HIDE_ON_CLOSE");
+            add("UI", "F. 设置窗口可打开且关闭 != 退出", settingsOk[0], settingsDetail[0]);
+
+            // F2) 精简契约：设置页只应有 5 个可改项（唤醒词/结束词/静音/自动发送/发送键），
+            //     且没有页签 —— 日志/状态/自检已搬到独立的诊断窗口。
+            //     数字是**从界面真数出来的**，不是一个可能漂移的常量。
+            final int[] editable = {-1};
+            final int[] tabs = {-1};
+            final String[] labels = {""};
+            onEdt(() -> {
+                SettingsWindow w = new SettingsWindow(new StubHost());
+                editable[0] = w.editableControlCount();
+                tabs[0] = countTabs(w);
+                labels[0] = String.join("/", w.visibleLabels());
+                w.dispose();
+            });
+            robot.delay(200);
+            add("UI", "F2. 设置页只留必需项（5 项，无页签）",
+                    editable[0] == 5 && tabs[0] == 0,
+                    "可改项=" + editable[0] + "、页签=" + tabs[0] + "、标签=" + labels[0]);
+
+            // F2b) 必需项本身必须还在（精简不等于把功能删掉）
+            add("UI", "F2b. 必需项标签齐全",
+                    labels[0].contains("唤醒词") && labels[0].contains("结束词")
+                            && labels[0].contains("静音超时") && labels[0].contains("发送键"),
+                    labels[0]);
+
+            // F3) 诊断窗口（状态/日志/自检）已从设置里搬出来，能独立打开
+            final boolean[] diagOk = {false};
+            final int[] diagTabs = {-1};
+            onEdt(() -> {
+                DiagnosticsWindow w = new DiagnosticsWindow(new StubDiagnosticsHost());
+                w.setVisible(true);
+                diagTabs[0] = countTabs(w);
+                diagOk[0] = w.isVisible() && w.getDefaultCloseOperation()
+                        == javax.swing.WindowConstants.HIDE_ON_CLOSE && diagTabs[0] == 3;
+                w.dispose();
+            });
+            robot.delay(300);
+            add("UI", "F3. 诊断窗口独立（状态/日志/自检 3 页）", diagOk[0],
+                    "页签=" + diagTabs[0]);
 
             // G) 多显示器虚拟屏幕（§4.4 夹在屏幕范围内 / 边缘翻转都依赖它）
             Rectangle vb = com.talkinglive.system.DpiScale.virtualBounds();
@@ -804,6 +850,20 @@ public final class SelfTest {
         }
     }
 
+    /** 数页签数量（没有 JTabbedPane 就是 0 —— 设置窗口精简后应当如此）。 */
+    private static int countTabs(java.awt.Container c) {
+        int n = 0;
+        for (java.awt.Component comp : c.getComponents()) {
+            if (comp instanceof javax.swing.JTabbedPane t) {
+                n += t.getTabCount();
+            }
+            if (comp instanceof java.awt.Container inner) {
+                n += countTabs(inner);
+            }
+        }
+        return n;
+    }
+
     /** 设置窗口自检用的最小 Host。 */
     static final class StubHost implements SettingsWindow.Host {
         private final AppConfig cfg = new AppConfig();
@@ -819,8 +879,17 @@ public final class SelfTest {
         }
 
         @Override
-        public List<SettingsWindow.StatusLine> status() {
-            return List.of(new SettingsWindow.StatusLine("词表:唤醒词", "子曰", true, "在词表内"));
+        public Boolean wordInVocabulary(String word) {
+            return true;
+        }
+    }
+
+    /** 诊断窗口自检用的最小 Host。 */
+    static final class StubDiagnosticsHost implements DiagnosticsWindow.Host {
+
+        @Override
+        public List<StatusLine> status() {
+            return List.of(new StatusLine("词表:唤醒词", "子曰", true, "在词表内"));
         }
 
         @Override

@@ -8,6 +8,7 @@ import com.talkinglive.core.DictationSession;
 import com.talkinglive.core.InMemoryLogAppender;
 import com.talkinglive.core.Logging;
 import com.talkinglive.core.StateMachine;
+import com.talkinglive.core.StatusLine;
 import com.talkinglive.engine.LazyVoskModel;
 import com.talkinglive.engine.SpeechRecognizer;
 import com.talkinglive.engine.TextRefiner;
@@ -29,6 +30,7 @@ import com.talkinglive.text.TextInjector;
 import com.talkinglive.text.TextPostProcessor;
 import com.talkinglive.text.TextUtils;
 import com.talkinglive.text.WholeSegmentPolicy;
+import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.Icons;
 import com.talkinglive.ui.PreviewBar;
@@ -122,6 +124,8 @@ public final class App {
     private FloatingBall ball;
     private PreviewBar previewBar;
     private SettingsWindow settings;
+    /** 诊断窗口（状态 / 日志 / 自检）。与设置分开：一个只读、一个只写。 */
+    private DiagnosticsWindow diagnostics;
 
     // ---- 运行时状态 ----
     private final AtomicReference<DictationSession> session = new AtomicReference<>();
@@ -1013,6 +1017,7 @@ public final class App {
             Win32WindowStyles.applyNoActivateToolWindow(previewBar);
 
             settings = new SettingsWindow(new SettingsHost());
+            diagnostics = new DiagnosticsWindow(new DiagnosticsHost());
 
             installTray();
 
@@ -1025,7 +1030,9 @@ public final class App {
             }
 
             if (opts.settings) {
-                settings.showTab(SettingsWindow.TAB_GENERAL);
+                settings.setVisible(true);
+                settings.toFront();
+                foreground.ignore(Win32WindowStyles.hwndOf(settings));
             }
             if (!notices.isEmpty()) {
                 // 启动期攒下的失败必须可见（§7）
@@ -1055,11 +1062,11 @@ public final class App {
 
             menu.addSeparator();
             MenuItem settingsItem = new MenuItem("设置...");
-            settingsItem.addActionListener(e -> openSettings(SettingsWindow.TAB_GENERAL));
+            settingsItem.addActionListener(e -> openSettings());
             menu.add(settingsItem);
 
-            MenuItem logs = new MenuItem("查看日志");
-            logs.addActionListener(e -> openSettings(SettingsWindow.TAB_LOG));
+            MenuItem logs = new MenuItem("状态与诊断…");
+            logs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_STATUS));
             menu.add(logs);
 
             menu.addSeparator();
@@ -1098,12 +1105,12 @@ public final class App {
 
         @Override
         public void onOpenSettings() {
-            openSettings(SettingsWindow.TAB_GENERAL);
+            openSettings();
         }
 
         @Override
         public void onOpenLog() {
-            openSettings(SettingsWindow.TAB_LOG);
+            openDiagnostics(DiagnosticsWindow.TAB_LOG);
         }
 
         @Override
@@ -1137,16 +1144,34 @@ public final class App {
         log.info("监听{}", paused ? "已暂停" : "已恢复");
     }
 
-    private void openSettings(int tab) {
+    /** 打开**设置**窗口（五行，只放日常会改的东西）。 */
+    private void openSettings() {
         onUi(() -> {
             if (settings == null) {
                 return;
             }
-            if (tab == SettingsWindow.TAB_DIAGNOSTICS) {
-                settings.refreshDiagnostics();
-            }
-            settings.showTab(tab);
+            settings.setVisible(true);
+            settings.toFront();
             foreground.ignore(Win32WindowStyles.hwndOf(settings));
+        });
+    }
+
+    /**
+     * 打开**诊断**窗口（状态 / 日志 / 自检）。
+     *
+     * <p>与设置分开是这次精简的核心：这三页不改变任何行为，只是给人看。
+     * 混在设置里既让设置看着像控制面板，也让「想看日志」的人要先进入设置。
+     */
+    private void openDiagnostics(int tab) {
+        onUi(() -> {
+            if (diagnostics == null) {
+                return;
+            }
+            if (tab == DiagnosticsWindow.TAB_SELF_CHECK) {
+                diagnostics.refreshSelfCheck();
+            }
+            diagnostics.showTab(tab);
+            foreground.ignore(Win32WindowStyles.hwndOf(diagnostics));
         });
     }
 
@@ -1312,7 +1337,7 @@ public final class App {
 
     // ------------------------------------------------------------ 状态与自检
 
-    /** 设置窗口的 Host 实现。 */
+    /** 设置窗口的 Host 实现。只有「读配置 / 写配置 / 查词表」三件事。 */
     private final class SettingsHost implements SettingsWindow.Host {
 
         @Override
@@ -1326,7 +1351,21 @@ public final class App {
         }
 
         @Override
-        public List<SettingsWindow.StatusLine> status() {
+        public Boolean wordInVocabulary(String word) {
+            return App.this.wordInVocabulary(word);
+        }
+
+        @Override
+        public void onVisibilityChanged(boolean visible) {
+            onWindowVisibilityChanged(visible);
+        }
+    }
+
+    /** 诊断窗口的 Host 实现。只读，因此不需要校验/保存那条路径。 */
+    private final class DiagnosticsHost implements DiagnosticsWindow.Host {
+
+        @Override
+        public List<StatusLine> status() {
             return App.this.statusLines();
         }
 
@@ -1337,27 +1376,52 @@ public final class App {
 
         @Override
         public void onVisibilityChanged(boolean visible) {
-            // 设置窗口会真的抢焦点，因此打开期间暂停「切窗口结束段落」判定，
-            // 否则一打开设置就会把正在录的段落判定成「用户切走了」。
-            foreground.setEnabled(!visible);
-            if (settings != null) {
-                foreground.ignore(Win32WindowStyles.hwndOf(settings));
-            }
+            onWindowVisibilityChanged(visible);
         }
     }
 
-    /** 各组件状态行，供「模型状态」页与 --doctor。 */
-    private List<SettingsWindow.StatusLine> statusLines() {
-        List<SettingsWindow.StatusLine> out = new ArrayList<>();
+    /**
+     * 两个窗口打开时都要做的事：暂停「切窗口结束段落」判定。
+     *
+     * <p>它们会真的抢焦点，不暂停的话「一打开设置就把正在录的段落判成用户切走了」。
+     * 两个窗口共用一份逻辑，且必须把**两个句柄**都加进忽略名单 ——
+     * 否则从设置切到诊断会被当成切换目标应用。
+     */
+    private void onWindowVisibilityChanged(boolean visible) {
+        foreground.setEnabled(!visible);
+        if (settings != null && settings.isVisible()) {
+            foreground.ignore(Win32WindowStyles.hwndOf(settings));
+        }
+        if (diagnostics != null && diagnostics.isVisible()) {
+            foreground.ignore(Win32WindowStyles.hwndOf(diagnostics));
+        }
+    }
 
-        out.add(new SettingsWindow.StatusLine("配置文件",
+    /** 词是否在词表内；模型不可用或查询失败时返回 null（界面显示「?」而不是误判）。 */
+    private Boolean wordInVocabulary(String word) {
+        if (voskModel == null || word == null || word.isBlank()) {
+            return voskModel == null ? null : Boolean.TRUE;
+        }
+        try {
+            return voskModel.findWordId(word) >= 0;
+        } catch (RuntimeException e) {
+            log.warn("词表查询失败：{}", e.toString());
+            return null;
+        }
+    }
+
+    /** 各组件状态行，供诊断窗口与 --doctor。 */
+    private List<StatusLine> statusLines() {
+        List<StatusLine> out = new ArrayList<>();
+
+        out.add(new StatusLine("配置文件",
                 AppPaths.configFile().toString(), true, null));
 
         // 模型
         if (voskModel != null) {
-            out.add(new SettingsWindow.StatusLine("Vosk 模型", "已加载", true, voskModel.path().toString()));
+            out.add(new StatusLine("Vosk 模型", "已加载", true, voskModel.path().toString()));
         } else {
-            out.add(new SettingsWindow.StatusLine("Vosk 模型", "缺失或损坏", false,
+            out.add(new StatusLine("Vosk 模型", "缺失或损坏", false,
                     modelError + "  获取方式见 docs/DESIGN.md 附录 D"));
         }
 
@@ -1366,14 +1430,14 @@ public final class App {
         addWordLine(out, "结束词", config.endWord());
 
         // 唤醒检测
-        out.add(new SettingsWindow.StatusLine("唤醒/结束词检测",
+        out.add(new StatusLine("唤醒/结束词检测",
                 wakeDetector != null ? "就绪" : "不可用",
                 wakeDetector != null,
                 wakeDetector != null ? wakeDetector.describe()
                         : wakeDetectorError + "（仍可用悬浮球左键手动听写）"));
 
         // 预览
-        out.add(new SettingsWindow.StatusLine("实时预览",
+        out.add(new StatusLine("实时预览",
                 recognizer != null ? "就绪" : "不可用", recognizer != null,
                 recognizer != null ? recognizer.describe() : recognizerError));
 
@@ -1397,51 +1461,51 @@ public final class App {
             asrOk = true;   // 加载中不算故障，只是还没好
             asrDetail = "大模型正在后台加载（约 20 秒，不阻塞使用）：" + largeModel.dir();
         }
-        out.add(new SettingsWindow.StatusLine("识别准确率",
+        out.add(new StatusLine("识别准确率",
                 largeModel != null && largeModel.ready() ? "大模型" : "小模型", asrOk, asrDetail));
 
         // 精化
         boolean refinerOk = refiner != null && refiner.available();
-        out.add(new SettingsWindow.StatusLine("精化引擎",
+        out.add(new StatusLine("精化引擎",
                 refiner == null ? "未装配" : (refinerOk ? "就绪" : "降级"), refinerOk,
                 refiner == null ? null : refiner.describe()
                         + (refinerOk ? "" : " —— 按 §7 会退回预览文本注入，并明确提示")));
 
         // 麦克风
         boolean micOk = capture != null && capture.available();
-        out.add(new SettingsWindow.StatusLine("麦克风", micOk ? "就绪" : "不可用", micOk,
+        out.add(new StatusLine("麦克风", micOk ? "就绪" : "不可用", micOk,
                 capture == null ? null : capture.describe()));
 
         // 注入
-        out.add(new SettingsWindow.StatusLine("文本注入",
+        out.add(new StatusLine("文本注入",
                 injector.available() ? "就绪" : "不可用", injector.available(),
                 injector.available() ? injector.describe() : injector.unavailableReason()));
 
         // 托盘
-        out.add(new SettingsWindow.StatusLine("托盘图标",
+        out.add(new StatusLine("托盘图标",
                 trayIcon != null ? "已安装" : "不可用", trayIcon != null,
                 trayIcon != null ? "⚠ Windows 11 默认折叠它，悬浮球才是主要入口" : null));
 
         if (lastInjectionError != null) {
-            out.add(new SettingsWindow.StatusLine("最近一次注入失败", "见日志", false, lastInjectionError));
+            out.add(new StatusLine("最近一次注入失败", "见日志", false, lastInjectionError));
         }
         return out;
     }
 
-    private void addWordLine(List<SettingsWindow.StatusLine> out, String field, String word) {
+    private void addWordLine(List<StatusLine> out, String field, String word) {
         String key = "词表:" + field;
         if (voskModel == null) {
-            out.add(new SettingsWindow.StatusLine(key, word, false, "模型不可用，无法校验"));
+            out.add(new StatusLine(key, word, false, "模型不可用，无法校验"));
             return;
         }
         try {
             int id = voskModel.findWordId(word);
             boolean ok = id >= 0;
-            out.add(new SettingsWindow.StatusLine(key, word, ok,
+            out.add(new StatusLine(key, word, ok,
                     ok ? "在词表内（wordId=" + id + "）"
                        : "不在词表内 —— Vosk 会静默忽略它，永远识别不到"));
         } catch (RuntimeException e) {
-            out.add(new SettingsWindow.StatusLine(key, word, false, "校验失败：" + e.getMessage()));
+            out.add(new StatusLine(key, word, false, "校验失败：" + e.getMessage()));
         }
     }
 
@@ -1614,7 +1678,7 @@ public final class App {
         sb.append("java        : ").append(System.getProperty("java.version")).append('\n');
         sb.append("dpi         : ").append(DpiScale.systemDpi()).append(" (scale ")
                 .append(String.format("%.2f", Theme.dpiScale())).append(")\n");
-        for (SettingsWindow.StatusLine line : statusLines()) {
+        for (StatusLine line : statusLines()) {
             sb.append(String.format("%-16s: %-10s %s%s%n", line.name(), line.value(),
                     line.ok() ? "[ok]  " : "[FAIL]",
                     line.detail() == null ? "" : line.detail().replace("\n", " | ")));
@@ -1739,7 +1803,7 @@ public final class App {
         return sm;
     }
 
-    List<SettingsWindow.StatusLine> statusForTest() {
+    List<StatusLine> statusForTest() {
         return statusLines();
     }
 

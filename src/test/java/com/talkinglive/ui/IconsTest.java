@@ -216,7 +216,19 @@ class IconsTest {
                 "fillPolygon(", "drawPolygon(");
 
         /** 当图标用的字符（对勾/叉/感叹号）。字符宽度由字体决定，和矢量图标无法对齐。 */
-        private static final String[] GLYPHS = {"\u2713", "\u2717", "\u26a0", "\u2714", "\u2718"};
+        private static final String[] GLYPHS =
+                {"\u2713", "\u2717", "\u26a0", "\u2714", "\u2718"};
+
+        /**
+         * 同一个字符的**转义写法**（{@code \u2713}）。
+         *
+         * <p>必须一起挡：第一版扫描只查真实字符，于是有人在设置页写了
+         * {@code label.setText(in ? "\u2713" : "\u2717")} 就绕过了这条规则 ——
+         * 而它造成的「字符图标与矢量图标混用」问题一模一样。
+         * 这个漏洞是自己写完界面后回头核对时发现的。
+         */
+        private static final String[] GLYPH_ESCAPES =
+                {"\\u2713", "\\u2717", "\\u26a0", "\\u2714", "\\u2718"};
 
         @Test
         @DisplayName("ui 包与 App 里没有绕过 Icons 的裸图元绘制")
@@ -266,6 +278,11 @@ class IconsTest {
                     }
                     for (String g : GLYPHS) {
                         if (t.contains("\"" + g + "\"")) {
+                            violations.add(name + ":" + (i + 1) + " -> " + t);
+                        }
+                    }
+                    for (String g : GLYPH_ESCAPES) {
+                        if (t.contains("\"" + g) || t.contains(g + "\"")) {
                             violations.add(name + ":" + (i + 1) + " -> " + t);
                         }
                     }
