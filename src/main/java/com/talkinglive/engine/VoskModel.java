@@ -152,6 +152,32 @@ public final class VoskModel implements AutoCloseable {
         return create(sampleRate, grammar);
     }
 
+    /**
+     * 用一个**原始 config JSON** 创建识别器（关键词检测模式）。
+     *
+     * <p>与 {@link #createGrammarRecognizer} 走同一个 C API（{@code vosk_recognizer_new_grm}），
+     * 区别只在第二个参数的内容：
+     * <ul>
+     *   <li>受限语法：{@code ["子曰","到此为止","[unk]"]} —— 一个纯字符串数组。</li>
+     *   <li>关键词：{@code {"config":[{"phrase":"子曰"},...],"keywords_threshold":0.5}}
+     *       —— 明确指定每条短语是**关键词**并给出置信度阈值。</li>
+     * </ul>
+     *
+     * <p><b>为什么要用关键词模式</b>：受限语法**不给置信度**（实测：即使
+     * {@code setWords(true)}，结果里也只有文本没有分数），于是没法把
+     * "听着像但不是" 的误命中过滤掉。实测症状是用户放视频时软件自动开始录音 ——
+     * 视频里的语音被语法解码器强行套成唤醒词。关键词模式会给出 confidence，
+     * 可以用阈值拦住这种弱匹配。
+     *
+     * @throws IOException 句柄创建失败或 config 不被接受
+     */
+    public Recognizer createKeywordRecognizer(float sampleRate, String configJson) throws IOException {
+        if (configJson == null || configJson.isBlank()) {
+            throw new IOException("关键词配置不能为空");
+        }
+        return create(sampleRate, configJson);
+    }
+
     private Recognizer create(float sampleRate, String grammar) throws IOException {
         ensureOpen();
         try {

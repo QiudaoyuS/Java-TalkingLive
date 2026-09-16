@@ -1,5 +1,6 @@
 package com.talkinglive.engine;
 
+import com.talkinglive.audio.SilenceDetector;
 import com.talkinglive.core.AppConfig;
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -41,6 +42,11 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     private final String wakeWord;
     private final String endWord;
     private final HitListener listener;
+    /**
+     * 长时语音门：挡住视频/音乐等**外部音频**造成的误唤醒。
+     * 判据与实测背景见 {@link WakeGate} 的类注释。
+     */
+    private final WakeGate gate = new WakeGate();
 
     private double secondsSinceReset;
     private volatile boolean closed;
@@ -156,17 +162,22 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         // 采集线程每次给的都是独立数组，实际不会走到这里。
         byte[] data = (offset == 0 && length == pcm.length)
                 ? pcm : java.util.Arrays.copyOfRange(pcm, offset, offset + length);
+
+        // 先喂"长时语音门"：它需要看到每一帧的能量，包括识别器没出结果的那些。
+        // 每秒 16kHz×2 字节 = 32000 字节，据此换算本帧时长。
+        gate.accept(SilenceDetector.rms16le(data, 0, data.length), data.length / 32000.0);
+
         if (recognizer.accept(data, data.length)) {
             Hit hit = match(recognizer.result());
             if (hit != null) {
-                listener.onHit(hit);
+                fire(hit);
             }
             secondsSinceReset = 0;
             return;
         }
         Hit hit = match(recognizer.partialResult());
         if (hit != null) {
-            listener.onHit(hit);
+            fire(hit);
             // 命中后立刻清空，避免同一句话在随后的若干块里反复命中。
             recognizer.reset();
             secondsSinceReset = 0;
@@ -177,6 +188,34 @@ public final class VoskKeywordDetector implements WakeWordDetector {
             recognizer.reset();
             secondsSinceReset = 0;
         }
+    }
+
+    /**
+     * 放行一次命中 —— 但要先过"长时语音门"。
+     *
+     * <p>门的判据与理由写在 {@link WakeGate} 的类注释里（一句话：说话人不会在连续
+     * 说话 3 秒之后才喊唤醒词，而视频/音乐是连续的音频）。这里补充两点实现约束：
+     *
+     * <ul>
+     *   <li><b>只挡唤醒词，不挡结束词。</b>正文可能长达几十秒，结束词本来就该在
+     *       长时间说话之后被接受 —— 用它去挡会把正常功能一起挡掉。</li>
+     *   <li><b>被挡下也要重置计时。</b>否则一次误命中会让计时继续增长，
+     *       把随后真实用户的唤醒也一起挡掉（一个误命中把软件锁死，比误唤醒更糟）。</li>
+     * </ul>
+     */
+    private void fire(Hit hit) {
+        if (hit.kind() == Kind.WAKE) {
+            boolean allow = gate.allowWake();
+            double run = gate.speechRunSeconds();
+            gate.resetAfterWake();
+            if (!allow) {
+                log.info("挡下一次疑似外部音频的唤醒：麦克风已连续有声 {}s（阈值 {}s）"
+                        + "—— 判为视频/音乐等外部声音，不开始录音",
+                        String.format("%.1f", run), WakeGate.MAX_SPEECH_RUN_SECONDS);
+                return;
+            }
+        }
+        listener.onHit(hit);
     }
 
     /**
@@ -225,7 +264,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
 
     @Override
     public String describe() {
-        return "小 Vosk · 受限语法（wake=" + wakeWord + ", end=" + endWord + "）";
+        return "小 Vosk · 受限语法（wake=" + wakeWord + ", end=" + endWord
+                + "；长时语音门 " + WakeGate.MAX_SPEECH_RUN_SECONDS + "s 挡外部音频）";
     }
 
     @Override

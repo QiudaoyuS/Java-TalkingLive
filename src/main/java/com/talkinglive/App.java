@@ -1191,9 +1191,16 @@ public final class App {
             trayIcon.setImageAutoSize(true);
             trayIcon.addActionListener(e -> onBallLeftClick());
             // 右键（含 Windows 11 托盘溢出面板里的右键）→ 弹 Swing 菜单。
-            // isPopupTrigger() 是判断右键的跨平台正确方式；不同 Windows 版本
-            // 分别在 pressed 或 released 上置位，所以两个事件都要查。
-            trayIcon.addMouseListener(new java.awt.event.MouseAdapter() {
+            //
+            // ⚠ 判据必须是"按下了右键按钮"，**不能**用 isPopupTrigger()。
+            //   实测：TrayIcon 的鼠标事件上 isPopupTrigger() 在 Windows 下不置位，
+            //   于是监听器从不生效、原生菜单照旧弹出来 —— 用户看到的正是那个
+            //   英文兜底菜单（"变成英文了"）。这是第二版改法，第一版就是栽在
+            //   isPopupTrigger 上（悬浮球是 Swing 组件，同一判据在那边是好的，
+            //   于是很容易误以为托盘也一样）。
+            //   pressed/released 都要接：不同 Windows 版本对托盘图标上报的时机不同，
+            //   靠 400ms 时间去重防止连弹两次。
+            java.awt.event.MouseAdapter trayMouse = new java.awt.event.MouseAdapter() {
                 @Override
                 public void mousePressed(java.awt.event.MouseEvent e) {
                     maybeShowTrayMenu(e);
@@ -1203,7 +1210,8 @@ public final class App {
                 public void mouseReleased(java.awt.event.MouseEvent e) {
                     maybeShowTrayMenu(e);
                 }
-            });
+            };
+            trayIcon.addMouseListener(trayMouse);
             SystemTray.getSystemTray().add(trayIcon);
             log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
                     + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
@@ -1216,12 +1224,17 @@ public final class App {
     /**
      * 托盘图标被右键时弹出**与悬浮球同一个** Swing 菜单。
      *
-     * <p>为了避免弹出两次，用一个很短的时间窗去重：不同 Windows 版本会把
-     * {@code isPopupTrigger()} 置在 pressed 或 released 上，两者都监听是必须的，
-     * 但个别情况下两个事件都会置位 —— 那时会连弹两次。
+     * <p><b>判据只看按钮，不看 isPopupTrigger()。</b>第一版用
+     * {@code e.isPopupTrigger()}，实测在 {@code TrayIcon} 的鼠标事件上
+     * Windows 下根本不置位，于是这段代码从不生效、原生兜底菜单照旧弹出
+     * （用户看到的正是那个英文菜单）。{@code isPopupTrigger()} 在 Swing 组件上
+     * 是可靠的，在托盘这种原生外壳里不可靠 —— 这个差别很容易被忽略。
+     *
+     * <p>去重窗口 400ms：{@code mousePressed} 与 {@code mouseReleased} 都要接
+     * （不同 Windows 版本上报时机不同），同一次右键会走到两次，靠它压成一次。
      */
     private void maybeShowTrayMenu(java.awt.event.MouseEvent e) {
-        if (!e.isPopupTrigger()) {
+        if (e.getButton() != java.awt.event.MouseEvent.BUTTON3) {
             return;
         }
         long now = System.currentTimeMillis();
@@ -1229,24 +1242,29 @@ public final class App {
             return;
         }
         lastTrayMenuAt = now;
+
         // 事件坐标是**托盘图标的局部坐标**，转成屏幕坐标后交给悬浮球弹菜单。
         // 悬浮球窗口是常驻的、且 WS_EX_NOACTIVATE（不抢焦点），正好适合当弹窗宿主。
-        java.awt.Point screen = e.getPoint();
+        java.awt.Point screen = null;
         java.awt.Component src = e.getComponent();
         if (src != null) {
             try {
                 screen = src.getLocationOnScreen();
                 screen.translate(e.getX(), e.getY());
             } catch (RuntimeException ex) {
-                // 拿不到组件位置（极少见）时退回鼠标真实位置
-                java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
-                if (pi == null) {
-                    return;
-                }
-                screen = pi.getLocation();
+                screen = null;
             }
         }
+        if (screen == null) {
+            // 拿不到组件位置时退回鼠标真实位置 —— 菜单挂在鼠标那儿总是对的
+            java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
+            if (pi == null) {
+                return;
+            }
+            screen = pi.getLocation();
+        }
         final java.awt.Point at = screen;
+        log.info("托盘右键：弹出 Swing 菜单 @ {},{}", at.x, at.y);
         onUi(() -> {
             if (ball != null) {
                 ball.showMenuAtScreen(ball, at.x, at.y);

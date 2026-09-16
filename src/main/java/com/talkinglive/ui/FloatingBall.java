@@ -532,7 +532,7 @@ public class FloatingBall extends JWindow {
      * 弹出来」是这个设计里真实存在的风险点（§4.4）。
      */
     public void showMenuAt(int x, int y) {
-        buildMenu().show(this, x, y);
+        showMenu(buildMenu(), this, x, y);
     }
 
     /**
@@ -551,8 +551,31 @@ public class FloatingBall extends JWindow {
     public void showMenuAtScreen(java.awt.Component invoker, int screenX, int screenY) {
         java.awt.Point p = new java.awt.Point(screenX, screenY);
         javax.swing.SwingUtilities.convertPointFromScreen(p, invoker);
-        buildMenu().show(invoker, p.x, p.y);
+        showMenu(buildMenu(), invoker, p.x, p.y);
     }
+
+    /**
+     * 弹出菜单，带一道**闸门**：已经有一个在显示时就不再弹。
+     *
+     * <p>闸门的由来（用户反馈）：「点击托盘右键后，再点击其他位置时悬浮球右键菜单
+     * 自动弹出」。分析下来是菜单在短时间内被多次请求 —— {@code JPopupMenu.show}
+     * 可以重复调用，于是会重叠、也会在被点掉之后又被弹回来。
+     * 这里直接以"当前有没有菜单在显示"为准，比去猜事件来源可靠得多。
+     *
+     * <p>注意用的是 {@code isVisible()} 而不是自建布尔量：Swing 会在菜单被点掉、
+     * 被 Esc 关掉、或失焦时把 visible 置回 false，自建标志位必然与它不同步。
+     */
+    private void showMenu(JPopupMenu menu, java.awt.Component invoker, int x, int y) {
+        if (activeMenu != null && activeMenu.isVisible()) {
+            log.debug("已有菜单在显示，忽略这次弹出请求");
+            return;
+        }
+        activeMenu = menu;
+        menu.show(invoker, x, y);
+    }
+
+    /** 当前正在显示的菜单（见 {@link #showMenu} 的闸门）。 */
+    private JPopupMenu activeMenu;
 
     /** 构造菜单（悬浮球右键与托盘右键共用同一份，避免两处文案/行为漂移）。 */
     private JPopupMenu buildMenu() {
