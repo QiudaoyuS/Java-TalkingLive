@@ -49,6 +49,8 @@ public final class ForegroundWatcher implements AutoCloseable {
     private final Listener listener;
     private final java.util.Set<Long> ignored = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private volatile long last = 0;
+    /** 去抖：上一次读到但与基线不同的句柄（连续两次相同才认定变化）。 */
+    private volatile long pending = 0;
     private volatile boolean enabled = true;
     private ScheduledFuture<?> task;
 
@@ -112,18 +114,35 @@ public final class ForegroundWatcher implements AutoCloseable {
         try {
             long now = current();
             long prev = last;
-            if (now == prev) {
+
+            // ★ foreground == 0 时**不要更新基线**。
+            //   GetForegroundWindow() 在窗口切换的瞬间、前台窗口被销毁时、以及
+            //   任务栏/开始菜单交互期间会短暂返回 0（实测日志里 0x0 出现得非常频繁）。
+            //   早期实现把 0 也当成「新的基线」，于是随后的真实窗口看起来像
+            //   「从 0 变过来的」——每次都判定成用户切了窗口，日志被刷爆，
+            //   段落也会被无谓地中断。基线只应该跟着**真实的窗口句柄**走。
+            if (now == 0) {
+                log.debug("前台窗口短暂为空，忽略且不改基线（保持 0x{}）", Long.toHexString(prev));
                 return;
             }
+            if (now == prev) {
+                pending = 0;
+                return;
+            }
+
+            // 去抖：要求同一个新句柄连续两次读到才认定变化。
+            // 快速切换时前台会在几个句柄间抖动（任务切换、托盘预览），
+            // 一次抖动就中断一段录音对用户来说是纯粹的损失。
+            if (now != pending) {
+                pending = now;
+                return;
+            }
+            pending = 0;
             last = now;
+
             // 自身窗口的切换：更新基线但不回调（§4.3 明确要求）。
             if (ignored.contains(now) || ignored.contains(prev)) {
                 log.debug("忽略自身窗口的前台变化：0x{} -> 0x{}", Long.toHexString(prev), Long.toHexString(now));
-                return;
-            }
-            if (now == 0) {
-                // 前台窗口短暂为 0（例如桌面切换/窗口销毁）不是用户切换目标程序。
-                log.debug("前台窗口短暂为空，忽略");
                 return;
             }
             log.info("前台窗口变化：0x{} -> 0x{}（{}）", Long.toHexString(prev), Long.toHexString(now), title(now));

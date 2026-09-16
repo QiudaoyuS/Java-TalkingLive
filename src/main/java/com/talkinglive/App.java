@@ -550,11 +550,19 @@ public final class App {
             long target = CaretTracker.foregroundWindow();
             DictationSession s = new DictationSession(sm.generation(), target,
                     ForegroundWatcher.title(target), config.maxSegmentSeconds());
+            // 记下目标窗口里**有键盘焦点的控件**。提交时若前台已变，注入前需要把焦点
+            // 还原到「这个控件」而不只是「这个窗口」——浏览器的地址栏/编辑框都是子窗口，
+            // 只切顶层窗口的话文字可能落到窗口本身，用户感受仍是「打不进去」。
+            s.setTargetFocus(CaretTracker.focusedControlOf(target));
             session.set(s);
             silence.reset();
             silence.setTimeoutSeconds(config.silenceSeconds());
             preview.reset();
             lastInjectionError = null;
+
+            log.info("段落开始：目标窗口 0x{}（{}），焦点控件 0x{}",
+                    Long.toHexString(target), s.targetWindowTitle(),
+                    Long.toHexString(s.targetFocus()));
 
             SpeechRecognizer sr = recognizer;
             if (sr != null) {
@@ -723,7 +731,7 @@ public final class App {
             CommitPolicy.CommitPlan plan = commitPolicy.plan(s.injectedText(), text);
             TextInjector.Result r;
             if (injector instanceof WindowsTextInjector w) {
-                r = w.inject(plan.backspaces(), plan.text(), s.targetWindow());
+                r = w.inject(plan.backspaces(), plan.text(), s.targetWindow(), s.targetFocus());
             } else {
                 r = injector.inject(plan.backspaces(), plan.text());
             }
@@ -738,6 +746,16 @@ public final class App {
             s.appendInjected(plan.text());
             log.info("已注入 {}（目标窗口 0x{}）", Logging.describeWithFingerprint(plan.text()),
                     Long.toHexString(s.targetWindow()));
+
+            // 注入成功但**没打进原本的目标**：文字进了当前焦点所在处。
+            // 这种情况必须让用户知道——否则他会以为「又没反应」，而实际上文字
+            // 就在别的窗口里等着他剪走。这是「可挽回」与「纯损失」的区别。
+            if (r.message() != null && !r.message().isBlank()) {
+                lastInjectionError = r.message();
+                log.warn("注入到了非目标位置：{}", r.message());
+                showNotice("文字没打进原本的目标窗口", r.message()
+                        + "\n（识别到的内容是：" + abbreviate(text) + "）");
+            }
 
             if (config.autoSend() && shouldAutoSend(ctx.reason())) {
                 TextInjector.Result pr = injector.press(TextInjector.KeyCombo.fromConfig(config.sendKey()));

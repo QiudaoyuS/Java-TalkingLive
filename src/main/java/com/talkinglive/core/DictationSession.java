@@ -27,6 +27,8 @@ public final class DictationSession {
     private final long targetWindow;
     private final String targetWindowTitle;
     private final int maxSegmentSeconds;
+    /** 段落开始时目标窗口里**有键盘焦点的控件**（子窗口）；0 表示没取到。 */
+    private long targetFocus;
 
     private final byte[] pcm;
     private int pcmLength;
@@ -54,6 +56,23 @@ public final class DictationSession {
 
     public String targetWindowTitle() {
         return targetWindowTitle;
+    }
+
+    /**
+     * 段落开始时目标窗口里有键盘焦点的控件句柄。
+     *
+     * <p>用途见 {@code WindowsTextInjector.inject}：如果提交时前台窗口已经不是目标
+     * （用户中途切走了、通知弹过、输入法切换过），需要**把焦点还原回去**再注入。
+     * 只还原顶层窗口不够——浏览器的地址栏、编辑框都是子窗口，只把窗口切到前台，
+     * 文字可能落到窗口本身而不是输入框里，用户的感受仍然是「打不进去」。
+     */
+    public long targetFocus() {
+        return targetFocus;
+    }
+
+    /** 由 App 在段落开始时设置（需要 Win32 调用，因此不在 core 里取）。 */
+    public void setTargetFocus(long hwnd) {
+        this.targetFocus = hwnd;
     }
 
     public int maxSegmentSeconds() {

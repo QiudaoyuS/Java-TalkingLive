@@ -114,12 +114,16 @@ public final class EngineBench {
                     "含语言模型估计 + 解码图重建；只在启动与改配置时做一次");
 
             // ---- 离线识别吞吐（合成音频，只看解码开销） ----
-            out.append('\n').append("--- 整段离线识别吞吐（合成音频）---\n");
+            // 刻意按下**精化器真实使用的配置**测：开词级信息（lattice 重打分）。
+            // 手动建识别器而不带 setWords 会测出一个偏乐观的数字，
+            // 与实际提交延迟对不上——基准工具必须测真实路径。
+            out.append('\n').append("--- 整段离线识别吞吐（合成音频，已开词级重打分）---\n");
             out.append("说明：这里用的是**合成音频**，只反映解码开销，不代表真实语音的准确率。\n");
             for (double seconds : new double[] {1.0, 5.0, 15.0}) {
                 byte[] pcm = syntheticPcm(seconds);
                 long r0 = System.nanoTime();
                 try (VoskModel.Recognizer r = model.createRecognizer(16000.0f)) {
+                    r.setWords(true);
                     r.accept(pcm, pcm.length);
                     r.finalResult();
                 }
@@ -128,6 +132,23 @@ public final class EngineBench {
                         String.format("离线重跑 %.0f 秒合成音频", seconds),
                         rMs + " ms（RTF=" + String.format("%.3f", rMs / 1000.0 / seconds) + "）",
                         "提交延迟预算 < 2.5s（§6）");
+            }
+
+            // ---- 对照：不开词级信息的耗时 ----
+            out.append('\n').append("--- 对照：不开词级信息（与流式预览同质的路径）---\n");
+            for (double seconds : new double[] {5.0}) {
+                byte[] pcm = syntheticPcm(seconds);
+                long r0 = System.nanoTime();
+                try (VoskModel.Recognizer r = model.createRecognizer(16000.0f)) {
+                    r.setWords(false);
+                    r.accept(pcm, pcm.length);
+                    r.finalResult();
+                }
+                long rMs = (System.nanoTime() - r0) / 1_000_000;
+                report(out, metrics,
+                        String.format("不开词级 %.0f 秒", seconds),
+                        rMs + " ms（RTF=" + String.format("%.3f", rMs / 1000.0 / seconds) + "）",
+                        "与上面开词级的数字对比，说明重打分的额外开销");
             }
 
             // ---- 真实音频（若给了 wav） ----

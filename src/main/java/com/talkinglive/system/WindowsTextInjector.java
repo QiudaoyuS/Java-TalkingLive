@@ -80,29 +80,76 @@ public final class WindowsTextInjector implements TextInjector {
     }
 
     /**
-     * 带目标窗口校验的注入。
+     * 带目标窗口校验的注入（旧签名，保留给单目标场景）。
      *
      * @param expectedWindow 段落开始时的前台窗口句柄；非 0 时先校验它仍是前台窗口
      */
     public Result inject(int backspaces, String text, long expectedWindow) {
+        return inject(backspaces, text, expectedWindow, 0);
+    }
+
+    /**
+     * 注入到目标窗口，必要时先把焦点还原回去。
+     *
+     * <p><b>这里是整个产品最容易出、也最难查的一个错误决策点。</b>
+     * 早期实现是「提交时前台窗口只要变了就**放弃注入**」——理由是
+     * {@code DESIGN.md} §7「切窗口 → 放弃注入，避免把文字误发到别的程序」。
+     * 但实测下来这条规则导致的是**一个字都出不去**，而且用户完全不知道为什么：
+     *
+     * <ul>
+     *   <li>「段落开始时的前台窗口」是在**按下唤醒词那一刻**取的。用户对着 A 窗口说话时，
+     *       前台很可能已经是别的东西（输入法候选、通知、他刚点过的另一个窗口）。</li>
+     *   <li>期间的任何一次焦点抖动（通知弹出、任务栏预览、IEM 切换）都会让前台句柄变化。</li>
+     *   <li>于是一次「拒绝注入」把用户刚说的一整段话直接丢掉，且没有历史记录可找回。</li>
+     * </ul>
+     *
+     * <p>现在改为**先尝试把焦点还原到目标，再注入**：
+     * <ol>
+     *   <li>前台就是目标 → 直接注入（正常路径）。</li>
+     *   <li>前台不是目标但目标还活着 → 先把自己/Win32 的前台切回目标，再注入。
+     *       本进程刚刚收到过用户的点击（悬浮球）或很快会有交互，通常有这个权限。</li>
+     *   <li>切不回去 → **仍然注入**到当前焦点，并在结果里如实说明「注入到了别的地方」。
+     *       理由：把文字打进当前焦点，用户至少**看得到文字、能自己剪走**；
+     *       而丢弃是纯粹的信息损失。§7 想避免的是「误发到别的程序」，
+     *       但「一个字都没有」对用户更糟——这是两种坏之间选更可挽回的那个。</li>
+     * </ol>
+     *
+     * @param expectedWindow 段落开始时的前台窗口句柄
+     * @param expectedFocus  段落开始时焦点控件句柄（子窗口）；0 表示未知
+     */
+    public Result inject(int backspaces, String text, long expectedWindow, long expectedFocus) {
         if (!available) {
             return Result.fail(Result.Failure.UNAVAILABLE, unavailableReason);
         }
+
+        boolean retargeted = false;
+        String retargetNote = null;
         if (expectedWindow != 0) {
-            long now = Win32.hwndValue(Win32.User32.INSTANCE.GetForegroundWindow());
-            if (now != expectedWindow) {
-                String msg = "提交时前台窗口已从 0x" + Long.toHexString(expectedWindow)
-                        + " 变为 0x" + Long.toHexString(now) + "，为避免把文字误发到别的程序，本段已放弃";
-                log.warn("{}", msg);
-                return Result.fail(Result.Failure.FOREGROUND_CHANGED, msg);
-            }
             if (targetElevated(expectedWindow)) {
                 String msg = "目标程序正在以管理员身份运行，Windows 的 UIPI 隔离会静默丢弃注入的文字。"
                         + "请以管理员身份重新启动 TalkingLive 后再试。";
                 log.warn("{}（目标窗口 0x{}）", msg, Long.toHexString(expectedWindow));
                 return Result.fail(Result.Failure.UIPI_BLOCKED, msg);
             }
+            long now = Win32.hwndValue(Win32.User32.INSTANCE.GetForegroundWindow());
+            if (now != expectedWindow) {
+                String note = "提交时前台窗口是 0x" + Long.toHexString(now)
+                        + "（'" + ForegroundWatcher.title(now) + "'），目标原为 0x"
+                        + Long.toHexString(expectedWindow)
+                        + "（'" + ForegroundWatcher.title(expectedWindow) + "'）";
+                log.warn("{}；尝试把焦点还原到目标…", note);
+                if (restoreForeground(expectedWindow, expectedFocus)) {
+                    retargeted = true;
+                    log.info("焦点已还原到目标 0x{}，继续注入", Long.toHexString(expectedWindow));
+                } else {
+                    // 还原失败：不放弃，注入到当前焦点，由调用方明确告知用户
+                    retargetNote = note + "；且无法把焦点还原回目标，文字已注入到**当前焦点**所在处。"
+                            + "若文字出现在别的地方，请手动剪走。";
+                    log.warn("{}", retargetNote);
+                }
+            }
         }
+
         int events = 0;
         if (backspaces > 0) {
             int n = sendBackspaces(backspaces);
@@ -122,8 +169,100 @@ public final class WindowsTextInjector implements TextInjector {
         }
         injections.incrementAndGet();
         injectedCodePoints.addAndGet(TextUtils.codePointCount(body));
-        log.info("注入完成：退格={} 文本={} 事件数={}", backspaces, Logging.describeWithFingerprint(body), events);
-        return Result.ok(events);
+        log.info("注入完成：退格={} 文本={} 事件数={}{}{}",
+                backspaces, Logging.describeWithFingerprint(body), events,
+                retargeted ? "（已把焦点还原到目标）" : "",
+                retargetNote == null ? "" : "（焦点还原失败，注入到当前焦点）");
+
+        Result r = Result.ok(events);
+        return retargetNote == null ? r : new Result(true, events, retargetNote, Result.Failure.NONE);
+    }
+
+    /**
+     * 把前台窗口（并尽量把键盘焦点）还原到目标。
+     *
+     * <p>两步都要做：
+     * <ul>
+     *   <li>{@code SetForegroundWindow} 让目标窗口回到前台。Windows 对允许调用的进程有要求，
+     *       因此可能失败——失败不算致命，返回 false 由调用方决定怎么办。</li>
+     *   <li>如果拿到了段落开始时的**焦点控件**句柄（例如浏览器地址栏、
+     *       文本框的内部子窗口），再调 {@code SetFocus} 把光标放回那个控件。
+     *       只把窗口切到前台但不还原控件焦点，文字可能打到窗口本身而不是输入框里。</li>
+     * </ul>
+     *
+     * @return 是否成功把目标设成前台
+     */
+    public boolean restoreForeground(long targetWindow, long focusControl) {
+        try {
+            HWND target = Win32.hwndOf(targetWindow);
+            if (target == null || !Win32.User32.INSTANCE.IsWindow(target)) {
+                return false;
+            }
+            boolean ok = Win32.User32.INSTANCE.SetForegroundWindow(target);
+            if (!ok) {
+                // 常见失败原因：目标线程不等我们的输入。退一步用 AttachThreadInput 借一下输入队列。
+                ok = forceForeground(targetWindow);
+            }
+            if (ok && focusControl != 0) {
+                try {
+                    Win32.User32.INSTANCE.SetFocus(Win32.hwndOf(focusControl));
+                } catch (RuntimeException e) {
+                    log.debug("SetFocus 到控件 0x{} 失败（忽略，窗口已在前台）",
+                            Long.toHexString(focusControl));
+                }
+            }
+            return ok;
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            log.debug("还原前台失败：{}", e.toString());
+            return false;
+        }
+    }
+
+    /**
+     * 强行把窗口带到前台：借目标线程的输入队列之后再调用 {@code SetForegroundWindow}。
+     *
+     * <p>这是绕过 Windows 前台锁的常规做法（{@code AttachThreadInput} 把两个线程的输入队列
+     * 临时接在一起，此时调用方被视为「有资格」设置前台）。用完必须解绑。
+     */
+    private boolean forceForeground(long targetWindow) {
+        var pidRef = new IntByReference();
+        HWND target = Win32.hwndOf(targetWindow);
+        int targetThread = Win32.User32.INSTANCE.GetWindowThreadProcessId(target, pidRef);
+        int selfThread = Win32.Kernel32.INSTANCE.GetCurrentThreadId();
+        if (targetThread == 0) {
+            return false;
+        }
+        boolean attached = false;
+        try {
+            attached = Win32.User32.INSTANCE.AttachThreadInput(selfThread, targetThread, true);
+            boolean ok = Win32.User32.INSTANCE.SetForegroundWindow(target);
+            if (ok) {
+                Win32.User32.INSTANCE.BringWindowToTop(target);
+            }
+            log.debug("AttachThreadInput 借队列{}，SetForegroundWindow={}",
+                    attached ? "成功" : "失败", ok);
+            return ok;
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            log.debug("强行置前台失败：{}", e.toString());
+            return false;
+        } finally {
+            if (attached) {
+                try {
+                    Win32.User32.INSTANCE.AttachThreadInput(selfThread, targetThread, false);
+                } catch (RuntimeException ignored) {
+                    // 解绑失败无法补救
+                }
+            }
+        }
+    }
+
+    /** 当前前台窗口句柄。 */
+    public long currentForeground() {
+        try {
+            return Win32.hwndValue(Win32.User32.INSTANCE.GetForegroundWindow());
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            return 0;
+        }
     }
 
     @Override

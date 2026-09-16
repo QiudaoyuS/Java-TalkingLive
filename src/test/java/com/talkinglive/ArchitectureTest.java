@@ -211,11 +211,19 @@ class ArchitectureTest {
      *   <li>{@code system.DpiProbe} —— 核对 Win32 物理像素与 AWT 逻辑像素的坐标空间。
      *       这条「最容易反复踩的坑」（§4.4）不能靠背结论：进程 DPI awareness 不同，
      *       结论就相反，必须能当场实测。实测过程中还因此误判过一次窗口位置。</li>
+     *   <li>{@code system.WindowProbe} —— 探测屏幕某位置实际归属哪个窗口，
+     *       用于排查「点了没反应」。</li>
+     *   <li>{@code ReproClick} —— 验证「应用运行时别的窗口还能不能收到真实鼠标点击」。
+     *       这是用户报告「屏幕被抢占、什么都点不动」时的判据工具：它用 Robot 发真实点击，
+     *       覆盖悬浮球常驻 / 浮窗显示中 / 贴边轮询 / 菜单打开四种状态。</li>
+     *   <li>{@code ReproBlock}、{@code ReproTray} —— 同上问题的另两条排查路径：
+     *       分别是「焦点是否被劫持」与「托盘气泡是否阻塞 UI 线程」。</li>
      * </ul>
      */
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
             java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
-                    "DpiProbe.java");
+                    "DpiProbe.java", "WindowProbe.java",
+                    "ReproClick.java", "ReproBlock.java", "ReproTray.java");
 
     @Test
     @DisplayName("产品路径上只有一个 main：App（§4.5）")

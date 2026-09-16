@@ -129,12 +129,47 @@ public final class Win32 {
 
         boolean SetProcessDpiAwarenessContext(Pointer value);
 
+        /**
+         * 把窗口带到前台。
+         *
+         * <p>用于「提交时前台窗口已变」的补救：先试着把焦点还原到用户原本的目标窗口。
+         * 可能被 Windows 的前台锁拒绝——失败时用 {@code AttachThreadInput} 借输入队列再试
+         * （见 {@code WindowsTextInjector.forceForeground}）。
+         */
         boolean SetForegroundWindow(HWND hwnd);
 
         int GA_ROOT = 2;
 
         /** 某屏幕点（物理像素）上最上层的窗口。用于自检诊断点击为何没送达。 */
         HWND WindowFromPoint(com.sun.jna.platform.win32.WinDef.POINT p);
+
+        /** 按类名（与可选窗口名）查找顶层窗口。诊断用，也是找 Shell_TrayWnd 的唯一途径。 */
+        HWND FindWindow(String lpClassName, String lpWindowName);
+
+        /** 取窗口类名。诊断用。 */
+        int GetClassNameW(HWND hwnd, char[] lpClassName, int nMaxCount);
+
+        /** 把窗口提到 Z 序顶端（不激活）。配合 AttachThreadInput 使用。 */
+        boolean BringWindowToTop(HWND hwnd);
+
+        /** 把键盘焦点设到某个控件（子窗口）。 */
+        HWND SetFocus(HWND hwnd);
+
+        /**
+         * 把两个线程的输入队列临时接在一起。
+         *
+         * <p>这是绕过 Windows 前台锁的常规手段：接上之后调用方被视为「有资格」设置前台。
+         * **用完必须解开**（{@code fAttach=false}）。
+         */
+        boolean AttachThreadInput(int idAttach, int idAttachTo, boolean fAttach);
+
+        /** 枚举顶层窗口。诊断用（回调返回 false 表示停止枚举）。 */
+        boolean EnumWindows(EnumWindowsProc lpEnumFunc, com.sun.jna.Pointer lParam);
+
+        /** {@link #EnumWindows} 的回调。 */
+        interface EnumWindowsProc extends com.sun.jna.win32.StdCallLibrary.StdCallCallback {
+            boolean callback(HWND hwnd, com.sun.jna.Pointer lParam);
+        }
     }
 
     /**
@@ -154,6 +189,13 @@ public final class Win32 {
         /** 写窗口样式。 */
         com.sun.jna.platform.win32.BaseTSD.LONG_PTR SetWindowLongPtrW(HWND hwnd, int nIndex,
                 com.sun.jna.platform.win32.BaseTSD.LONG_PTR dwNewLong);
+
+        /**
+         * 取线程的 GUI 状态（含该线程当前有键盘焦点的控件）。
+         *
+         * <p>用它而不是 {@code GetFocus()}：后者只对调用线程自己的窗口有效。
+         */
+        boolean GetGUIThreadInfo(int idThread, GUITHREADINFO pgui);
     }
 
     /** kernel32。 */
@@ -161,6 +203,9 @@ public final class Win32 {
         Kernel32 INSTANCE = Native.load("kernel32", Kernel32.class, W32APIOptions.DEFAULT_OPTIONS);
 
         int GetCurrentProcessId();
+
+        /** 当前线程 id（{@code AttachThreadInput} 需要）。 */
+        int GetCurrentThreadId();
 
         Pointer OpenProcess(int dwDesiredAccess, boolean bInheritHandle, int dwProcessId);
 
@@ -213,5 +258,48 @@ public final class Win32 {
 
     public static HWND hwndOf(long value) {
         return value == 0 ? null : new HWND(Pointer.createConstant(value));
+    }
+
+    /** 一个线程的 GUI 状态，用于取「那个线程里当前有键盘焦点的控件」。 */
+    @Structure.FieldOrder({"cbSize", "flags", "hwndActive", "hwndFocus", "hwndCapture",
+            "hwndMenuOwner", "hwndMoveSize", "hwndCaret", "rcCaret"})
+    public static class GUITHREADINFO extends Structure {
+        public int cbSize;
+        public int flags;
+        public HWND hwndActive;
+        public HWND hwndFocus;
+        public HWND hwndCapture;
+        public HWND hwndMenuOwner;
+        public HWND hwndMoveSize;
+        public HWND hwndCaret;
+        public com.sun.jna.platform.win32.WinDef.RECT rcCaret;
+
+        public GUITHREADINFO() {
+            super();
+            cbSize = size();
+        }
+    }
+
+    /**
+     * 取某个线程的 GUI 状态。
+     *
+     * <p>为什么要它：{@code GetFocus()} 只对**调用线程自己**的窗口有效，拿别的进程的焦点
+     * 必须走 {@code GetGUIThreadInfo}。而「把焦点还原到用户原本的输入框」正需要知道
+     * 那个输入框（子窗口）的句柄——只知道顶层窗口是不够的，文字可能打到窗口本身
+     * 而不是输入框里。
+     *
+     * @return 是否成功
+     */
+    public static boolean guiThreadInfo(int threadId, GUITHREADINFO out) {
+        try {
+            out.cbSize = out.size();
+            boolean ok = Win32.WinStyle.INSTANCE.GetGUIThreadInfo(threadId, out);
+            if (ok) {
+                out.read();
+            }
+            return ok;
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            return false;
+        }
     }
 }

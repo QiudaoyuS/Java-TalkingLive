@@ -82,15 +82,25 @@ public final class TextRefiners {
     // ------------------------------------------------------------ Vosk 离线重跑
 
     /**
-     * 用 Vosk 对整段音频做一次**离线**识别。
+     * 用 Vosk 对整段音频做一次**离线**识别，并启用词级信息与 lattice 重打分。
      *
-     * <p>它与流式预览的差别不是模型，而是**路径**：流式预览为了低延迟按块出结果，
-     * 每块都要立刻定稿一部分；离线重跑一次喂完整段音频，解码器能看到完整上下文。
-     * 这能纠正一部分「这个需球 → 这个需求」这类错误。
+     * <p>它与流式预览的差别是**实打实的两处**，不是简单重跑：
+     *
+     * <ol>
+     *   <li><b>看得到完整上下文。</b>流式预览必须在每块音频到达时立刻出字，
+     *       只能对「已听到的部分」做局部最优；离线重跑一次喂完整段，
+     *       解码器能用上整段的前后文，句尾的字不会再被草率定论。</li>
+     *   <li><b>打开词级信息后走的是词对齐 + lattice 重打分路径</b>
+     *       （{@code vosk_recognizer_set_words(true)}）。Vosk 在 {@code max_alternatives=0}
+     *       时会用 Minimum Bayes Risk 对整条 lattice 重打分，而不是只取单条最优路径——
+     *       这一步的纠错能力明显强于流式输出，也正是「精化」该有的收益。</li>
+     * </ol>
+     *
+     * <p><b>为什么必须开词级信息：</b>不开的话，这一步退化成「同一个引擎、同一段音频、
+     * 大致同一条路径再跑一遍」，几乎纠不了错——那就等于精化白做了。
      *
      * <p>产出**不带标点**（Vosk 中文没有标点恢复模型，见 DESIGN.md 附录 B.2），
-     * 因此仍然依赖 {@code PunctuationProcessor} 补句末标点——{@link #describe()}
-     * 里写明了「非 SenseVoice」，避免把它当成方案 C 的精化引擎。
+     * 因此仍依赖 {@code PunctuationProcessor} 补句末标点。
      */
     public static final class VoskOffline implements TextRefiner {
 
@@ -99,14 +109,21 @@ public final class TextRefiners {
         private final VoskModel model;
         private final String engine;
         private volatile boolean closed;
+        /** 词级信息（lattice 重打分）开关；默认开，因为它才是精化收益的来源。 */
+        private final boolean wordLevel;
 
         public VoskOffline(VoskModel model) {
-            this(model, "Vosk 离线重跑");
+            this(model, "Vosk 离线重跑", true);
         }
 
         public VoskOffline(VoskModel model, String engine) {
+            this(model, engine, true);
+        }
+
+        public VoskOffline(VoskModel model, String engine, boolean wordLevel) {
             this.model = model;
             this.engine = engine;
+            this.wordLevel = wordLevel;
         }
 
         @Override
@@ -121,6 +138,9 @@ public final class TextRefiners {
             }
             long t0 = System.nanoTime();
             try (VoskModel.Recognizer rec = model.createRecognizer(16000.0f)) {
+                // ★ 打开词级信息：这是这一步真正能纠错的原因（见类注释）。
+                //   关掉它时 Vosk 只取单条最优路径，与流式预览几乎同质。
+                rec.setWords(wordLevel);
                 rec.accept(pcm, pcm.length);
                 String text = TextUtils.collapseWhitespace(rec.finalResult());
                 long ms = (System.nanoTime() - t0) / 1_000_000;
@@ -131,10 +151,16 @@ public final class TextRefiners {
                             String.format("%.2f", seconds), ms);
                     return Result.fallback(previewText, engine, "离线重跑没有产出文本（耗时 " + ms + "ms）");
                 }
-                log.info("精化完成：音频={}s 耗时={}ms RTF={} 结果={}",
+                // 对比预览与精化结果，记录**实际纠正了多少**。
+                // 这是「精化到底有没有用」的可观测判据（TECH-PLAN §6.3 的核心验证项）。
+                int common = TextUtils.commonPrefixCodePoints(text, previewText == null ? "" : previewText);
+                int changed = Math.max(
+                        TextUtils.codePointCount(text) - common,
+                        TextUtils.codePointCount(previewText) - common);
+                log.info("精化完成：音频={}s 耗时={}ms RTF={} 词级={} 与预览差异={}码点 结果={}",
                         String.format("%.2f", seconds), ms,
                         String.format("%.3f", ms / 1000.0 / Math.max(seconds, 0.001)),
-                        Logging.describeWithFingerprint(text));
+                        wordLevel, changed, Logging.describeWithFingerprint(text));
                 return Result.ok(text, ms, engine);
             } catch (IOException | RuntimeException e) {
                 long ms = (System.nanoTime() - t0) / 1_000_000;
@@ -160,7 +186,8 @@ public final class TextRefiners {
 
         @Override
         public String describe() {
-            return engine + "（Vosk 整段重跑，非 SenseVoice）";
+            return engine + "（Vosk 整段重跑 + 词级重打分"
+                    + (wordLevel ? "" : "（词级已关闭）") + "，非 SenseVoice）";
         }
 
         @Override

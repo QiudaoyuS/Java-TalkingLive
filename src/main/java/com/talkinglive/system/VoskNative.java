@@ -90,6 +90,20 @@ public interface VoskNative extends Library {
     /** 清空识别状态（保留模型）。 */
     void vosk_recognizer_reset(Pointer recognizer);
 
+    /**
+     * 让结果里带上词级信息（{@code result[]}）。
+     *
+     * <p>打开后 Vosk 会走**词对齐 + lattice 重打分**的路径，比只取最优路径更准，
+     * 也便于按词判断置信度。精化（段落离线重跑）值得打开，实时预览不值得。
+     */
+    void vosk_recognizer_set_words(Pointer recognizer, boolean enabled);
+
+    /** 中间结果也带词级信息。 */
+    void vosk_recognizer_set_partial_words(Pointer recognizer, boolean enabled);
+
+    /** 设置 N-best 候选数。 */
+    void vosk_recognizer_set_max_alternatives(Pointer recognizer, int n);
+
     void vosk_recognizer_free(Pointer recognizer);
 
     /** 设置日志级别（0 = 关闭，-1 = 只错误，…）。 */

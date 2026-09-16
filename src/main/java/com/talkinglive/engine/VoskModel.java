@@ -252,6 +252,36 @@ public final class VoskModel implements AutoCloseable {
             return closed ? "" : textOf(VoskNative.get().vosk_recognizer_final_result(handle));
         }
 
+        /**
+         * 打开「输出词级信息」。
+         *
+         * <p>打开后结果里会带上 {@code result[]} 数组（每个词的起止时间与置信度）。
+         * 对本产品的用处：Vosk 在这个模式下走的是**带词对齐的 MBR / lattice 重打分**路径，
+         * 比只取最优路径的普通输出更准，而且能按词拿到置信度——可以用来做
+         * 「这段里哪些词不太可靠」的标记。
+         *
+         * <p>只对**段落级离线重跑**有意义：流式预览每次都要即时出字，打开它只会增加开销。
+         */
+        public void setWords(boolean enabled) {
+            if (!closed) {
+                VoskNative.get().vosk_recognizer_set_words(handle, enabled);
+            }
+        }
+
+        /** 打开「中间结果也带词级信息」。与 {@link #setWords} 配套。 */
+        public void setPartialWords(boolean enabled) {
+            if (!closed) {
+                VoskNative.get().vosk_recognizer_set_partial_words(handle, enabled);
+            }
+        }
+
+        /** 设置 N-best 候选数（>1 时结果为 {@code alternatives[]}）。 */
+        public void setMaxAlternatives(int n) {
+            if (!closed && n >= 0) {
+                VoskNative.get().vosk_recognizer_set_max_alternatives(handle, n);
+            }
+        }
+
         /** 清空识别状态，保留模型。 */
         public void reset() {
             if (!closed) {

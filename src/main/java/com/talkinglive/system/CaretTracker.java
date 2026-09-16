@@ -161,4 +161,45 @@ public final class CaretTracker {
             return 0;
         }
     }
+
+    /**
+     * 取当前前台窗口里**有键盘焦点的那个控件**（子窗口）。
+     *
+     * <p>为什么需要它：注入前要「把焦点还原到用户原本的输入框」时，只知道顶层窗口不够——
+     * 浏览器的地址栏、文本框都是子窗口。只把顶层窗口切到前台，文字可能落到窗口本身
+     * 而不是输入框里，用户的感受仍然是「打不进去」。
+     *
+     * <p>{@code GetFocus()} 只对**调用线程自己**的窗口有效，取别的进程的焦点必须走
+     * {@code GetGUIThreadInfo}（见 {@link Win32#guiThreadInfo}）。
+     *
+     * @return 焦点控件句柄；取不到返回 0
+     */
+    public static long focusedControl() {
+        long fg = foregroundWindow();
+        return focusedControlOf(fg);
+    }
+
+    /** 取指定窗口所属线程里当前有焦点的控件。 */
+    public static long focusedControlOf(long hwnd) {
+        if (!DpiScale.isWindows() || hwnd == 0) {
+            return 0;
+        }
+        try {
+            HWND h = Win32.hwndOf(hwnd);
+            var pidRef = new com.sun.jna.ptr.IntByReference();
+            int threadId = Win32.User32.INSTANCE.GetWindowThreadProcessId(h, pidRef);
+            if (threadId == 0) {
+                return 0;
+            }
+            Win32.GUITHREADINFO info = new Win32.GUITHREADINFO();
+            if (!Win32.guiThreadInfo(threadId, info)) {
+                return 0;
+            }
+            // hwndFocus 可能是 0（该线程当前没有焦点控件），也可能等于顶层窗口本身
+            return info.hwndFocus == null ? 0 : com.sun.jna.Pointer.nativeValue(info.hwndFocus.getPointer());
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            log.debug("取焦点控件失败：{}", e.toString());
+            return 0;
+        }
+    }
 }
