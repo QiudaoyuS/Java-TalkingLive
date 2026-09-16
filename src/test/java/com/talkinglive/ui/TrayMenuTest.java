@@ -93,16 +93,50 @@ class TrayMenuTest {
     }
 
     @Test
-    @DisplayName("托盘右键走的是 Swing 菜单，不是原生菜单（防止有人改回原生菜单）")
-    void trayRightClickUsesSwingMenu() throws IOException {
+    @DisplayName("托盘右键走的是**托盘自己的** Swing 菜单与宿主，不借用悬浮球")
+    void trayRightClickUsesItsOwnSwingMenu() throws IOException {
         String src = Files.readString(APP_JAVA, StandardCharsets.UTF_8);
-        assertTrue(src.contains("isPopupTrigger()"),
-                "托盘右键应当用 isPopupTrigger() 判断并弹 Swing 菜单（见 maybeShowTrayMenu）");
-        assertTrue(src.contains("showMenuAtScreen"),
-                "托盘右键应当调用 FloatingBall.showMenuAtScreen，而不是依赖原生菜单");
-        // 托盘图标**仍然**需要传一个 PopupMenu 给 TrayIcon 构造函数（API 要求），
-        // 所以这里只断言"它不再是唯一的菜单通路"，而不是断言它不存在。
-        assertTrue(src.contains("new TrayIcon("),
-                "托盘图标仍应创建（PopupMenu 参数是 TrayIcon 的 API 要求）");
+        // 只查**代码**，跳过注释行：这个文件里有五处注释专门解释"为什么不用
+        // isPopupTrigger"（以及踩过的坑），粗查字符串会把那些解释也算成违规
+        // （第一版断言就是这么假失败的，改了两轮才对）。
+        boolean callsPopupTrigger = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8).stream()
+                .map(String::strip)
+                .filter(t -> !t.startsWith("*") && !t.startsWith("//") && !t.startsWith("/*"))
+                .anyMatch(t -> t.contains("isPopupTrigger()"));
+        assertTrue(!callsPopupTrigger && src.contains("BUTTON3"),
+                "托盘右键应当直接判 BUTTON3。isPopupTrigger() 在 TrayIcon 的事件上"
+                        + " Windows 下不置位（实测：监听器从不生效，原生菜单照旧弹出）");
+        assertTrue(src.contains("new TrayMenuAnchor()"),
+                "托盘菜单应当有自己的宿主窗口（TrayMenuAnchor），"
+                        + "而不是借悬浮球当宿主 —— 借用会让两个菜单不独立");
+        assertTrue(src.contains("MenuFactory.showAt(trayMenu, trayMenuAnchor"),
+                "托盘应当把**自己的**菜单实例弹在**自己的**锚窗口上");
+        assertTrue(src.contains("MenuFactory.build(menus)"),
+                "托盘菜单应当由 MenuFactory 构造（文案与悬浮球那份保持同一份定义）");
+        // 托盘那段不该再引用悬浮球当宿主
+        int trayBlock = src.indexOf("private void maybeShowTrayMenu");
+        String trayBody = src.substring(trayBlock, Math.min(src.length(), trayBlock + 3000));
+        assertTrue(!trayBody.contains("ball.showMenuAtScreen") && !trayBody.contains("ball.showMenuAt("),
+                """
+                        托盘右键不应该再借用悬浮球当弹窗宿主。用户明确要求两个菜单
+                        「相互独立」：共用宿主会让点开一个再点另一个时行为互相影响
+                        （实测表现就是"点其他位置时悬浮球菜单自己弹出来"）。
+                        """);
+    }
+
+    @Test
+    @DisplayName("两个菜单都是中文，且文案由 MenuFactory 单点定义")
+    void bothMenusAreChineseFromOneDefinition() throws IOException {
+        Path factory = Path.of("src", "main", "java", "com", "talkinglive", "ui", "MenuFactory.java");
+        String src = Files.readString(factory, StandardCharsets.UTF_8);
+        for (String label : new String[] {"手动开始", "暂停监听", "恢复监听", "设置", "查看日志", "退出"}) {
+            assertTrue(src.contains(label), "MenuFactory 里应当有中文菜单项：" + label);
+        }
+        // 两个入口都从 MenuFactory 取菜单 —— 这是"内容一致"的结构保证
+        String ball = Files.readString(
+                Path.of("src", "main", "java", "com", "talkinglive", "ui", "FloatingBall.java"),
+                StandardCharsets.UTF_8);
+        assertTrue(ball.contains("MenuFactory.build(menuActions)"),
+                "悬浮球菜单也应当来自 MenuFactory（否则两处文案迟早不一致）");
     }
 }

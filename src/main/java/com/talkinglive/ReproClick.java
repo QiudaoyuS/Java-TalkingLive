@@ -6,6 +6,7 @@ import com.talkinglive.system.ForegroundWatcher;
 import com.talkinglive.system.Win32;
 import com.talkinglive.system.Win32WindowStyles;
 import com.talkinglive.ui.FloatingBall;
+import com.talkinglive.ui.MenuActions;
 import com.talkinglive.ui.PreviewBar;
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -90,7 +91,7 @@ public final class ReproClick {
                 @Override public void onOpenSettings() {}
                 @Override public void onOpenLog() {}
                 @Override public void onQuit() {}
-            });
+            }, MenuActions.noop());
             ballRef[0].addNotify();
             Win32WindowStyles.applyNoActivateToolWindow(ballRef[0]);
             ballRef[0].applySavedGeometry(null);

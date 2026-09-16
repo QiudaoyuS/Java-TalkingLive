@@ -34,8 +34,11 @@ import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.Icons;
 import com.talkinglive.ui.LoadingWindow;
+import com.talkinglive.ui.MenuActions;
+import com.talkinglive.ui.MenuFactory;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
+import com.talkinglive.ui.TrayMenuAnchor;
 import com.talkinglive.ui.Theme;
 import java.awt.AWTException;
 import java.awt.EventQueue;
@@ -49,6 +52,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import org.slf4j.Logger;
@@ -1109,7 +1113,7 @@ public final class App {
         }
 
         onUi(() -> {
-            ball = new FloatingBall(null, new BallActions());
+            ball = new FloatingBall(null, new BallActions(), menus);
             // 不抢焦点必须在窗口**第一次显示之前**设好，否则会先闪一下焦点（§4.4）
             ball.addNotify();
             Win32WindowStyles.applyNoActivateToolWindow(ball);
@@ -1187,6 +1191,14 @@ public final class App {
             quit.addActionListener(e -> shutdown());
             fallback.add(quit);
 
+            // ★ 托盘菜单的**独立宿主**：1×1 透明窗口，只在弹菜单时挪到托盘位置。
+            //   有了它，托盘菜单完全不依赖悬浮球 —— 悬浮球被挪走/收起/关掉都不影响。
+            //   不抢焦点必须在**第一次显示之前**设好，否则弹菜单那一瞬会把前台窗口
+            //   从用户正在打字的程序上抢走，注入就会被 §7 判定放弃。
+            trayMenuAnchor = new TrayMenuAnchor();
+            trayMenuAnchor.addNotify();
+            Win32WindowStyles.applyNoActivateToolWindow(trayMenuAnchor);
+
             trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), fallback);
             trayIcon.setImageAutoSize(true);
             trayIcon.addActionListener(e -> onBallLeftClick());
@@ -1215,14 +1227,20 @@ public final class App {
             SystemTray.getSystemTray().add(trayIcon);
             log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
                     + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
-            log.info("托盘右键已改为弹出 Swing 菜单（原生菜单在 150% DPI 下画不出中文）");
+            log.info("托盘右键：弹出**托盘自己的** Swing 菜单（原生菜单在 150% DPI 下画不出中文；"
+                    + "宿主是独立的 TrayMenuAnchor，不借用悬浮球）");
         } catch (AWTException | RuntimeException e) {
             log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
         }
     }
 
     /**
-     * 托盘图标被右键时弹出**与悬浮球同一个** Swing 菜单。
+     * 托盘图标被右键时，弹出**托盘自己的** Swing 菜单。
+     *
+     * <p><b>独立于悬浮球</b>（用户要求）：菜单实例是托盘自己的一份，宿主是
+     * {@link TrayMenuAnchor}（一个贴着托盘位置的 1×1 透明窗口），
+     * 不借用悬浮球窗口。于是关掉/挪动/收起悬浮球都不影响托盘菜单，
+     * 两个入口的"是否在显示"也是各自独立的状态。
      *
      * <p><b>判据只看按钮，不看 isPopupTrigger()。</b>第一版用
      * {@code e.isPopupTrigger()}，实测在 {@code TrayIcon} 的鼠标事件上
@@ -1243,8 +1261,8 @@ public final class App {
         }
         lastTrayMenuAt = now;
 
-        // 事件坐标是**托盘图标的局部坐标**，转成屏幕坐标后交给悬浮球弹菜单。
-        // 悬浮球窗口是常驻的、且 WS_EX_NOACTIVATE（不抢焦点），正好适合当弹窗宿主。
+        // 事件坐标是**托盘图标的局部坐标**，转成屏幕坐标后把锚窗口挪过去。
+        // 拿不到组件位置时（极少见）退回鼠标真实位置 —— 菜单挂在鼠标那儿总是对的。
         java.awt.Point screen = null;
         java.awt.Component src = e.getComponent();
         if (src != null) {
@@ -1256,24 +1274,72 @@ public final class App {
             }
         }
         if (screen == null) {
-            // 拿不到组件位置时退回鼠标真实位置 —— 菜单挂在鼠标那儿总是对的
             java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
             if (pi == null) {
                 return;
             }
             screen = pi.getLocation();
         }
+
         final java.awt.Point at = screen;
-        log.info("托盘右键：弹出 Swing 菜单 @ {},{}", at.x, at.y);
         onUi(() -> {
-            if (ball != null) {
-                ball.showMenuAtScreen(ball, at.x, at.y);
+            if (trayMenuAnchor == null) {
+                return;
             }
+            trayMenuAnchor.moveTo(at.x, at.y);
+            if (trayMenu == null) {
+                trayMenu = MenuFactory.build(menus);
+            }
+            JPopupMenu shown = MenuFactory.showAt(trayMenu, trayMenuAnchor, 0, 0);
+            log.info("托盘右键：弹出托盘自己的 Swing 菜单 @ {},{}（{}）",
+                    at.x, at.y, shown == null ? "已有菜单在显示，忽略" : "ok");
         });
     }
 
     /** 上一次托盘右键弹菜单的时间（用于去重，见 {@link #maybeShowTrayMenu}）。 */
     private volatile long lastTrayMenuAt;
+
+    /** 托盘菜单自己的实例与宿主窗口（与悬浮球的相互独立）。 */
+    private JPopupMenu trayMenu;
+    private TrayMenuAnchor trayMenuAnchor;
+
+    /**
+     * 菜单动作 —— 两个菜单共用**同一份**实现。
+     *
+     * <p>注意"共用实现"与"共用实例"是两件事：菜单对象各自一份（相互独立），
+     * 但点了之后做什么是同一套逻辑。这样既独立又不会行为漂移。
+     */
+    private final MenuActions menus = new MenuActions() {
+        @Override
+        public void onManualToggle() {
+            onBallLeftClick();
+        }
+
+        @Override
+        public void onTogglePause() {
+            togglePause();
+        }
+
+        @Override
+        public void onOpenSettings() {
+            openSettings();
+        }
+
+        @Override
+        public void onOpenLog() {
+            openDiagnostics(DiagnosticsWindow.TAB_LOG);
+        }
+
+        @Override
+        public void onQuit() {
+            shutdown();
+        }
+
+        @Override
+        public boolean paused() {
+            return App.this.paused;
+        }
+    };
 
     /** 托盘图标：与悬浮球同源的矢量话筒（{@link Icons}），不再各画一份。 */
     private static Image trayImage() {

@@ -17,6 +17,7 @@ import com.talkinglive.text.TextUtils;
 import com.talkinglive.text.WholeSegmentPolicy;
 import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
+import com.talkinglive.ui.MenuActions;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
 import com.talkinglive.ui.Theme;
@@ -496,7 +497,7 @@ public final class SelfTest {
 
                     @Override
                     public void onQuit() {}
-                });
+                }, MenuActions.noop());
                 // 扩展样式必须在窗口第一次显示之前设置（§4.4）
                 ballRef[0].addNotify();
                 Win32WindowStyles.applyNoActivateToolWindow(ballRef[0]);

@@ -17,7 +17,6 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.MouseMotionAdapter;
 import java.awt.geom.Ellipse2D;
-import javax.swing.JMenuItem;
 import javax.swing.JPopupMenu;
 import javax.swing.JWindow;
 import javax.swing.SwingUtilities;
@@ -132,9 +131,16 @@ public class FloatingBall extends JWindow {
 
     private final BallPanel panel;
 
-    public FloatingBall(Window owner, Listener listener) {
+    /**
+     * @param owner       宿主窗口（悬浮球通常传 null，它是顶层窗口）
+     * @param listener    悬浮球的鼠标交互回调
+     * @param menuActions 右键菜单的动作（文案与行为由 {@link MenuFactory} 统一定义；
+     *                    菜单实例是本球**自己**的一份，与托盘的相互独立）
+     */
+    public FloatingBall(Window owner, Listener listener, MenuActions menuActions) {
         super(owner);
         this.listener = listener;
+        this.menuActions = menuActions;
 
         setFocusableWindowState(false);   // 不参与键盘焦点
         setAutoRequestFocus(false);       // 显示时不请求焦点
@@ -530,96 +536,23 @@ public class FloatingBall extends JWindow {
      *
      * <p>抽出来是为了能被自动化自检直接调用——「菜单能否从**不抢焦点**的窗口上
      * 弹出来」是这个设计里真实存在的风险点（§4.4）。
+     *
+     * <p>菜单由 {@link MenuFactory} 构造、挂在本球窗口上；托盘那份是**另一个实例、
+     * 另一个宿主**（见 {@code MenuFactory} 与 {@code TrayMenuAnchor} 的注释）——
+     * 两个入口因此相互独立，而文案仍然只有一份定义。
      */
     public void showMenuAt(int x, int y) {
-        showMenu(buildMenu(), this, x, y);
-    }
-
-    /**
-     * 按**屏幕坐标**弹出同一个菜单，调用方自己指定"挂在哪个组件上"。
-     *
-     * <p>存在的理由是托盘入口：{@code TrayIcon} 用的 {@code java.awt.PopupMenu} 是
-     * **原生 Win32 菜单**，实测在 150% DPI 下**不认 AWT 设的字体**，
-     * 汉字全画成方块（给每个 MenuItem setFont 也没用 —— 那一版改过，无效）。
-     * 而 Swing 的 {@code JPopupMenu} 是自绘的，中文字形完全正常。
-     * 所以托盘右键不再走原生菜单，改弹这一个。
-     *
-     * @param invoker    用哪个组件当弹窗的宿主（决定坐标系与生命周期），通常传悬浮球
-     * @param screenX    屏幕坐标 X（Win32 与 AWT 在同一坐标空间，见 DpiScale）
-     * @param screenY    屏幕坐标 Y
-     */
-    public void showMenuAtScreen(java.awt.Component invoker, int screenX, int screenY) {
-        java.awt.Point p = new java.awt.Point(screenX, screenY);
-        javax.swing.SwingUtilities.convertPointFromScreen(p, invoker);
-        showMenu(buildMenu(), invoker, p.x, p.y);
-    }
-
-    /**
-     * 弹出菜单，带一道**闸门**：已经有一个在显示时就不再弹。
-     *
-     * <p>闸门的由来（用户反馈）：「点击托盘右键后，再点击其他位置时悬浮球右键菜单
-     * 自动弹出」。分析下来是菜单在短时间内被多次请求 —— {@code JPopupMenu.show}
-     * 可以重复调用，于是会重叠、也会在被点掉之后又被弹回来。
-     * 这里直接以"当前有没有菜单在显示"为准，比去猜事件来源可靠得多。
-     *
-     * <p>注意用的是 {@code isVisible()} 而不是自建布尔量：Swing 会在菜单被点掉、
-     * 被 Esc 关掉、或失焦时把 visible 置回 false，自建标志位必然与它不同步。
-     */
-    private void showMenu(JPopupMenu menu, java.awt.Component invoker, int x, int y) {
-        if (activeMenu != null && activeMenu.isVisible()) {
-            log.debug("已有菜单在显示，忽略这次弹出请求");
-            return;
+        if (ballMenu == null) {
+            ballMenu = MenuFactory.build(menuActions);
         }
-        activeMenu = menu;
-        menu.show(invoker, x, y);
+        MenuFactory.showAt(ballMenu, this, x, y);
     }
 
-    /** 当前正在显示的菜单（见 {@link #showMenu} 的闸门）。 */
-    private JPopupMenu activeMenu;
+    /** 悬浮球自己的菜单实例（与托盘的实例相互独立）。 */
+    private JPopupMenu ballMenu;
 
-    /** 构造菜单（悬浮球右键与托盘右键共用同一份，避免两处文案/行为漂移）。 */
-    private JPopupMenu buildMenu() {
-        JPopupMenu menu = new JPopupMenu();
-        // 菜单字体走 Theme.menuFont：它保证有中文字形（详情见 Theme.menuFont 的注释）——
-        // 这里曾经用 Theme.font，两者在本机恰好都指向 YaHei UI，但语义不同：
-        // menuFont 是"给菜单用的、已确认能画中文的字体"。
-        menu.setFont(Theme.menuFont(12));
-
-        JMenuItem manual = item(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
-        manual.setEnabled(!paused);
-        manual.addActionListener(a -> listener.onLeftClick());
-        menu.add(manual);
-
-        menu.addSeparator();
-
-        JMenuItem pause = item(paused ? "恢复监听" : "暂停监听");
-        pause.addActionListener(a -> listener.onTogglePause());
-        menu.add(pause);
-
-        menu.addSeparator();
-
-        JMenuItem settings = item("设置...");
-        settings.addActionListener(a -> listener.onOpenSettings());
-        menu.add(settings);
-
-        JMenuItem logs = item("查看日志");
-        logs.addActionListener(a -> listener.onOpenLog());
-        menu.add(logs);
-
-        menu.addSeparator();
-
-        JMenuItem quit = item("退出");
-        quit.addActionListener(a -> listener.onQuit());
-        menu.add(quit);
-
-        return menu;
-    }
-
-    private static JMenuItem item(String text) {
-        JMenuItem i = new JMenuItem(text);
-        i.setFont(Theme.menuFont(12));
-        return i;
-    }
+    /** 菜单能做什么 —— 由 {@code App} 在构造时提供。 */
+    private MenuActions menuActions;
 
     // ---------- 自检支撑 ----------
 
