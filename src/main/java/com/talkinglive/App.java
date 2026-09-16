@@ -145,6 +145,7 @@ public final class App {
         boolean help;
         boolean noMicrophone;
         boolean selfCheck;
+        boolean micTest;
         String refiner;
 
         static Options parse(String[] args) {
@@ -157,6 +158,7 @@ public final class App {
                     case "--help", "-h" -> o.help = true;
                     case "--no-microphone" -> o.noMicrophone = true;
                     case "--self-check" -> o.selfCheck = true;
+                    case "--mic-test" -> o.micTest = true;
                     case "--refiner" -> {
                         if (i + 1 < args.length) {
                             o.refiner = args[++i];
@@ -176,6 +178,8 @@ public final class App {
 
                       （无）             常驻后台，桌面上只有一颗悬浮球
                       --settings        启动并打开设置窗口
+                      --mic-test        麦克风实测：不启动界面，实时打印音量与识别结果
+                                        （验证音频链路与唤醒词命中；按 Ctrl+C 结束）
                       --self-check      跑结构化自检后退出（打印 ASCII 摘要，报告写入文件）
                       --doctor          环境自检：模型 / 麦克风 / 词表校验 / 注入能力，然后退出
                       --no-microphone   不打开麦克风（无麦克风环境下试界面用）
@@ -188,7 +192,7 @@ public final class App {
 
     // ------------------------------------------------------------ 启动
 
-    private void start(Options opts) throws IOException {
+    private void start(Options opts) throws IOException, InterruptedException {
         com.talkinglive.core.AppPaths.ensureDirectories();
         log.info("=== TalkingLive 启动 ===  home={}", AppPaths.home());
 
@@ -222,12 +226,20 @@ public final class App {
                 micError = capture.lastError();
                 log.error("麦克风不可用：{}", micError);
                 notices.add("麦克风不可用：" + micError + "；程序仍常驻，恢复设备后会自动重连。");
+            } else {
+                verifyMicrophoneIsLive();
             }
         } else {
             log.info("按参数要求未打开麦克风");
         }
 
         sm.addListener(new Orchestrator());
+
+        if (opts.micTest) {
+            micTest();
+            shutdown();
+            return;
+        }
 
         if (opts.headless) {
             // --doctor：先做完所有检查再决定要不要碰界面。
@@ -251,6 +263,70 @@ public final class App {
                 wakeDetector != null ? "就绪" : "不可用",
                 recognizer != null ? "就绪" : "不可用",
                 refiner != null ? refiner.engineName() : "不可用");
+    }
+
+    /**
+     * 启动时验证麦克风**真的在出音频**，而不只是「打开成功」。
+     *
+     * <p>为什么需要这一步：{@code DESIGN.md} §7 最糟的体验是「我说了半天它没反应」。
+     * 而这句话背后有**两条完全不同的原因**，排查方向也完全不同：
+     * <ol>
+     *   <li>采音就没进来——麦克风被静音、增益为 0、隐私设置拦住、选错了设备（例如选到了
+     *       虚拟声卡）。这时音量恒为 0。</li>
+     *   <li>采音正常但识别不对——设备、增益、模型或词表的问题。</li>
+     * </ol>
+     * 启动后静默观察约 1 秒（用户此时通常还没说话，本底噪声是个很好的判据）：
+     * 若一个采样都没读到，或 RMS 恒为 0，就**明确提示**是第 ① 类问题。
+     *
+     * <p>注意这里只是「有数据在流动」的最低判据，**不能**据此推断用户说话时音量够大——
+     * 那要靠 {@code --mic-test} 让用户一边说话一边看音量条。
+     */
+    private void verifyMicrophoneIsLive() {
+        java.util.concurrent.atomic.AtomicInteger frames = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<Double> peak =
+                new java.util.concurrent.atomic.AtomicReference<>(0.0);
+        AudioCapture.Listener probe = new AudioCapture.Listener() {
+            @Override
+            public void onPcm(byte[] pcm, double rms) {
+                frames.incrementAndGet();
+                if (rms > peak.get()) {
+                    peak.set(rms);
+                }
+            }
+        };
+        capture.addListener(probe);
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            capture.removeListener(probe);
+        }
+
+        int n = frames.get();
+        double p = peak.get();
+        if (n == 0) {
+            micError = "麦克风已打开但一个音频帧都没读到（设备可能被独占或驱动异常）";
+            log.error("{}", micError);
+            notices.add(micError + "\n请换一个录音设备，或用 --mic-test 实测。");
+        } else if (p == 0.0) {
+            // 全零样本：典型是「打开了但没接到任何输入」，例如选到了未连接的虚拟设备、
+            // 或系统把该设备静音了。这与「本底噪声很低」不同——后者不会是精确的 0。
+            micError = "麦克风能读到数据但全部是静音（RMS 恒为 0）——可能选错了设备（例如虚拟声卡）"
+                    + "或设备被系统静音";
+            log.error("{}", micError);
+            notices.add(micError + "\n请检查 Windows 声音设置里的输入设备，或用 --mic-test 实测。");
+        } else {
+            log.info("麦克风健康检查通过：1 秒内收到 {} 帧，本底噪声 RMS={}（阈值 {}）",
+                    n, String.format("%.4f", p), SilenceDetector.DEFAULT_THRESHOLD);
+            if (p >= SilenceDetector.DEFAULT_THRESHOLD) {
+                // 本底噪声就超过静音阈值：静音兜底会被"噪声"不断重置，
+                // 段落可能永远不会因静音而自动结束（只能靠结束词或悬浮球）。
+                log.warn("本底噪声 RMS={} 已超过静音阈值 {}，静音自动结束可能不易触发"
+                        + "（环境偏吵或麦克风增益偏高）",
+                        String.format("%.4f", p), SilenceDetector.DEFAULT_THRESHOLD);
+            }
+        }
     }
 
     // ------------------------------------------------------------ 引擎装配
@@ -1150,6 +1226,159 @@ public final class App {
                        : "不在词表内 —— Vosk 会静默忽略它，永远识别不到"));
         } catch (RuntimeException e) {
             out.add(new SettingsWindow.StatusLine(key, word, false, "校验失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 麦克风实测（{@code --mic-test}）：不启动界面，把真实音频链路跑起来并实时打印。
+     *
+     * <p><b>为什么必须有这个模式。</b>「麦克风能打开」与「唤醒词真的能命中」是两件事，
+     * 而后者是整个产品能不能用的分水岭（{@code DESIGN.md} §11 的 M2 验收目标）。
+     * 自动化测试做不到「让真人说一句话」，所以这里把链路接到控制台上，让人一边说话
+     * 一边看到事实：音量条、Vosk 的实时预览文字、以及唤醒/结束词是否命中。
+     *
+     * <p>打印的音量条尤其重要：如果说话时音量条不动，说明问题在**采音**（设备/增益/静音），
+     * 而不是识别——这是排查「说了没反应」时第一个要分清的岔路。
+     */
+    private void micTest() throws InterruptedException {
+        System.out.println("=== TalkingLive 麦克风实测 ===");
+        System.out.println("模型        : " + (voskModel != null ? voskModel.path() : "不可用"));
+        System.out.println("唤醒词/结束词: " + config.wakeWord() + " / " + config.endWord());
+        System.out.println("精化引擎    : " + (refiner == null ? "无" : refiner.describe()));
+        System.out.println();
+        if (capture == null || !capture.available()) {
+            System.out.println("❌ 麦克风不可用：" + (capture == null ? "未初始化" : capture.lastError()));
+            System.out.println("   请检查：是否插了麦克风、Windows 隐私设置是否允许应用访问麦克风、");
+            System.out.println("   以及是否被其他程序独占。");
+            return;
+        }
+        System.out.println("麦克风      : " + capture.describe());
+        System.out.println();
+        System.out.println("请对着麦克风说话。先试连续说「" + config.wakeWord() + "」若干遍。");
+        System.out.println("音量条会随声音伸缩；命中唤醒词会打印 [命中 唤醒词]。");
+        System.out.println("（15 秒后自动结束；也可 Ctrl+C 提前退出）");
+        System.out.println("─".repeat(72));
+
+        java.util.concurrent.atomic.AtomicInteger frames = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger hits = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<Double> peak = new java.util.concurrent.atomic.AtomicReference<>(0.0);
+        StringBuilder lastPreview = new StringBuilder();
+        java.util.concurrent.atomic.AtomicInteger drawTick = new java.util.concurrent.atomic.AtomicInteger();
+
+        AudioCapture.Listener probe = new AudioCapture.Listener() {
+            @Override
+            public void onPcm(byte[] pcm, double rms) {
+                frames.incrementAndGet();
+                if (rms > peak.get()) {
+                    peak.set(rms);
+                }
+                // 每约 10 帧（≈0.4 秒）画一次，避免刷屏
+                if (drawTick.incrementAndGet() % 10 == 0) {
+                    int bars = (int) Math.min(40, rms * 400);
+                    String bar = "█".repeat(Math.max(0, bars));
+                    String previewNote = lastPreview.length() == 0 ? "" : "  预览：" + lastPreview;
+                    System.out.printf("\r音量 %-40s %.4f%s", bar, rms, previewNote);
+                    System.out.flush();
+                }
+            }
+
+            @Override
+            public void onStreamError(String reason) {
+                System.out.println();
+                System.out.println("⚠ 采集中断：" + reason);
+            }
+
+            @Override
+            public void onStreamRecovered() {
+                System.out.println();
+                System.out.println("✓ 麦克风已恢复");
+            }
+
+            @Override
+            public void onFormat(javax.sound.sampled.AudioFormat actual) {
+                System.out.println("设备实际格式：" + (int) actual.getSampleRate() + "Hz/"
+                        + actual.getSampleSizeInBits() + "bit/" + actual.getChannels() + "声道"
+                        + "  → 转换为 16kHz/16bit/单声道");
+            }
+        };
+        capture.addListener(probe);
+
+        // 唤醒词命中检测由 App 装配时建立的 VoskKeywordDetector 负责，
+        // 命中会走 onKeywordHit → 状态机进入 LISTENING。这里不额外建检测器
+        // （受限语法的解码图重建不便宜），改为轮询状态机的代数来发现命中。
+        if (wakeDetector == null) {
+            System.out.println("⚠ 唤醒词检测不可用（" + wakeDetectorError + "），本次只能看音量与预览。");
+        }
+
+        // 预览：挂到现有 recognizer 之外再建一个观察用的流式识别器
+        VoskModel.Recognizer preview = null;
+        if (voskModel != null) {
+            try {
+                preview = voskModel.createRecognizer(16000.0f);
+            } catch (IOException e) {
+                System.out.println("⚠ 预览识别器创建失败：" + e.getMessage());
+            }
+        }
+        final VoskModel.Recognizer previewRef = preview;
+
+        // 把采集分发同时接到预览上（麦克风仍只开一路，这里只是加一个消费者）
+        AudioCapture.Listener previewTap = new AudioCapture.Listener() {
+            @Override
+            public void onPcm(byte[] pcm, double rms) {
+                if (previewRef == null) {
+                    return;
+                }
+                if (previewRef.accept(pcm, pcm.length)) {
+                    String t = previewRef.result();
+                    if (!t.isEmpty()) {
+                        lastPreview.setLength(0);
+                        lastPreview.append(t);
+                    }
+                } else {
+                    String p = previewRef.partialResult();
+                    if (!p.isEmpty()) {
+                        lastPreview.setLength(0);
+                        lastPreview.append(p);
+                    }
+                }
+            }
+        };
+        capture.addListener(previewTap);
+
+        // 唤醒词命中计数：轮询状态机的代数（命中唤醒词会让代数递增并进入 LISTENING）
+        for (int i = 0; i < 150; i++) {   // 150 × 100ms = 15 秒
+            Thread.sleep(100);
+            if (sm.generation() > hits.get()) {
+                hits.set((int) sm.generation());
+                System.out.println();
+                System.out.println("✓ [命中 唤醒词] 第 " + sm.generation()
+                        + " 次唤醒（状态=" + sm.state().display() + "）");
+            }
+        }
+
+        System.out.println();
+        System.out.println("─".repeat(72));
+        System.out.println("实测结束：");
+        System.out.println("  采集帧数     : " + frames.get());
+        System.out.println("  峰值音量 RMS : " + String.format("%.4f", peak.get())
+                + (peak.get() < SilenceDetector.DEFAULT_THRESHOLD
+                        ? "  ⚠ 低于静音阈值 " + SilenceDetector.DEFAULT_THRESHOLD
+                          + " —— 说话时若始终这么低，问题在采音（麦克风静音/增益/选错设备），不在识别"
+                        : "  ✓ 已超过静音阈值，采音正常"));
+        System.out.println("  唤醒命中次数 : " + hits.get()
+                + (hits.get() == 0 ? "  ⚠ 一次都没命中——请确认是否真的说了「" + config.wakeWord() + "」" : ""));
+        System.out.println("  最后预览文字 : " + (lastPreview.length() == 0 ? "（无）"
+                : Logging.describeWithFingerprint(lastPreview.toString())));
+        if (lastPreview.length() > 0) {
+            System.out.println("  预览内容     : " + lastPreview);
+        }
+        System.out.println();
+        System.out.println("提示：识别质量与命中率的正式验收见 docs/DESIGN.md §9.3 手工清单。");
+
+        capture.removeListener(probe);
+        capture.removeListener(previewTap);
+        if (previewRef != null) {
+            previewRef.close();
         }
     }
 

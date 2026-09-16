@@ -1,6 +1,7 @@
 package com.talkinglive.audio;
 
 import com.talkinglive.core.Logging;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -126,38 +127,46 @@ public final class AudioCapture implements AutoCloseable {
     }
 
     private boolean openLine() {
+        List<String> failures = new ArrayList<>();
         String err = tryOpen(null);
         if (err == null) {
             return true;
         }
+        failures.add(err);
         // 回退：逐个混音器试。默认设备被独占时，另一个混音器（例如麦克风阵列）往往可用。
-        Mixer.Info[] mixers = AudioSystem.getMixerInfo();
-        for (Mixer.Info mi : mixers) {
+        for (Mixer.Info mi : AudioSystem.getMixerInfo()) {
             String e2 = tryOpen(mi);
             if (e2 == null) {
                 log.info("默认设备不可用（{}），已回退到混音器：{}", err, mi.getName());
                 return true;
             }
+            failures.add(e2);
         }
-        lastError = err;
-        log.error("找不到可用麦克风：{}", err);
-        notifyError(err);
+        // 全都失败才报错；把每个候选的原因都带上，便于判断是「没设备」还是「被独占」。
+        lastError = "没有可用的录音设备（依次尝试了 " + failures.size() + " 个候选）："
+                + String.join("；", failures);
+        log.error("找不到可用麦克风：{}", lastError);
+        notifyError(lastError);
         return false;
     }
 
     /** @return null 表示成功，否则是失败原因 */
     private String tryOpen(Mixer.Info mixerInfo) {
         TargetDataLine candidate = null;
+        String label = mixerInfo == null ? "系统默认录音设备" : mixerInfo.getName();
         try {
             Mixer mixer = mixerInfo == null ? null : AudioSystem.getMixer(mixerInfo);
-            DataLine.Info info = defaultInputInfo(mixer);
+            DataLine.Info info = inputLineInfo(mixer);
             if (info == null) {
-                return mixerInfo == null ? "系统没有可用的录音设备" : mixerInfo.getName() + " 没有录音设备";
+                return label + "：枚举不到录音线路";
             }
             candidate = mixer == null
                     ? (TargetDataLine) AudioSystem.getLine(info)
                     : (TargetDataLine) mixer.getLine(info);
-            candidate.open(info.getFormats()[0], candidate.getBufferSize());
+            // ★ 不要写死格式：真实设备原生格式往往是 44.1k/48k 立体声，
+            //   硬要 16kHz 要么打开失败、要么系统内部做一次质量不可控的重采样。
+            //   这里直接 open() 用**设备自己的**默认格式，转换由 AudioConverter 显式完成。
+            candidate.open();
             candidate.start();
 
             TargetDataLine old = this.line;
@@ -181,28 +190,39 @@ public final class AudioCapture implements AutoCloseable {
             return null;
         } catch (LineUnavailableException | IllegalArgumentException | ClassCastException e) {
             closeQuietly(candidate);
-            return (mixerInfo == null ? "默认录音设备" : mixerInfo.getName()) + " 打开失败：" + e.getMessage();
+            return label + "：打开失败（" + e.getClass().getSimpleName()
+                    + (e.getMessage() == null ? "" : " - " + e.getMessage()) + "）";
         }
     }
 
     /**
-     * 取设备的**默认输入格式**，而不是请求 16kHz。
+     * 找一个可用的**输入**（TargetDataLine）线路信息。
      *
-     * <p>真实声卡很少直接支持 16kHz；硬要 16kHz 会导致打开失败或系统内部做一次
-     * 质量不可控的重采样。这里拿设备自己的格式，转换由我们自己显式完成。
+     * <p><b>⚠️ 这里踩过一个会让产品彻底不可用的坑：输入设备必须用
+     * {@link Mixer#getTargetLineInfo}，不能用 {@code getSourceLineInfo}。</b>
+     * source / target 是**相对混音器**命名的：麦克风是往混音器里**送**数据的「源」，
+     * 但在 Java Sound 里代表输入流的接口叫 {@code TargetDataLine}，所以要用 target。
+     *
+     * <p>用错方向的实测症状极具迷惑性：{@code getSourceLineInfo} 返回 **0 项**，
+     * 于是产品报告「系统没有可用的录音设备」——而实际上麦克风好好的、
+     * {@code AudioSystem.getLine()} 能直接打开。用户会以为自己的麦克风坏了。
+     *
+     * <p>返回的顺序是「设备自己的默认格式优先」：{@link DataLine.Info} 里带了
+     * 设备原生支持的 8 种格式，{@code open()} 不带参数时会用它自己的默认值。
      */
-    private static DataLine.Info defaultInputInfo(Mixer mixer) {
+    private static DataLine.Info inputLineInfo(Mixer mixer) {
         DataLine.Info probe = new DataLine.Info(TargetDataLine.class, null);
         javax.sound.sampled.Line.Info[] infos = mixer == null
-                ? AudioSystem.getSourceLineInfo(probe)
-                : mixer.getSourceLineInfo(probe);
+                ? AudioSystem.getTargetLineInfo(probe)
+                : mixer.getTargetLineInfo(probe);
         for (javax.sound.sampled.Line.Info li : infos) {
-            if (li instanceof DataLine.Info dli && TargetDataLine.class.isAssignableFrom(dli.getLineClass())
-                    && dli.getFormats().length > 0) {
+            if (li instanceof DataLine.Info dli && TargetDataLine.class.isAssignableFrom(dli.getLineClass())) {
                 return dli;
             }
         }
-        return null;
+        // 枚举不到时，退回一个「只要能开就行」的 Info：某些驱动不上报格式列表，
+        // 但 AudioSystem.getLine(probe) 仍能打开设备。
+        return probe;
     }
 
     private void startThread() {
@@ -321,13 +341,18 @@ public final class AudioCapture implements AutoCloseable {
         }
     }
 
-    /** 列出可用录音设备，供设置窗口的「模型状态」页与 --doctor 使用。 */
+    /**
+     * 列出可用**录音**设备，供设置窗口的「模型状态」页与 {@code --doctor} 使用。
+     *
+     * <p>同样要用 {@link Mixer#getTargetLineInfo}——用成 source 会永远返回空列表，
+     * 让用户以为机器上没有麦克风（这个坑见 {@link #inputLineInfo}）。
+     */
     public static List<String> listDevices() {
-        List<String> out = new java.util.ArrayList<>();
+        List<String> out = new ArrayList<>();
+        DataLine.Info probe = new DataLine.Info(TargetDataLine.class, null);
         for (Mixer.Info mi : AudioSystem.getMixerInfo()) {
             Mixer m = AudioSystem.getMixer(mi);
-            javax.sound.sampled.Line.Info[] infos = m.getSourceLineInfo(new DataLine.Info(TargetDataLine.class, null));
-            if (infos.length > 0) {
+            if (m.getTargetLineInfo(probe).length > 0) {
                 out.add(mi.getName());
             }
         }
