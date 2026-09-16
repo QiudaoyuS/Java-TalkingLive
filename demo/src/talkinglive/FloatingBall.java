@@ -11,6 +11,7 @@ import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.MouseInfo;
 import java.awt.Point;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
@@ -23,13 +24,16 @@ import java.awt.geom.Ellipse2D;
 import java.awt.geom.RoundRectangle2D;
 
 /**
- * 常驻悬浮球 —— 产品**唯一始终可见**的界面元素。
+ * 常驻悬浮球 —— 产品始终可见的界面元素。
  *
  * <p>程序启动后桌面上只有它：没有主窗口、没有控制台。
  * 左键点击手动开始/结束听写，右键弹出菜单，拖动可移动位置。
  *
  * <p>与浮窗预览条一样，它必须**不抢焦点** —— 否则点击悬浮球会让前台
  * 程序失去焦点，正在输入的文字就打断了。
+ *
+ * <p><b>贴边隐藏</b>：拖到屏幕左右边缘附近松手，球会吸附到该边缘并收起，
+ * 只露出一小条；鼠标移到露出部分就滑出来，移开再收回去。
  */
 class FloatingBall extends JWindow {
 
@@ -46,9 +50,20 @@ class FloatingBall extends JWindow {
         void onQuit();
     }
 
+    /** 吸附在哪一侧。 */
+    private enum DockSide { NONE, LEFT, RIGHT }
+
     private static final int WINDOW_SIZE = 68;   // 含脉冲光圈留白
     private static final int BALL_SIZE = 52;
+    private static final int BALL_INSET = (WINDOW_SIZE - BALL_SIZE) / 2;   // 球在窗口内的左内边距
 
+    /** 收起后露出多少像素的<b>窗口</b>。球本身只占中间 52px，所以要加内边距。 */
+    private static final int PEEK = 20;
+
+    /** 松手时距边缘这个距离以内就吸附。 */
+    private static final int DOCK_THRESHOLD = 40;
+
+    /** 移开鼠标后延迟多久才收起（留出反悔时间，避免抖动）。 */
     private final Listener listener;
 
     private StateMachine.State state = StateMachine.State.IDLE;
@@ -58,8 +73,19 @@ class FloatingBall extends JWindow {
     private Point pressPoint;
     private boolean dragged = false;
 
+    private DockSide docked = DockSide.NONE;
+    private boolean revealed = true;
+    private Timer slideTimer;
+
     private float pulsePhase = 0f;
     private final Timer pulseTimer;
+
+    /** 贴边状态下轮询鼠标位置 —— 不依赖 ENTERED 事件是否送达。 */
+    private Timer dockWatcher;
+    private int outsideTicks = 0;
+
+    /** 自检用：收到过几次 mouseEntered。 */
+    private int enterCount = 0;
 
     FloatingBall(Window owner, Listener listener) {
         super(owner);
@@ -111,10 +137,10 @@ class FloatingBall extends JWindow {
         setState(state);
     }
 
-    /** 默认停在屏幕右侧中部，避免遮挡常见内容区。 */
+    /** 默认停在屏幕右侧中部，离边缘留出距离以免一上手就被吸附。 */
     private void moveToDefaultPosition() {
         Rectangle screen = getGraphicsConfiguration().getBounds();
-        int x = screen.x + screen.width - WINDOW_SIZE - 40;
+        int x = screen.x + screen.width - WINDOW_SIZE - (DOCK_THRESHOLD + 20);
         int y = screen.y + screen.height / 2 - WINDOW_SIZE / 2;
         setLocation(x, y);
     }
@@ -129,6 +155,7 @@ class FloatingBall extends JWindow {
                     showMenu(e);
                     return;
                 }
+                revealNow();          // 收起状态下按下去，先滑出来再说
                 pressPoint = e.getPoint();
                 dragged = false;
             }
@@ -141,15 +168,20 @@ class FloatingBall extends JWindow {
                 boolean wasClick = !dragged && e.getPoint().distance(pressPoint) < 5;
                 pressPoint = null;
                 dragged = false;
+
                 if (wasClick && SwingUtilities.isLeftMouseButton(e)) {
                     listener.onLeftClick();
+                } else {
+                    maybeDock();      // 拖完松手，判断要不要吸附
                 }
             }
 
             @Override
             public void mouseEntered(MouseEvent e) {
+                enterCount++;
                 hover = true;
                 repaint();
+                revealNow();          // 鼠标碰到露出的一小条就滑出来
             }
 
             @Override
@@ -166,6 +198,7 @@ class FloatingBall extends JWindow {
                     return;
                 }
                 dragged = true;
+                stopSlide();
                 Point p = e.getLocationOnScreen();
                 setLocationClamped(p.x - pressPoint.x, p.y - pressPoint.y);
             }
@@ -175,8 +208,7 @@ class FloatingBall extends JWindow {
     /**
      * 把悬浮球夹在屏幕范围内。
      *
-     * <p>没有托盘图标之后，悬浮球是**退出程序的唯一入口** ——
-     * 一旦被拖到屏幕外就再也点不到了，只能去任务管理器。所以必须夹住位置。
+     * <p>即使有托盘图标兜底，把球拖到屏幕外也会让人找不到它，所以夹住位置。
      */
     private void setLocationClamped(int x, int y) {
         Rectangle screen = getGraphicsConfiguration().getBounds();
@@ -185,6 +217,148 @@ class FloatingBall extends JWindow {
         setLocation(Math.max(screen.x, Math.min(x, maxX)),
                 Math.max(screen.y, Math.min(y, maxY)));
     }
+
+    // ---------- 贴边隐藏 ----------
+
+    /** 松手时判断是否该吸附到某一侧。 */
+    private void maybeDock() {
+        Rectangle screen = getGraphicsConfiguration().getBounds();
+        int centerX = getX() + getWidth() / 2;
+
+        DockSide target = DockSide.NONE;
+        if (centerX - screen.x < DOCK_THRESHOLD) {
+            target = DockSide.LEFT;
+        } else if (screen.x + screen.width - centerX < DOCK_THRESHOLD) {
+            target = DockSide.RIGHT;
+        }
+
+        docked = target;
+        if (target == DockSide.NONE) {
+            revealed = true;          // 离开边缘就恢复常驻显示
+            outsideTicks = 0;
+            stopDockWatcher();
+            setLocationClamped(getX(), getY());
+        } else {
+            revealed = false;
+            outsideTicks = 0;
+            slideTo(hiddenX(target), getY());
+            startDockWatcher();
+        }
+    }
+
+    /** 收起后窗口的 x —— 只留 PEEK 像素在屏幕内。 */
+    private int hiddenX(DockSide side) {
+        Rectangle screen = getGraphicsConfiguration().getBounds();
+        return side == DockSide.LEFT
+                ? screen.x - (WINDOW_SIZE - PEEK)
+                : screen.x + screen.width - PEEK;
+    }
+
+    /** 完全展开后窗口的 x。 */
+    private int revealedX(DockSide side) {
+        Rectangle screen = getGraphicsConfiguration().getBounds();
+        return side == DockSide.LEFT
+                ? screen.x
+                : screen.x + screen.width - WINDOW_SIZE;
+    }
+
+    private void startDockWatcher() {
+        if (dockWatcher == null) {
+            dockWatcher = new Timer(150, e -> pollDockHover());
+        }
+        if (!dockWatcher.isRunning()) {
+            dockWatcher.start();
+        }
+    }
+
+    private void stopDockWatcher() {
+        if (dockWatcher != null) {
+            dockWatcher.stop();
+        }
+    }
+
+    /**
+     * 贴边状态下轮询鼠标位置，决定滑出还是收起。
+     *
+     * <p>为什么用轮询而不是 {@code mouseEntered}：悬浮球收起时大部分在屏幕外
+     * （只剩 PEEK 像素可见），实测这种情况下鼠标事件不一定会送达。
+     * 轮询只在贴边期间运行，开销可以忽略，且行为可控。
+     */
+    private void pollDockHover() {
+        if (docked == DockSide.NONE) {
+            stopDockWatcher();
+            return;
+        }
+        if (dragged) {
+            return;
+        }
+        java.awt.PointerInfo info = MouseInfo.getPointerInfo();
+        if (info == null) {
+            return;
+        }
+        boolean over = getBounds().contains(info.getLocation());
+
+        if (over) {
+            outsideTicks = 0;
+            if (!revealed) {
+                revealNow();
+            }
+        } else if (revealed) {
+            outsideTicks++;
+            if (outsideTicks >= 3) {          // 约 450ms，留出反悔时间
+                outsideTicks = 0;
+                revealed = false;
+                slideTo(hiddenX(docked), getY());
+            }
+        }
+    }
+
+    /** 自检用：收到的 mouseEntered 次数。 */
+    int enterCountForTest() {
+        return enterCount;
+    }
+
+    private void revealNow() {
+        if (docked == DockSide.NONE || revealed) {
+            return;
+        }
+        revealed = true;
+        slideTo(revealedX(docked), getY());
+    }
+
+
+    private void stopSlide() {
+        if (slideTimer != null) {
+            slideTimer.stop();
+        }
+    }
+
+    /** 动画滑到目标位置（ease-out，约 160ms）。 */
+    private void slideTo(final int targetX, final int targetY) {
+        stopSlide();
+        final int fromX = getX();
+        final int fromY = getY();
+        if (fromX == targetX && fromY == targetY) {
+            return;
+        }
+        final int steps = 12;
+        final int[] n = {0};
+        slideTimer = new Timer(13, e -> {
+            n[0]++;
+            double p = Math.min(1.0, n[0] / (double) steps);
+            double eased = 1 - Math.pow(1 - p, 3);
+            if (n[0] >= steps) {
+                ((Timer) e.getSource()).stop();
+                setLocation(targetX, targetY);
+            } else {
+                setLocation((int) Math.round(fromX + (targetX - fromX) * eased),
+                        (int) Math.round(fromY + (targetY - fromY) * eased));
+            }
+        });
+        slideTimer.start();
+    }
+
+    // ---------- 菜单 ----------
 
     private void showMenu(MouseEvent e) {
         showMenuAt(e.getX(), e.getY());
@@ -234,6 +408,18 @@ class FloatingBall extends JWindow {
         JMenuItem i = new JMenuItem(text);
         i.setFont(Theme.font(12));
         return i;
+    }
+
+    // ---------- 测试支撑 ----------
+
+    /** 当前是否处于贴边收起状态（供自检断言）。 */
+    boolean isDockedHidden() {
+        return docked != DockSide.NONE && !revealed;
+    }
+
+    /** 供自检直接触发吸附判定。 */
+    void dockForTest() {
+        maybeDock();
     }
 
     // ---------- 绘制 ----------
@@ -299,7 +485,18 @@ class FloatingBall extends JWindow {
             g2.setStroke(new BasicStroke(hover ? 2.2f : 1.4f));
             g2.draw(new Ellipse2D.Float(cx - r, cy - r, r * 2f - 1, r * 2f - 1));
 
-            if (paused) {
+            // 收起时只露出一条，把图标往露出的一侧挪，否则看到的是空白
+            if (docked != DockSide.NONE && !revealed) {
+                int shift = docked == DockSide.LEFT ? BALL_INSET : -BALL_INSET;
+                Graphics2D g3 = (Graphics2D) g2.create();
+                g3.translate(shift, 0);
+                if (paused) {
+                    drawPaused(g3, cx, cy);
+                } else {
+                    drawMic(g3, cx, cy);
+                }
+                g3.dispose();
+            } else if (paused) {
                 drawPaused(g2, cx, cy);
             } else {
                 drawMic(g2, cx, cy);

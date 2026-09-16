@@ -9,14 +9,21 @@ import javax.swing.Timer;
 import javax.swing.UIManager;
 import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.FontUIResource;
+import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
+import java.awt.Image;
+import java.awt.MenuItem;
+import java.awt.PopupMenu;
 import java.awt.RenderingHints;
+import java.awt.SystemTray;
+import java.awt.TrayIcon;
 import java.awt.event.ActionListener;
 import java.awt.geom.RoundRectangle2D;
+import java.awt.image.BufferedImage;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Enumeration;
@@ -127,6 +134,8 @@ public class Demo implements FloatingBall.Listener {
     private FloatingBall ball;
     private PreviewBar bar;
     private SettingsWindow settings;
+    private TrayIcon trayIcon;
+    private MenuItem pauseItem;
     private JTextArea targetArea;
 
     private boolean paused = false;
@@ -149,6 +158,7 @@ public class Demo implements FloatingBall.Listener {
         bar = new PreviewBar(null);
         settings = new SettingsWindow(this);
         ball = new FloatingBall(null, this);
+        buildTray();
         wireStateMachine();
 
         ball.setVisible(true);
@@ -171,130 +181,16 @@ public class Demo implements FloatingBall.Listener {
         if (uiTest) {
             Timer t = new Timer(1500, e -> {
                 ((Timer) e.getSource()).stop();
-                runUiSelfTest();
+                // 关键：不能在 EDT 上跑。Robot.delay 会阻塞当前线程，
+                // 堵住 EDT 会让 Robot 产生的鼠标事件与 Swing 的动画 Timer
+                // 都排不进队，断言会全部失真。
+                Thread worker = new Thread(
+                        () -> System.exit(UiSelfTest.run(ball, bar) ? 0 : 1), "ui-selftest");
+                worker.setDaemon(true);
+                worker.start();
             });
             t.setRepeats(false);
             t.start();
-        }
-    }
-
-    /**
-     * 用 {@link java.awt.Robot} 真实地右键悬浮球，验证菜单能否弹出。
-     *
-     * <p>为什么需要它：悬浮球是<b>不抢焦点</b>的窗口（{@code setFocusableWindowState(false)}），
-     * 而 {@code JPopupMenu} 挂在这种窗口上是有风险的 —— 菜单可能弹不出来，
-     * 或者弹出来关不掉。这一点光看代码看不出来，只能真点一下。
-     *
-     * <p>会让鼠标移动并右键一次，结束后复位。
-     */
-    private void runUiSelfTest() {
-        StringBuilder r = new StringBuilder();
-        java.awt.Robot robot;
-        try {
-            robot = new java.awt.Robot();
-        } catch (Exception ex) {
-            writeText("ui-selftest-report.txt", "无法创建 Robot: " + ex + "\nRESULT: FAIL\n");
-            System.out.println("  RESULT: FAIL (Robot 不可用)");
-            System.exit(1);
-            return;
-        }
-
-        java.awt.Point home = java.awt.MouseInfo.getPointerInfo().getLocation();
-        java.awt.Point ballPos = ball.getLocationOnScreen();
-
-        // 关键：getLocationOnScreen() 返回逻辑坐标，Robot 要的是物理坐标，
-        // 两者相差一个 DPI 缩放。不换算就会点到错误的地方。
-        java.awt.geom.AffineTransform tx =
-                ball.getGraphicsConfiguration().getDefaultTransform();
-        double kx = tx.getScaleX();
-        double ky = tx.getScaleY();
-        int cx = (int) Math.round((ballPos.x + ball.getWidth() / 2.0) * kx);
-        int cy = (int) Math.round((ballPos.y + ball.getHeight() / 2.0) * ky);
-
-        r.append("DPI 缩放 = ").append(kx).append(" x ").append(ky).append("\n");
-        r.append("悬浮球逻辑坐标 = ").append(ballPos.x).append(",").append(ballPos.y)
-                .append("  尺寸 ").append(ball.getWidth()).append("x").append(ball.getHeight())
-                .append("\n");
-        r.append("换算后物理坐标 = ").append(cx).append(",").append(cy).append("\n");
-        r.append("悬浮球可获焦点 = ").append(ball.isFocusableWindow())
-                .append("（期望 false）\n\n");
-
-        // A) 直接显示菜单：验证「不抢焦点的窗口能否承载 JPopupMenu」
-        boolean direct = false;
-        try {
-            ball.showMenuAt(ball.getWidth() / 2, ball.getHeight() / 2);
-            robot.delay(700);
-            direct = isMenuOpen();
-            r.append("A. 直接显示菜单         = ").append(direct ? "弹出成功" : "没有弹出").append("\n");
-            dismissMenu(robot);
-        } catch (Exception ex) {
-            r.append("A. 直接显示菜单         = 异常 ").append(ex).append("\n");
-        }
-
-        // B) Robot 真实右键：验证鼠标事件能否投递到不抢焦点的窗口
-        boolean clicked = false;
-        try {
-            robot.mouseMove(cx, cy);
-            robot.delay(350);
-            robot.mousePress(java.awt.event.InputEvent.BUTTON3_DOWN_MASK);
-            robot.delay(90);
-            robot.mouseRelease(java.awt.event.InputEvent.BUTTON3_DOWN_MASK);
-            robot.delay(700);
-            clicked = isMenuOpen();
-            r.append("B. Robot 真实右键悬浮球 = ").append(clicked ? "弹出成功" : "没有弹出").append("\n");
-            dismissMenu(robot);
-        } catch (Exception ex) {
-            r.append("B. Robot 真实右键悬浮球 = 异常 ").append(ex).append("\n");
-        }
-
-        boolean ok = direct && clicked;
-
-        r.append("\n结论：\n");
-        if (!direct) {
-            r.append("  JPopupMenu 无法从不抢焦点的窗口弹出。\n")
-                    .append("  需要改用自绘弹层，或让悬浮球在弹菜单时临时可获焦点。\n");
-        } else if (!clicked) {
-            r.append("  菜单本身可用，但鼠标事件没能投递到悬浮球。\n")
-                    .append("  检查坐标换算，或窗口样式是否吞掉了鼠标事件。\n");
-        } else {
-            r.append("  悬浮球右键菜单工作正常。\n");
-        }
-        r.append("\nRESULT: ").append(ok ? "PASS" : "FAIL").append("\n");
-
-        robot.mouseMove(home.x, home.y);
-        writeText("ui-selftest-report.txt", r.toString());
-
-        System.out.println("UI self-test (right-click floating ball)");
-        System.out.println("  A. direct popup  : " + (direct ? "PASS" : "FAIL"));
-        System.out.println("  B. robot r-click : " + (clicked ? "PASS" : "FAIL"));
-        System.out.println("  report = ui-selftest-report.txt");
-        System.exit(ok ? 0 : 1);
-    }
-
-    private static boolean isMenuOpen() {
-        javax.swing.MenuElement[] path =
-                javax.swing.MenuSelectionManager.defaultManager().getSelectedPath();
-        return path != null && path.length > 0;
-    }
-
-    private static void dismissMenu(java.awt.Robot robot) {
-        robot.keyPress(java.awt.event.KeyEvent.VK_ESCAPE);
-        robot.keyRelease(java.awt.event.KeyEvent.VK_ESCAPE);
-        robot.delay(250);
-    }
-
-    private static void writeText(String path, String content) {
-        java.io.PrintWriter w = null;
-        try {
-            w = new java.io.PrintWriter(new java.io.OutputStreamWriter(
-                    new java.io.FileOutputStream(path), java.nio.charset.StandardCharsets.UTF_8));
-            w.print(content);
-        } catch (Exception e) {
-            System.out.println("WARN: 无法写入 " + path + ": " + e.getMessage());
-        } finally {
-            if (w != null) {
-                w.close();
-            }
         }
     }
 
@@ -335,6 +231,9 @@ public class Demo implements FloatingBall.Listener {
     @Override
     public void onTogglePause() {
         paused = !paused;
+        if (pauseItem != null) {
+            pauseItem.setLabel(paused ? "恢复监听" : "暂停监听");
+        }
         log("INFO", paused ? "监听已暂停（不再响应唤醒词与结束词）" : "监听已恢复");
         setStateVisual(sm.state());
     }
@@ -352,6 +251,9 @@ public class Demo implements FloatingBall.Listener {
     @Override
     public void onQuit() {
         log("INFO", "退出");
+        if (trayIcon != null) {
+            SystemTray.getSystemTray().remove(trayIcon);
+        }
         System.exit(0);
     }
 
@@ -377,6 +279,7 @@ public class Demo implements FloatingBall.Listener {
             ball.setPaused(paused);
             ball.setState(s);
         }
+        updateTray(s);
     }
 
     // ==================== 模拟事件 ====================
@@ -569,6 +472,9 @@ public class Demo implements FloatingBall.Listener {
     }
 
     private void notifyUser(String title, String body) {
+        if (trayIcon != null) {
+            trayIcon.displayMessage(title, body, TrayIcon.MessageType.WARNING);
+        }
         JOptionPane.showMessageDialog(null, body, title, JOptionPane.WARNING_MESSAGE);
     }
 
@@ -585,6 +491,77 @@ public class Demo implements FloatingBall.Listener {
             return targetArea;
         }
         return (JComponent) ball.getContentPane();
+    }
+
+    // ==================== 托盘（悬浮球之外的兜底入口） ====================
+
+    private void buildTray() {
+        if (!SystemTray.isSupported()) {
+            return;
+        }
+        PopupMenu menu = new PopupMenu();
+        pauseItem = new MenuItem("暂停监听");
+        pauseItem.addActionListener(e -> onTogglePause());
+        menu.add(pauseItem);
+        menu.addSeparator();
+
+        MenuItem s = new MenuItem("设置...");
+        s.addActionListener(e -> onOpenSettings());
+        menu.add(s);
+
+        MenuItem l = new MenuItem("查看日志");
+        l.addActionListener(e -> onOpenLog());
+        menu.add(l);
+        menu.addSeparator();
+
+        MenuItem q = new MenuItem("退出");
+        q.addActionListener(e -> onQuit());
+        menu.add(q);
+
+        trayIcon = new TrayIcon(stateIcon(Theme.DIM), "TalkingLive · 待唤醒", menu);
+        trayIcon.setImageAutoSize(true);
+        try {
+            SystemTray.getSystemTray().add(trayIcon);
+        } catch (Exception ex) {
+            log("WARN", "托盘图标添加失败: " + ex.getMessage());
+        }
+    }
+
+    private void updateTray(StateMachine.State s) {
+        if (trayIcon == null) {
+            return;
+        }
+        if (paused) {
+            trayIcon.setImage(stateIcon(Theme.WARN));
+            trayIcon.setToolTip("TalkingLive · 已暂停");
+            return;
+        }
+        switch (s) {
+            case LISTENING:
+                trayIcon.setImage(stateIcon(Theme.ERR));
+                trayIcon.setToolTip("TalkingLive · 听写中");
+                break;
+            case COMMITTING:
+                trayIcon.setImage(stateIcon(Theme.WARN));
+                trayIcon.setToolTip("TalkingLive · 提交中");
+                break;
+            default:
+                trayIcon.setImage(stateIcon(Theme.DIM));
+                trayIcon.setToolTip("TalkingLive · 待唤醒");
+                break;
+        }
+    }
+
+    private static Image stateIcon(Color color) {
+        int s = 16;
+        BufferedImage img = new BufferedImage(s, s, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = img.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(color);
+        g.setStroke(new BasicStroke(2.2f));
+        g.drawOval(3, 3, s - 7, s - 7);
+        g.dispose();
+        return img;
     }
 
     // ==================== 自动演示 ====================
