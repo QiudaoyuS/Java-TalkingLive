@@ -89,22 +89,30 @@ public final class SampleInjector {
 
         TextInjector.Result r = injector.inject(0, text, target);
         System.out.println();
-        if (r.ok()) {
-            System.out.println("结果：注入调用成功（写入 " + r.eventsSent() + " 个事件）");
-            System.out.println("请**肉眼确认**目标程序里出现的文字与预期一致——");
-            System.out.println("  ① 中文没有变成问号或方块（编码问题）");
-            System.out.println("  ② emoji 与生僻字正常显示（代理对问题）");
-            System.out.println("  ③ 没有缺字或多字（SendInput 部分写入问题）");
-        } else {
+        if (!r.ok()) {
             System.out.println("结果：注入失败 [" + r.failure() + "]");
             System.out.println("原因：" + r.message());
+            System.out.println();
+            System.out.println("常见原因：");
+            System.out.println("  · 目标程序以管理员运行 → UIPI 隔离，需以管理员运行本工具");
+            System.out.println("  · 前台窗口在倒计时里变了 → 重跑一次并把光标放好");
+            System.exit(1);
         }
+        System.out.println("注入调用成功：写入 " + r.eventsSent() + " 个事件"
+                + "（每字 2 事件，可据此判断是否发全）");
         System.out.println();
-        System.out.println("接着试自动发送（Enter）：");
-        TextInjector.Result p = injector.press(TextInjector.KeyCombo.ENTER);
-        System.out.println("  " + (p.ok() ? "已发送 Enter" : "发送失败：" + p.message()));
+        System.out.println("请**肉眼确认**目标程序里出现的文字与预期一致：");
+        System.out.println("  ① 中文没有变成问号或方块（编码问题）");
+        System.out.println("  ② emoji 与生僻字正常显示（代理对问题）");
+        System.out.println("  ③ 没有缺字（缺字说明该程序需要更大的字符间隔）");
+        System.out.println("     —— 若缺字，请加大第 3 个参数重试，例如 60 → 100 → 150");
+        System.out.println();
+        // 故意**不自动按 Enter**：这个工具是用来调间隔的，而被测程序往往是个输入框，
+        // 按 Enter 会把内容直接发出去（实测在 cmd 窗口里就是「执行了刚注入的那行命令」）。
+        // 需要验证自动发送时请用主程序（受「自动发送」开关控制）。
+        System.out.println("（本工具不会自动按 Enter —— 它只用来校验注入的完整性。）");
 
-        System.exit(r.ok() ? 0 : 1);
+        System.exit(0);
     }
 
     static {

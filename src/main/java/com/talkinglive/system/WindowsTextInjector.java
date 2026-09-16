@@ -32,19 +32,16 @@ import org.slf4j.LoggerFactory;
  *   <li><b>UIPI 静默丢弃。</b>目标程序以管理员运行时，{@code SendInput} 返回成功写入
  *       事件数但对方收不到（或写入 0）。§7 要求检测并提示「需以管理员运行本程序」。
  *       {@code SendInput} 本身无法分辨，因此这里用**进程完整性级别**提前判断。</li>
+ *   <li><b>灌太快会被目标程序丢字。</b>这不是 {@code SendInput} 的问题——它报告全部写入成功，
+ *       是微信/QQ 这类自绘输入框**主动丢掉了后面的 WM_CHAR**。唯一的解法是放慢：
+ *       逐字符单独发送，并在字符之间留 {@link #charGapMillis} 毫秒。</li>
  * </ol>
- *
- * <p><b>为什么事件要分批：</b>{@code SendInput} 一次调用的 {@code INPUT} 数组过长会被
- * 系统拒绝（写回 0）。按码点分批，每批 {@value #BATCH_CODE_POINTS} 个码点。
  */
 public final class WindowsTextInjector implements TextInjector {
 
     private static final Logger log = LoggerFactory.getLogger(WindowsTextInjector.class);
 
-    /** 每批的码点数。一个码点最多 4 个 INPUT（代理对），故一次最多约 1024 个事件。 */
-    private static final int BATCH_CODE_POINTS = 256;
-
-    /** 一批写不完整时的重试次数（逐字符发送时，是单个字符的重试次数）。 */
+    /** 单个字符写不进去时的重试次数。 */
     private static final int SEND_RETRIES = 4;
 
     /**
@@ -374,6 +371,26 @@ public final class WindowsTextInjector implements TextInjector {
      * @return 实际写入的事件数；一个都没写进去返回 -1
      */
     private int sendUnicode(String text) {
+        if (traceInput) {
+            // 整段只打一次：把要注入的字符码点列出来，便于核对「是不是每个字都对」。
+            // 这条日志是排查「同一个字被重复 N 遍」的关键证据——
+            // 那种故障下这里会显示 N 个相同的码点。
+            StringBuilder sb = new StringBuilder();
+            int cps = 0;
+            for (int k = 0; k < text.length(); ) {
+                int cp = text.codePointAt(k);
+                k += Character.charCount(cp);
+                if (sb.length() > 0) {
+                    sb.append(' ');
+                }
+                sb.append(String.format("U+%04X", cp));
+                if (++cps >= TRACE_EVENTS) {
+                    sb.append(" …");
+                    break;
+                }
+            }
+            log.info("待注入字符（码点）：{}", sb);
+        }
         int total = 0;
         int index = 0;
         int i = 0;
@@ -384,12 +401,16 @@ public final class WindowsTextInjector implements TextInjector {
 
             // 一个码点 → 一到两组「按下 + 抬起」
             List<Win32.KeyEvent> pair = new ArrayList<>(4);
+            // 一个码点 → 一到两个 UTF-16 code unit 的「按下 + 抬起」。
+            //
+            // KEYEVENTF_UNICODE 的 wScan 装的是**一个 UTF-16 code unit**。
+            // 补充平面字符（emoji、生僻字）在 UTF-16 里就是两个 code unit，
+            // 所以需要两组事件；Windows 会把相邻的高/低代理组合成一个字符交给目标程序。
+            // 这是 Windows 的既定行为，不是我们的变通。
             if (Character.charCount(cp) == 1) {
                 pair.add(Win32.KeyEvent.unicodeDown((char) cp));
                 pair.add(Win32.KeyEvent.unicodeUp((char) cp));
             } else {
-                // 代理对：按 UTF-16 的两个 code unit 分别发送。Windows 会在目标程序侧
-                // 把高低代理合成一个字符（支持 Unicode 的控件会正确组合）。
                 char hi = Character.highSurrogate(cp);
                 char lo = Character.lowSurrogate(cp);
                 pair.add(Win32.KeyEvent.unicodeDown(hi));
@@ -439,36 +460,165 @@ public final class WindowsTextInjector implements TextInjector {
     }
 
     /** @return 实际写入的事件数；-1 表示一个都没写进去 */
+    /**
+     * 把一组按键事件写进**显式分配的原生内存**并交给 {@code SendInput}。
+     *
+     * <p><b>为什么不用 JNA 的 {@code Structure.toArray()}：</b>实测出现过一个极隐蔽的故障——
+     * 用户说「今天天气不错啊」（7 字），微信里出现的是「**今今今今今今今**」：
+     * 事件数完全正确（14 = 7×2，{@code SendInput} 报告全部写入成功），
+     * 但每个 {@code INPUT} 里的字符字段都被写成了**同一个值**，
+     * 于是同一个字被发了 7 遍。
+     *
+     * <p>{@code new INPUT().toArray(n)} 这种写法依赖 JNA 内部的数组元素分配与
+     * {@code write()} 语义，在含 union 的 {@code INPUT} 上踩了坑。
+     * 现在改为**自己算偏移、自己写字节**：布局是
+     * <pre>
+     *   INPUT (40 字节, 8 字节对齐)
+     *     +0  DWORD type
+     *     +8  KEYBDINPUT（union 的最大成员 MOUSEINPUT 是 24 字节）
+     *           +0  WORD  wVk
+     *           +2  WORD  wScan      ← KEYEVENTF_UNICODE 时字符放这里
+     *           +4  DWORD dwFlags
+     *           +8  DWORD time
+     *           +16 ULONG_PTR dwExtraInfo   （32 位平台是 +12；本产品只支持 x64）
+     * </pre>
+     * 完全不依赖 JNA 的结构体写回机制，并且**写完立刻回读校验**——
+     * 与其相信它写对了，不如读出来看一眼。
+     */
+    /**
+     * 把一组按键事件交给 {@code SendInput}。
+     *
+     * <p><b>不手算偏移。</b>偏移和结构大小都交给 JNA 算（{@link Win32#keyboardFieldOffset()}、
+     * {@code new INPUT().size()}），并且**写完立刻回读校验**。
+     *
+     * <p>为什么这么谨慎——这块已经错过两次，而且两次的故障都极其隐蔽：
+     * <ol>
+     *   <li>第一次：用 {@code new INPUT().toArray(n)} 分配数组，字符没有被逐个写入。</li>
+     *   <li>第二次（更根本）：{@link Win32.INPUT} 的 union 里只声明了 16 字节的
+     *       {@code KEYBDINPUT}，但 Windows 的 union 最大成员是 24 字节的 {@code MOUSEINPUT}，
+     *       于是 JNA 把整个 {@code INPUT} 算成 32 字节、把字符写到了偏移 24。
+     *       症状是：{@code SendInput} 报告事件**全部写入成功**，
+     *       但字符全丢，目标程序把**同一个字重复 N 遍**（用户看到「今今今今今今今」）。</li>
+     * </ol>
+     * 所以现在：把 {@code MOUSEINPUT} 也声明进 union 撑到正确大小，
+     * 并且启动时打印一次「Java 计算的大小 == 传给 SendInput 的 dwSize」的校验结果。
+     */
+    /**
+     * 把一组按键事件交给 {@code SendInput}。
+     *
+     * <p><b>自己准备连续内存，不依赖 JNA 编组结构体数组。</b>这块踩过三次坑，
+     * 每次都表现成「事件数看起来对，但文字不对」：
+     * <ol>
+     *   <li>{@code new INPUT().toArray(n)} 分配数组 → 字符没有被逐个写入；</li>
+     *   <li>{@code Win32.INPUT} 的 union 只声明 16 字节的 {@code KEYBDINPUT}，
+     *       而 Windows 的 union 最大成员是 24 字节的 {@code MOUSEINPUT} →
+     *       结构被算成 32 字节、字符写到偏移 24 → <b>同一个字被重复 N 遍</b>；</li>
+     *   <li>改对布局后用 {@code INPUT[]} 传参 → {@code SendInput} 直接返回 0。</li>
+     * </ol>
+     * 所以现在：结构体布局由 JNA 从字段定义算出（{@code MOUSEINPUT} 撑大 union），
+     * 但**缓冲区自己分配、偏移自己按字段写入**，最后传 {@code Pointer} 进去。
+     * 这样既拿到正确的 40 字节布局，又绕开 JNA 对结构体数组的编组。
+     *
+     * <p>写入后再**回读校验**：确认每个事件的字符确实是它自己那个字。
+     * 与其相信写对了，不如读出来看一眼——前面三次故障都发生在「以为写对了」的时刻。
+     */
     private int send(List<Win32.KeyEvent> events) {
         if (events.isEmpty()) {
             return 0;
         }
-        Win32.INPUT[] inputs = (Win32.INPUT[]) new Win32.INPUT().toArray(events.size());
-        for (int i = 0; i < events.size(); i++) {
-            Win32.KeyEvent e = events.get(i);
-            inputs[i].type = Win32.INPUT_KEYBOARD;
-            inputs[i].ki.wVk = (short) e.wVk();
-            inputs[i].ki.wScan = (short) e.wScan();
-            inputs[i].ki.dwFlags = e.dwFlags();
-            inputs[i].ki.time = 0;
-            inputs[i].ki.dwExtraInfo = null;
-            inputs[i].write();
+        logInputLayoutOnce();
+
+        int n = events.size();
+        int size = Win32.INPUT_SIZE;
+        // 每个 INPUT：+0 type(DWORD)，union 起点在 +8；KEYBDINPUT 内 wVk@0 / wScan@2 / dwFlags@4
+        int unionAt = Win32.keyboardFieldOffset();
+        int wScanAt = unionAt + 2;
+        int flagsAt = unionAt + 4;
+
+        Memory block = new Memory((long) n * size);
+        for (int i = 0; i < n; i++) {
+            Win32.KeyEvent ev = events.get(i);
+            long base = (long) i * size;
+            // 先清零，避免残留字节被当成有效字段
+            block.setMemory(base, size, (byte) 0);
+            block.setInt(base, Win32.INPUT_KEYBOARD);
+            block.setShort(base + unionAt, (short) ev.wVk());
+            block.setShort(base + wScanAt, (short) ev.wScan());
+            block.setInt(base + flagsAt, ev.dwFlags());
         }
+
+        // 回读校验：每个 Unicode 事件的字符必须是它自己
+        int checked = 0;
+        for (int i = 0; i < n && checked < TRACE_EVENTS; i++) {
+            Win32.KeyEvent ev = events.get(i);
+            if ((ev.dwFlags() & Win32.KEYEVENTF_UNICODE) == 0) {
+                continue;
+            }
+            long base = (long) i * size;
+            short wScan = block.getShort(base + wScanAt);
+            short wVk = block.getShort(base + unionAt);
+            int flags = block.getInt(base + flagsAt);
+            if (wScan != (short) ev.wScan() || wVk != (short) ev.wVk() || flags != ev.dwFlags()) {
+                log.error("事件 {} 写入校验失败：wVk={} wScan={} flags=0x{}（期望 {} / {} / 0x{}）",
+                        i, wVk, wScan, Integer.toHexString(flags),
+                        ev.wVk(), ev.wScan(), Integer.toHexString(ev.dwFlags()));
+                block.close();
+                return -1;
+            }
+            checked++;
+        }
+
         int written;
         try {
-            written = Win32.User32.INSTANCE.SendInput(inputs.length, inputs, Win32.INPUT_SIZE);
+            written = Win32.User32.INSTANCE.SendInput(n, block, size);
         } catch (RuntimeException e) {
             log.warn("SendInput 抛错：{}", e.toString());
             return -1;
+        } finally {
+            block.close();
         }
-        if (written != inputs.length) {
-            // 部分写入也是失败：缺事件会让文字缺字，比整体失败更难查，因此按失败回报。
+        if (written != n) {
             log.warn("SendInput 只写入了 {}/{} 个事件（GetLastError={}）",
-                    written, inputs.length, com.sun.jna.Native.getLastError());
+                    written, n, com.sun.jna.Native.getLastError());
             return written == 0 ? -1 : written;
         }
         return written;
     }
+
+    /** 布局校验只打一次日志，避免刷屏。 */
+    private static volatile boolean layoutVerified;
+
+    /** 是否打印每个事件的字符明细（{@code -Dtalkinglive.inject.trace=true} 打开）。 */
+    private final boolean traceInput = Boolean.getBoolean("talkinglive.inject.trace");
+
+    private static final int TRACE_EVENTS = 64;
+
+    /**
+     * 校验并记录 INPUT 的布局。
+     *
+     * <p>这一行日志是「字符写错位置」那类故障的唯一早期信号：
+     * 结构大小必须是 40，union 起点必须是 8（于是字符落在偏移 10）。
+     */
+    private static void logInputLayoutOnce() {
+        if (layoutVerified) {
+            return;
+        }
+        layoutVerified = true;
+        int size = new Win32.INPUT().size();
+        int unionAt = Win32.keyboardFieldOffset();
+        // 正确布局：union 起点 8、KEYBDINPUT 的 wScan 在 union 内 +2 → 结构内偏移 10
+        boolean ok = size == Win32.INPUT_SIZE && unionAt == 8;
+        log.info("INPUT 布局：结构 {} 字节（应 {}），union 起点 {}（应 8），字符字段偏移 {}：{}",
+                size, Win32.INPUT_SIZE, unionAt, unionAt + 2,
+                ok ? "正确" : "★ 不正确，字符可能写错位置");
+        if (!ok) {
+            log.error("INPUT 布局校验失败！union 成员必须声明成 MOUSEINPUT(24B)——"
+                    + "用 KEYBDINPUT(16B) 会让整个结构少 8 字节，字符写到错误偏移，"
+                    + "表现为「同一个字被重复 N 遍」。");
+        }
+    }
+
+
 
     // ------------------------------------------------------------ UIPI
 
@@ -567,7 +717,7 @@ public final class WindowsTextInjector implements TextInjector {
 
     @Override
     public String describe() {
-        return "SendInput + KEYEVENTF_UNICODE（不碰剪贴板，每批 " + BATCH_CODE_POINTS + " 码点）";
+        return "SendInput + KEYEVENTF_UNICODE（不碰剪贴板，逐字符发送，间隔 " + charGapMillis + "ms）";
     }
 
     @Override
@@ -575,3 +725,4 @@ public final class WindowsTextInjector implements TextInjector {
         return Map.of("injections", injections.get(), "codePoints", injectedCodePoints.get());
     }
 }
+

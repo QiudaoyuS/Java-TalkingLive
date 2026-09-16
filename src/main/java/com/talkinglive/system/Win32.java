@@ -66,13 +66,75 @@ public final class Win32 {
                 super(p);
             }
         }
+
+        /**
+         * 字段在结构体内的偏移（fieldOffset 是 protected，这里开个出口）。
+         *
+         * <p>暴露出来是为了**可测**：这块偏移算错过一次，而算错的后果是
+         * 「SendInput 报告成功、但字符全部丢失」——必须有断言把它按住。
+         */
+        public int offsetOf(String fieldName) {
+            return fieldOffset(fieldName);
+        }
     }
 
-    /** INPUT 的 union。用 {@code write()} 时以 KEYBDINPUT 解释。 */
-    @Structure.FieldOrder({"type", "ki"})
+    /**
+     * 鼠标输入事件。
+     *
+     * <p><b>它在本类里的唯一作用是「把 union 撑到正确大小」</b>——产品本身不用鼠标注入。
+     * 这不是多余的：Windows 的 {@code INPUT} 里 union 的最大成员是 {@code MOUSEINPUT}
+     * （24 字节，因为 {@code dwExtraInfo} 在 x64 下要对齐到 8 字节边界），
+     * 于是 {@code KEYBDINPUT} 实际落在**偏移 32**。
+     *
+     * <p>如果 union 里只声明 {@code KEYBDINPUT}（16 字节），JNA 算出的 {@code INPUT}
+     * 只有 32 字节、并把字符写到偏移 24 —— 实测症状极隐蔽：
+     * <b>{@code SendInput} 报告事件全部写入成功，但字符全部丢失，
+     * 目标程序把同一个字重复 N 遍</b>（用户看到「今今今今今今今」）。
+     *
+     * <p>所以这里把 {@code MOUSEINPUT} 也声明出来，并且用
+     * {@code Win32WindowStyles} 里那条「Java 计算的大小必须等于传给 SendInput 的
+     * dwSize」的自检守着它。
+     */
+    @Structure.FieldOrder({"dx", "dy", "mouseData", "dwFlags", "time", "dwExtraInfo"})
+    public static class MOUSEINPUT extends Structure {
+        public int dx;
+        public int dy;
+        public int mouseData;
+        public int dwFlags;
+        public int time;
+        public Pointer dwExtraInfo;
+
+        public MOUSEINPUT() {
+            super();
+        }
+
+        public MOUSEINPUT(Pointer p) {
+            super(p);
+            read();
+        }
+    }
+
+    /**
+     * {@code SendInput} 的输入事件。
+     *
+     * <p>布局（x64，共 40 字节）：
+     * <pre>
+     *   +0   DWORD type
+     *   +8   union { MOUSEINPUT(24) | KEYBDINPUT(16) | HARDWAREINPUT(8) }  ← 按最大成员算
+     *   +32    KEYBDINPUT 的字段起点
+     * </pre>
+     */
+    @Structure.FieldOrder({"type", "u"})
     public static class INPUT extends Structure {
         public int type;
-        public KEYBDINPUT ki = new KEYBDINPUT();
+        /**
+         * union 的占位成员。
+         *
+         * <p><b>必须是 {@link MOUSEINPUT}（24 字节），不能是 {@link KEYBDINPUT}（16 字节）</b>：
+         * 取 union 里最大的那个才能让 {@code KEYBDINPUT} 落在偏移 32。
+         * 用小的会让整个结构少 8 字节、字符写到错误偏移、目标程序重复上一个字符。
+         */
+        public MOUSEINPUT u = new MOUSEINPUT();
 
         public INPUT() {
             super();
@@ -84,7 +146,36 @@ public final class Win32 {
             read();
         }
 
+        /** 以 KEYBDINPUT 视角解释 union 里的数据。 */
+        public KEYBDINPUT keyboard() {
+            return new KEYBDINPUT(getPointer().share(keyboardFieldOffset()));
+        }
+
+        /** union 字段在本结构体内的偏移；fieldOffset 是 protected，这里开个出口。 */
+        public int keyboardFieldOffset() {
+            return fieldOffset("u");
+        }
+
+        /** 任意字段在结构体内的偏移（可测性）。 */
+        public int offsetOf(String fieldName) {
+            return fieldOffset(fieldName);
+        }
+
         public static class ByReference extends INPUT implements Structure.ByReference {}
+    }
+
+    /**
+     * {@code KEYBDINPUT} 字段在 {@link INPUT} 里的偏移。
+     *
+     * <p>由 JNA 的 {@code fieldOffset} 实测得出（x64 下为 32），**不靠手算**——
+     * 手算已经把这块算错过一次（少算了 8 字节，导致字符全部丢失、
+     * 目标程序把同一个字重复 N 遍）。
+     *
+     * <p>注意这个偏移是**结构体内**偏移，而 {@code KEYBDINPUT} 本身又在 union 内，
+     * 因此不能拿它当 union 大小用；union 大小由 {@link MOUSEINPUT} 决定。
+     */
+    public static int keyboardFieldOffset() {
+        return new INPUT().keyboardFieldOffset();
     }
 
     /** win32 函数。 */
@@ -92,8 +183,20 @@ public final class Win32 {
 
         User32 INSTANCE = Native.load("user32", User32.class, W32APIOptions.DEFAULT_OPTIONS);
 
-        /** 注入键盘输入。返回成功写入的事件数。 */
-        int SendInput(int nInputs, INPUT[] pInputs, int cbSize);
+        /**
+         * 注入输入事件。
+         *
+         * <p>参数写成 {@link Pointer} 而不是 {@code INPUT[]}：实测用结构数组调用时
+         * {@code SendInput} 返回 0（一个事件都没写入），而同样的数据放进一块连续的
+         * 原生内存再传指针就正常。JNA 对「含 union 的结构体数组」的编组不可靠，
+         * 所以由调用方自己准备缓冲区（见 {@code WindowsTextInjector.send}）。
+         *
+         * @param nInputs 事件个数
+         * @param pInputs 连续存放 {@code nInputs} 个 INPUT 的内存块
+         * @param cbSize  单个 INPUT 的字节数（x64 为 40）
+         * @return 成功写入的事件数
+         */
+        int SendInput(int nInputs, Pointer pInputs, int cbSize);
 
         HWND GetForegroundWindow();
 
