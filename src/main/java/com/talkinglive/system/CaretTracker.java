@@ -174,11 +174,6 @@ public final class CaretTracker {
      *
      * @return 焦点控件句柄；取不到返回 0
      */
-    public static long focusedControl() {
-        long fg = foregroundWindow();
-        return focusedControlOf(fg);
-    }
-
     /** 取指定窗口所属线程里当前有焦点的控件。 */
     public static long focusedControlOf(long hwnd) {
         if (!DpiScale.isWindows() || hwnd == 0) {

@@ -1,6 +1,5 @@
 package com.talkinglive.engine;
 
-import com.talkinglive.audio.SilenceDetector;
 
 /**
  * 唤醒词的"长时语音门"—— 用来挡住**外部音频**造成的误唤醒。

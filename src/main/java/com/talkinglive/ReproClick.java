@@ -3,7 +3,6 @@ package com.talkinglive;
 import com.talkinglive.system.CaretTracker;
 import com.talkinglive.system.DpiScale;
 import com.talkinglive.system.ForegroundWatcher;
-import com.talkinglive.system.Win32;
 import com.talkinglive.system.Win32WindowStyles;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.PreviewBar;

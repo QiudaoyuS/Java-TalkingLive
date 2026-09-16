@@ -1,6 +1,5 @@
 package com.talkinglive.system;
 
-import java.awt.GraphicsConfiguration;
 import java.awt.GraphicsEnvironment;
 import java.awt.Rectangle;
 import java.awt.Toolkit;

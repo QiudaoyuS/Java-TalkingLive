@@ -133,12 +133,6 @@ public final class VoskModel implements AutoCloseable {
         return findWordId(word) >= 0;
     }
 
-    /** 便于单测/自检断言，同时保留「不在表内 = -1」的语义。 */
-    public Optional<Integer> findWordOptional(String word) {
-        int id = findWordId(word);
-        return id < 0 ? Optional.empty() : Optional.of(id);
-    }
-
     /** 创建一个普通流式识别器（实时预览用）。 */
     public Recognizer createRecognizer(float sampleRate) throws IOException {
         return create(sampleRate, null);

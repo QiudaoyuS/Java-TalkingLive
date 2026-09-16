@@ -36,9 +36,7 @@ package com.talkinglive.text;
  * 留一倍余量给识别误差与多余标点。
  */
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 public final class PunctuationProcessor implements TextPostProcessor {
 

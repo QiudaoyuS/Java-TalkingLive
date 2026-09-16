@@ -5,7 +5,6 @@ import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -106,10 +105,6 @@ public final class StateMachine {
             return display;
         }
 
-        /** 是否应该注入。四种正常结束原因都注入；是否真的注入由注入时的焦点还原结果决定。 */
-        public boolean injects() {
-            return true;
-        }
     }
 
     /**

@@ -136,12 +136,6 @@ public final class DpiProbe {
         System.exit(0);
     }
 
-    /** 便于外部引用，避免 JNA 类型被优化掉。 */
-    @SuppressWarnings("unused")
-    private static HWND unused(HWND h) {
-        return h;
-    }
-
     /** shcore.dll：查本进程当前的 DPI awareness 取值。 */
     interface Shcore extends com.sun.jna.win32.StdCallLibrary {
         Shcore INSTANCE = com.sun.jna.Native.load("shcore", Shcore.class,

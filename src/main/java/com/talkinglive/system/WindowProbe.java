@@ -99,10 +99,4 @@ public final class WindowProbe {
             return "?";
         }
     }
-
-    /** 保留：便于将来输出 UTF-8（当前未使用）。 */
-    @SuppressWarnings("unused")
-    private static byte[] utf8(String s) {
-        return s.getBytes(StandardCharsets.UTF_8);
-    }
 }

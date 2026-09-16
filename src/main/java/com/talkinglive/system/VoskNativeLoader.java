@@ -1,6 +1,5 @@
 package com.talkinglive.system;
 
-import com.sun.jna.Library;
 import com.sun.jna.Native;
 import java.io.IOException;
 import java.io.InputStream;

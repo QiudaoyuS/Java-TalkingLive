@@ -5,7 +5,6 @@ import com.talkinglive.audio.SilenceDetector;
 import com.talkinglive.core.AppConfig;
 import com.talkinglive.core.AppPaths;
 import com.talkinglive.core.DictationSession;
-import com.talkinglive.core.InMemoryLogAppender;
 import com.talkinglive.core.Logging;
 import com.talkinglive.core.StateMachine;
 import com.talkinglive.core.StatusLine;
@@ -32,22 +31,16 @@ import com.talkinglive.text.TextUtils;
 import com.talkinglive.text.WholeSegmentPolicy;
 import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
-import com.talkinglive.ui.Icons;
 import com.talkinglive.ui.LoadingWindow;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
 import com.talkinglive.ui.Theme;
-import java.awt.AWTException;
 import java.awt.EventQueue;
-import java.awt.Image;
-import java.awt.MenuItem;
-import java.awt.PopupMenu;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-import javax.swing.JPopupMenu;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import org.slf4j.Logger;
@@ -1186,10 +1179,6 @@ public final class App {
         sm.handle(StateMachine.Event.TOGGLE);
     }
 
-    private void onBallLeftClick() {
-        ballLeftClick();
-    }
-
     private void togglePause() {
         paused = !paused;
         sm.handle(paused ? StateMachine.Event.PAUSE : StateMachine.Event.RESUME);
@@ -1771,11 +1760,6 @@ public final class App {
             sb.append(c < 128 ? c : '?');
         }
         return sb.toString();
-    }
-
-    /** 诊断报告文本（供测试与自检页）。 */
-    public String diagnosticsText() {
-        return SelfTest.run().report();
     }
 
     // ------------------------------------------------------------ 关闭
