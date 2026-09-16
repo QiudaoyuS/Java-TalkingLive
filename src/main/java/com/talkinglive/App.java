@@ -292,9 +292,9 @@ public final class App {
             log.info("首次启动，已生成默认配置：{}", AppPaths.configFile());
             notices.add("已生成默认配置文件：" + AppPaths.configFile());
         }
-        log.info("配置：wake={} end={} silence={}s autoSend={} sendKey={} maxSegment={}s itn={}",
+        log.info("配置：wake={} end={} silence={}s autoSend={} sendKey={} maxSegment={}s hotwords={}条",
                 config.wakeWord(), config.endWord(), config.silenceSeconds(), config.autoSend(),
-                config.sendKey().display(), config.maxSegmentSeconds(), config.itn());
+                config.sendKey().display(), config.maxSegmentSeconds(), config.hotwordMap().size());
 
         // ③ 引擎
         //

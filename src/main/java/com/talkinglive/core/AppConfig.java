@@ -134,7 +134,10 @@ public final class AppConfig {
     private SendKey sendKey = SendKey.ENTER;
     private boolean sendOnSilenceTimeout = false;
     private int maxSegmentSeconds = DEFAULT_MAX_SEGMENT_SECONDS;
-    private boolean itn = true;
+    // 注：曾经有一个 `itn`（数字规整）开关，已于 0.9.0 的清理中移除 ——
+    // 它是为 SenseVoice 准备的（TECH-PLAN §5.4），而 SenseVoice 从未接入，
+    // 当前精化引擎是 Vosk 离线重跑、没有 ITN 能力，于是它只被存/读/写/打日志，
+    // 没有任何地方读它来做事。一个"改了没反应"的开关比没有更糟：用户会以为软件坏了。
 
     /**
      * 注入时**每个字符之间的间隔（毫秒）**。
@@ -240,15 +243,6 @@ public final class AppConfig {
         this.maxSegmentSeconds = v;
     }
 
-    /** SenseVoice 的 ITN 开关（TECH-PLAN §5.4：会改字，因此必须可关）。 */
-    public boolean itn() {
-        return itn;
-    }
-
-    public void setItn(boolean v) {
-        this.itn = v;
-    }
-
     /** 注入时每个字符之间的间隔（毫秒）。见 {@link #charGapMillis}。 */
     public int charGapMillis() {
         return charGapMillis;
@@ -344,7 +338,6 @@ public final class AppConfig {
         m.put("sendKey", sendKey.display());
         m.put("sendOnSilenceTimeout", sendOnSilenceTimeout);
         m.put("maxSegmentSeconds", maxSegmentSeconds);
-        m.put("itn", itn);
         m.put("charGapMillis", charGapMillis);
         // 空字符串也写出去：让用户能在配置文件里看到「有热词这个功能」，
         // 否则一个从没配过热词的人根本不知道它存在。
@@ -373,7 +366,6 @@ public final class AppConfig {
         c.sendKey = SendKey.fromDisplay(JsonCodec.str(m, "sendKey", SendKey.ENTER.display()));
         c.sendOnSilenceTimeout = JsonCodec.bool(m, "sendOnSilenceTimeout", false);
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
-        c.itn = JsonCodec.bool(m, "itn", true);
         c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
         c.hotwords = JsonCodec.str(m, "hotwords", "").strip();
         // 连续输入模式（continuousMode / stopWord / continuousIdleSeconds）已被移除：
