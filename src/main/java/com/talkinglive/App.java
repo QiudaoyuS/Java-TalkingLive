@@ -1171,41 +1171,67 @@ public final class App {
             trayMenuAnchor.addNotify();
             Win32WindowStyles.applyNoActivateToolWindow(trayMenuAnchor);
 
-            // ⚠⚠ 关于托盘的菜单，这里有一段**四轮才查清**的记录，改动前务必读完。
+            // ⚠⚠ 托盘菜单这一段前后改了五轮，每一轮的结论都写在下面，改动前务必读完。
             //
-            // 事实链：
-            //   1. TrayIcon 只能接 java.awt.PopupMenu —— 那是**原生 Win32 菜单**。
-            //      实测在 150% DPI 下它不认 AWT 设的字体，中文全画成方块
-            //      （给它每个 MenuItem setFont(Theme.menuFont) 也无效）。
-            //   2. 改用 Swing JPopupMenu，由 TrayIcon 的 MouseListener 触发 →
-            //      **中文还是没出来**，出来的是原生菜单。
-            //      根因：只要挂了 PopupMenu，Windows 就会在右键时自己弹它，
-            //      与 MouseListener 是**两套并行机制**。
-            //   3. 去掉 PopupMenu（构造传 null）→ 原生菜单消失了，但
-            //      **右键完全没反应**，连我给 MouseListener 加的日志都没出现。
-            //      结论：**这个环境下 TrayIcon 的鼠标事件根本送不到 Java 层**
-            //      （Windows 11 的托盘溢出面板尤其如此）。前面两轮的判据调整
-            //      （isPopupTrigger → BUTTON3）其实都没意义 —— 事件压根没来。
-            //   4. 所以改用**左键**：挂 PopupMenu 时它靠 ActionListener 响过，
-            //      证明左键这条路是通的。
+            // 事实链（每一条都是实测，不是推断）：
+            //   1. 原生 PopupMenu 的菜单项用 `setFont(Theme.menuFont)` → **无效**。
+            //      它是 Win32 原生菜单，不认 AWT 的字体设置。
+            //   2. 用 MouseListener 弹 Swing JPopupMenu（判据 isPopupTrigger → BUTTON3）
+            //      → 中文菜单没出来，出来的是原生菜单。
+            //      根因：挂了 PopupMenu 时，Windows 会**自己**在右键弹它，
+            //      与 MouseListener 是两套并行机制。
+            //   3. 构造时传 null（不挂 PopupMenu）→ 原生菜单消失，但**左右键都没反应**，
+            //      连 MouseListener 里的日志都不出现。
+            //      结论：**这个环境下没有 PopupMenu 就收不到托盘鼠标事件**
+            //      （JDK 的 addMouseListener 本身与 popup 无关，所以限制在原生的
+            //      Windows 消息层：托盘图标的鼠标消息是随弹出菜单机制一起注册的）。
             //
-            // 现在的约定：**左键单击托盘图标 = 弹出中文菜单**。
-            // 菜单第一项就是「手动开始 / 结束听写」，所以"点一下就开始听写"
-            // 这个直觉操作仍然成立，只是多了一次选择。
-            // 悬浮球才是主要入口（左键直接开始/结束，无需菜单），托盘只是二级入口。
+            // 所以本轮的做法是"两条路并存、都记日志"，用一次真实点击把结论定下来：
+            //   - 恢复**中文** PopupMenu → 保证有事件通路，且万一原生菜单能画中文
+            //     （它用的是系统菜单字体，理论上支持中文），那它本身就是正确答案；
+            //   - 同时保留 MouseListener → 若事件能到，我们的 Swing 菜单（自绘，
+            //     中文绝对没问题）也会弹，并且会写日志。
+            // 下一次反馈就能确定该留下哪一条 —— 不再靠猜。
+            PopupMenu nativeMenu = new PopupMenu();
+            MenuItem nManual = new MenuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
+            nManual.setEnabled(!paused);
+            nManual.addActionListener(e -> onBallLeftClick());
+            nativeMenu.add(nManual);
+
+            nativeMenu.addSeparator();
+            MenuItem nPause = new MenuItem(paused ? "恢复监听" : "暂停监听");
+            nPause.addActionListener(e -> togglePause());
+            nativeMenu.add(nPause);
+
+            nativeMenu.addSeparator();
+            MenuItem nSettings = new MenuItem("设置...");
+            nSettings.addActionListener(e -> openSettings());
+            nativeMenu.add(nSettings);
+
+            MenuItem nLogs = new MenuItem("查看日志");
+            nLogs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_LOG));
+            nativeMenu.add(nLogs);
+
+            nativeMenu.addSeparator();
+            MenuItem nQuit = new MenuItem("退出");
+            nQuit.addActionListener(e -> shutdown());
+            nativeMenu.add(nQuit);
+
             trayIcon = new TrayIcon(trayImage(),
                     "TalkingLive —— " + sm.state().display()
-                            + "\n左键单击：打开菜单（开始听写 / 设置 / 退出）"
-                            + "\n悬浮球左键：直接开始或结束听写",
-                    null);
+                            + "\n左键单击：开始 / 结束听写"
+                            + "\n右键单击：菜单（设置 / 退出）",
+                    nativeMenu);
             trayIcon.setImageAutoSize(true);
-            // 左键单击 → 弹菜单。用 MouseListener 而不是 ActionListener：
-            // 后者在"没挂 PopupMenu"时不会触发（那个事件由 PopupMenu 产生）。
-            // 只在 pressed 上处理，避免按一次弹两次。
+            // 两条路都记日志 —— 下一次反馈即可确定哪条路真的通。
             trayIcon.addMouseListener(new java.awt.event.MouseAdapter() {
                 @Override
                 public void mousePressed(java.awt.event.MouseEvent e) {
+                    log.info("托盘收到鼠标按下：button={} popupTrigger={}",
+                            e.getButton(), e.isPopupTrigger());
                     if (e.getButton() == java.awt.event.MouseEvent.BUTTON1) {
+                        onBallLeftClick();
+                    } else if (e.getButton() == java.awt.event.MouseEvent.BUTTON3) {
                         showTrayMenu();
                     }
                 }
@@ -1213,9 +1239,8 @@ public final class App {
             SystemTray.getSystemTray().add(trayIcon);
             log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
                     + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
-            log.info("托盘交互：**左键单击弹菜单**。不用右键是因为实测本环境下"
-                    + "TrayIcon 的鼠标事件送不到 Java 层（右键完全没反应），"
-                    + "而且挂原生 PopupMenu 会让 Windows 弹一个画不出中文的菜单");
+            log.info("托盘交互：左键=开始/结束听写，右键=菜单。"
+                    + "原生菜单与 Swing 菜单同时挂着，用日志判断哪条路真的通");
         } catch (AWTException | RuntimeException e) {
             log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
         }
