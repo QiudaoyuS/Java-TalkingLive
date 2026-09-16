@@ -56,9 +56,59 @@ public final class AppPaths {
         return modelsDir().resolve("vosk-model-small-cn-0.22");
     }
 
+    /**
+     * **听写用**的 Vosk 模型目录（预览 + 精化）。
+     *
+     * <p>默认与 {@link #voskModelDir()} 相同（小模型）。可以用
+     * 系统属性 {@code -Dtalkinglive.model.asr=<目录>} 或环境变量
+     * {@code TALKINGLIVE_ASR_MODEL=<目录>} 指向更大的模型来提升准确率。
+     *
+     * <p><b>为什么要分开配置：</b>
+     * <ul>
+     *   <li><b>唤醒/结束词检测必须用小模型</b>——只有它支持运行时动态词表
+     *       （{@code DESIGN.md} 附录 B.2，实测 {@code graph/} 下没有 {@code Hclg.fst}，
+     *       所以能按语法重建解码图）。大模型词表静态，改不了。</li>
+     *   <li><b>预览与精化用越大越好</b>——它们不需要动态词表，只需要准确率。
+     *       小模型 CER 17.15%，大模型（{@code vosk-model-cn-0.22}）CER 7.43%，
+     *       差一倍以上。</li>
+     * </ul>
+     *
+     * <p>实测的准确率问题正是这么来的：预览与精化都用 17% CER 的小模型，
+     * 于是两者**错得一样**、精化无从纠正（诊断日志里
+     * 「预览『…』精化『…』与预览差异=0码点」就是这么出现的）。
+     */
+    public static Path asrModelDir() {
+        Path override = configuredModelDir("talkinglive.model.asr", "TALKINGLIVE_ASR_MODEL");
+        return override != null ? override : voskModelDir();
+    }
+
     /** 精化引擎模型目录（SenseVoice，见 TECH-PLAN §6.7 第 3 项）。 */
     public static Path refinerModelDir() {
         return modelsDir().resolve("sense-voice");
+    }
+
+    /**
+     * 读一个「模型目录」配置：系统属性优先，其次环境变量。
+     *
+     * @return 配置的目录；未配置或目录不存在时返回 null
+     */
+    private static Path configuredModelDir(String property, String envVar) {
+        String v = System.getProperty(property);
+        if (v == null || v.isBlank()) {
+            v = System.getenv(envVar);
+        }
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        Path p = Paths.get(v);
+        if (!Files.isDirectory(p)) {
+            // 配了但不存在：不静默回退到默认模型，否则用户会以为大模型生效了、
+            // 却仍在抱怨准确率。明确记日志（调用方负责提示）。
+            org.slf4j.LoggerFactory.getLogger(AppPaths.class)
+                    .warn("配置的模型目录不存在，已回退到默认小模型：{}（配置值 {}）", p, v);
+            return null;
+        }
+        return p;
     }
 
     public static Path recordingsDir() {

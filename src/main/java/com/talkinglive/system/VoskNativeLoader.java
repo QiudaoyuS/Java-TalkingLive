@@ -127,20 +127,37 @@ public final class VoskNativeLoader {
         }
     }
 
-    /** 把需要的 DLL 从 jar 解到稳定目录；已存在且大小一致则跳过。 */
+    /**
+     * 把需要的 DLL 从 jar 解到稳定目录。
+     *
+     * <p><b>已存在就跳过，这是必须的。</b>实测踩过一个会让程序**完全起不来**的坑：
+     * 只要有一个进程已经加载了 {@code libvosk.dll}，Windows 就锁住该文件，
+     * 于是「先写 .tmp 再 move 覆盖」会失败并抛
+     * {@code AccessDeniedException: libvosk.dll.tmp -> libvosk.dll}。
+     * 触发条件很常见：重复启动、上一份实例还没退干净、或同时跑诊断工具。
+     *
+     * <p>所以策略改成「**能用就不动**」：
+     * <ol>
+     *   <li>目标文件已存在 → 直接用，不碰它（文件被别的进程锁着也没关系，只读即可）。</li>
+     *   <li>不存在 → 解包；解包时先写 .tmp 再 move，避免上次异常退出留下半个 DLL。</li>
+     *   <li>move 仍失败（极端情况：刚好被别人锁住）→ 回退到「直接用已存在的那份」。</li>
+     * </ol>
+     */
     private static Path extractAll() throws IOException {
         Path dir = com.talkinglive.core.AppPaths.home().resolve("native").resolve("vosk");
         Files.createDirectories(dir);
-        ClassLoader cl = VoskNativeLoader.class.getClassLoader();
         for (String name : DLLS) {
-            String resource = "/" + WIN_DIR + "/" + name;
             Path target = dir.resolve(name);
+            if (Files.isRegularFile(target) && Files.size(target) > 0) {
+                // 已经解过一次就用现成的：不解包、不覆盖，避免与已加载它的进程抢文件
+                continue;
+            }
+            String resource = "/" + WIN_DIR + "/" + name;
             try (InputStream in = VoskNativeLoader.class.getResourceAsStream(resource)) {
                 if (in == null) {
-                    // 非 Windows 或 jar 布局不同：跳过（Linux/macOS 不支持本产品，这里只报错）
+                    // 非 Windows 或 jar 布局不同
                     throw new IOException("资源不存在：" + resource + "（当前仅支持 Windows x64）");
                 }
-                // 写临时文件再原子替换，避免上一次异常退出留下半个 DLL
                 Path tmp = dir.resolve(name + ".tmp");
                 Files.copy(in, tmp, StandardCopyOption.REPLACE_EXISTING);
                 try {
@@ -150,6 +167,12 @@ public final class VoskNativeLoader {
                     Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
                 }
             } catch (IOException e) {
+                // 走到这里说明解包失败。若目标文件其实已经存在（例如别的进程刚解出来），
+                // 就接受现状——文件能用比「我们亲手写的」重要。
+                if (Files.isRegularFile(target) && Files.size(target) > 0) {
+                    log.info("解包 {} 失败（{}），但目标文件已存在，直接使用它", name, e.getMessage());
+                    continue;
+                }
                 throw new IOException("解包 " + name + " 失败：" + e.getMessage(), e);
             }
         }

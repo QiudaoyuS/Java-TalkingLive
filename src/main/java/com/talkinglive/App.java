@@ -78,6 +78,14 @@ public final class App {
 
     // ---- 引擎 ----
     private VoskModel voskModel;
+    /**
+     * **听写用**的模型（预览 + 精化），可以与唤醒检测用的小模型不同。
+     *
+     * <p>分开的原因见 {@code AppPaths.asrModelDir}：唤醒词检测必须用小模型
+     * （只有它支持运行时词表），而预览与精化只要有准确率。
+     * 配了更大的模型时，准确率会显著提升（CER 17.15% → 7.43%）。
+     */
+    private VoskModel asrModel;
     private WakeWordDetector wakeDetector;
     private SpeechRecognizer recognizer;
     private TextRefiner refiner;
@@ -428,6 +436,26 @@ public final class App {
                     + "\n这意味着「词表外的词静默失效」无法被拦住，请检查 Vosk 原生库。");
         }
 
+        // 听写用模型（预览 + 精化）。默认与唤醒模型相同；可用
+        // -Dtalkinglive.model.asr=<目录> 或 TALKINGLIVE_ASR_MODEL 指向大模型。
+        Path asrDir = AppPaths.asrModelDir();
+        if (!asrDir.equals(modelDir)) {
+            try {
+                asrModel = VoskModel.load(asrDir);
+                log.info("听写用模型（预览 + 精化）：{} —— 与唤醒检测模型分开配置", asrDir);
+            } catch (IOException | RuntimeException e) {
+                log.error("听写用模型加载失败，回退到唤醒模型：{}", e.getMessage());
+                asrModel = voskModel;
+            }
+        } else {
+            // 关键提示：预览与精化共用同一个小模型时，两者会**错得一样**，
+            // 「精化」这一步就没有纠错能力了（诊断日志里「与预览差异=0码点」即此）。
+            log.warn("预览与精化都在用**小模型**（CER 17.15%），两者会错得一样、精化无从纠正。"
+                    + "想要更准请下载 vosk-model-cn-0.22（CER 7.43%）并用 "
+                    + "-Dtalkinglive.model.asr=<解压目录> 或 TALKINGLIVE_ASR_MODEL 指向它。"
+                    + "详见 docs/ENGINE-EXPERIMENT.md。");
+        }
+
         // 唤醒 / 结束词检测
         try {
             wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
@@ -442,7 +470,7 @@ public final class App {
 
         // 实时预览
         try {
-            recognizer = new VoskSpeechRecognizer(voskModel, (kind, text) -> onPreviewText(kind, text));
+            recognizer = new VoskSpeechRecognizer(asrModelOrFallback(), (kind, text) -> onPreviewText(kind, text));
             log.info("实时预览就绪：{}", recognizer.describe());
         } catch (IOException | RuntimeException e) {
             recognizerError = e.getMessage();
@@ -477,6 +505,10 @@ public final class App {
      * 这一点必须**如实反映在状态页与日志里**——它是 {@code DESIGN.md} §7
      * 允许的降级路径，但不能让用户以为精化是 SenseVoice 做的。
      */
+    /** 听写用模型；未单独配置时就是唤醒用的那个。 */
+    private VoskModel asrModelOrFallback() {
+        return asrModel != null ? asrModel : voskModel;
+    }
     private TextRefiner createRefiner(Options opts) {
         String choice = opts.refiner == null ? "auto" : opts.refiner.trim().toLowerCase();
         return switch (choice) {
@@ -494,7 +526,8 @@ public final class App {
                 // 理由见 VoskOffline.refine —— 唤醒词最容易被听错（实测「子曰」→「在」），
                 // 而文本层无法可靠区分「被听错的唤醒词」与「正文」，
                 // 音频层裁剪才是正解：让精化根本看不到那一段。
-                yield new TextRefiners.VoskOffline(voskModel, "Vosk 离线重跑", true, config.wakeWord());
+                yield new TextRefiners.VoskOffline(asrModelOrFallback(), "Vosk 离线重跑", true,
+                        config.wakeWord());
             }
         };
     }
@@ -1584,6 +1617,7 @@ public final class App {
         closeQuietly(wakeDetector);
         closeQuietly(recognizer);
         closeQuietly(refiner);
+        closeQuietly(asrModel);
         closeQuietly(voskModel);
         persistConfig();
         onUi(() -> {
