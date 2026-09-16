@@ -3,6 +3,14 @@
   日志策略（DESIGN.md §3.1 第 12 项）：
     - 滚动 5MB × 3
     - 记状态流转与错误，**不记转写内容**（见 Logging.java 的约定）
+
+  编码说明（实测踩过）：日志内容本来就是 UTF-8，但文件**没有 BOM**，
+  于是记事本 / PowerShell 的 Get-Content（不带 -Encoding）会按系统 ANSI(GBK) 去解，
+  中文全部变成「蹇界暐」这样的乱码。用户看到的就是"日志里有乱码"。
+
+  修法不是改编码（它已经对了），而是**加上 BOM**：UTF-8 带 BOM 是一份明确的
+  自我声明，现代编辑器与 PowerShell 都会据此正确解码。
+  代价是文件开头多 3 个字节（EF BB BF），任何正经工具都能正确处理。
 -->
 <configuration>
 
@@ -16,7 +24,12 @@
     <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy">
       <maxFileSize>5MB</maxFileSize>
     </triggeringPolicy>
-    <encoder>
+    <!--
+      encoder 用自定义类：它只是把 PatternLayoutEncoder 的 headerBytes() 覆写成
+      UTF-8 BOM。logback 自带的 PatternLayoutEncoder **没有** withBom 属性
+      （第一版照着想当然的属性配过，静默无效），真正可用的钩子就是 headerBytes()。
+    -->
+    <encoder class="com.talkinglive.core.BomPatternLayoutEncoder">
       <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{24} - %msg%n</pattern>
       <charset>UTF-8</charset>
     </encoder>
@@ -42,3 +55,4 @@
   </root>
 
 </configuration>
+

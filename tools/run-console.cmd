@@ -54,9 +54,17 @@ if not exist "target\talkinglive.jar" (
 
 echo Using JDK: %JAVA_EXE%
 echo.
-"%JAVA_EXE%" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar "target\talkinglive.jar" %*
+rem chcp 65001 = UTF-8 console code page. Without it the JVM's UTF-8 output is
+rem reinterpreted as the OEM code page and Chinese shows up as mojibake
+rem (that is exactly the "log has mojibake" report -- the bytes were fine,
+rem the reader guessed the wrong encoding).
+chcp 65001 >nul 2>&1
+"%JAVA_EXE%" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar "target\talkinglive.jar" %*
 set "RC=%ERRORLEVEL%"
 echo.
 echo [Exited with code %RC%]
+echo.
+echo To read the log file with the correct encoding:
+echo   java -cp "target\talkinglive.jar;target\lib\*" com.talkinglive.system.LogViewer 100
 pause
 endlocal

@@ -30,6 +30,12 @@ rem ============================================================
 
 cd /d "%~dp0"
 
+rem UTF-8 console code page. The JVM writes UTF-8; without this the console
+rem reinterprets those bytes using the OEM code page and Chinese shows up as
+rem mojibake. Normal starts hide this console entirely (see TalkingLive.vbs),
+rem but the console-mode subcommands (--doctor etc.) print Chinese to it.
+chcp 65001 >nul 2>&1
+
 rem ---- 1. collect JDK 21 candidates, first match wins ----
 rem
 rem IMPORTANT: known-good JDK 21 locations are tried BEFORE JAVA_HOME.
@@ -134,23 +140,26 @@ if defined NEEDS_CONSOLE (
   exit /b %RC%
 )
 
-rem ---- normal start: no console window ----
+rem ---- normal start: no console window, no waiting ----
 rem
-rem start /wait makes the script wait for the app, so the exit code is still
-rem available and failures can still pause. /b avoids flashing an extra
-rem window in the task bar.
-start "" /b /wait "%JAVAW_EXE%" -Dfile.encoding=UTF-8 -jar "target\talkinglive.jar" %*
-set "RC=%ERRORLEVEL%"
-
-if not "%RC%"=="0" (
-  echo.
-  echo [TalkingLive exited with code %RC%]
-  echo.
-  echo Startup problems should have shown a dialog. If none appeared, please
-  echo check the log:
-  echo   %LOCALAPPDATA%\TalkingLive\logs\talkinglive.log
-  echo.
-  echo For console output, run:  tools\run-console.cmd
-  pause
-)
+rem Two details, both learned the hard way:
+rem
+rem 1) NO /wait. The app is a long-running tray application. With /wait the
+rem    script blocks until the app exits, which means the cmd.exe process --
+rem    and therefore its console window -- stays alive for the whole session.
+rem    A hidden launcher would hide it, but the console window is still there
+rem    for anyone running this .cmd directly (measured: four stray cmd.exe
+rem    processes still holding run.cmd).
+rem
+rem 2) NO /b either. /b means "start inside the SAME console", which is the
+rem    opposite of what we want. Without /b, javaw is a GUI process and gets
+rem    no console of its own.
+rem
+rem Consequence: the exit code is no longer available here, so startup failures
+rem cannot be reported by this script. They are reported by the app's own
+rem dialog instead (see the catch in App.main) -- after hiding the console that
+rem dialog is the only failure path, which is why it must not be removed.
+rem
+rem To keep a console for troubleshooting use tools\run-console.cmd.
+start "" "%JAVAW_EXE%" -Dfile.encoding=UTF-8 -jar "target\talkinglive.jar" %*
 endlocal

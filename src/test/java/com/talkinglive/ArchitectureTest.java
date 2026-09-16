@@ -221,12 +221,17 @@ class ArchitectureTest {
      *       覆盖悬浮球常驻 / 浮窗显示中 / 贴边轮询 / 菜单打开四种状态。</li>
      *   <li>{@code ReproBlock}、{@code ReproTray} —— 同上问题的另两条排查路径：
      *       分别是「焦点是否被劫持」与「托盘气泡是否阻塞 UI 线程」。</li>
+     *   <li>{@code system.LogViewer} —— 用**明确的 UTF-8** 打印日志尾部。
+     *       存在的理由是一次实测反馈：「日志中存在乱码」。查下来日志内容本来就是
+     *       UTF-8，只是没有 BOM，记事本与 {@code Get-Content} 会按系统 ANSI 去解。
+     *       这条入口让用户不必再和编码打交道。</li>
      * </ul>
      */
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
             java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
                     "DpiProbe.java", "WindowProbe.java", "BlockSnapshot.java",
-                    "ReproClick.java", "ReproBlock.java", "ReproTray.java");
+                    "ReproClick.java", "ReproBlock.java", "ReproTray.java",
+                    "LogViewer.java");
 
     @Test
     @DisplayName("产品路径上只有一个 main：App（§4.5）")
