@@ -109,6 +109,42 @@ public final class App {
     /** 同类提示的去重时间戳（见 {@link #showNotice}）。 */
     private final java.util.Map<String, Long> lastNoticeAt = new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** 单实例锁；null 表示没拿到（已有实例在运行）。 */
+    private java.nio.channels.FileChannel singleInstanceLock;
+
+    /**
+     * 取单实例锁（对 {@code %LOCALAPPDATA%\TalkingLive\.lock} 加排它锁）。
+     *
+     * <p>用文件锁而不是「找同名进程」：进程名匹配会被 javaw.exe 包装、
+     * 命令行参数不同、以及权限差异干扰，而文件锁由操作系统保证互斥。
+     * 进程崩溃时锁会被自动释放，不会留下「永远启动不了」的僵尸状态。
+     *
+     * @return 持有锁的 channel；已有实例在运行时返回 null
+     */
+    private static java.nio.channels.FileChannel acquireSingleInstanceLock() {
+        try {
+            Path lockFile = AppPaths.home().resolve(".lock");
+            java.nio.channels.FileChannel ch = java.nio.channels.FileChannel.open(lockFile,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.WRITE);
+            java.nio.channels.FileLock lock = ch.tryLock();
+            if (lock == null) {
+                ch.close();
+                return null;
+            }
+            // 锁对象不单独持有：channel 关闭时锁自动释放
+            return ch;
+        } catch (java.nio.channels.OverlappingFileLockException e) {
+            // 同一个 JVM 里已经拿过（自检场景）
+            return null;
+        } catch (IOException | RuntimeException e) {
+            // 拿不到锁不该阻止启动——宁可多跑一份，也不要因为文件系统问题完全用不了
+            log.warn("单实例锁不可用（{}），本次不启用单实例保护：{}",
+                    AppPaths.home().resolve(".lock"), e.toString());
+            return null;
+        }
+    }
+
     /** 同一个标题的提示在这个间隔内只弹一次。 */
     private static final long NOTICE_THROTTLE_MILLIS = 60_000;
 
@@ -146,6 +182,8 @@ public final class App {
         boolean noMicrophone;
         boolean selfCheck;
         boolean micTest;
+        /** 允许同时运行多份（默认禁止，见 start() 里的单实例保护）。 */
+        boolean allowMultiple;
         String refiner;
 
         static Options parse(String[] args) {
@@ -159,6 +197,7 @@ public final class App {
                     case "--no-microphone" -> o.noMicrophone = true;
                     case "--self-check" -> o.selfCheck = true;
                     case "--mic-test" -> o.micTest = true;
+                    case "--allow-multiple" -> o.allowMultiple = true;
                     case "--refiner" -> {
                         if (i + 1 < args.length) {
                             o.refiner = args[++i];
@@ -184,6 +223,7 @@ public final class App {
                       --doctor          环境自检：模型 / 麦克风 / 词表校验 / 注入能力，然后退出
                       --no-microphone   不打开麦克风（无麦克风环境下试界面用）
                       --refiner <名>    指定精化引擎：auto | vosk-offline | none
+                      --allow-multiple  允许同时运行多份（默认禁止，避免多颗悬浮球）
                       --console         除日志文件外也输出到控制台（默认为真）
                       --help            显示本帮助
                     """);
@@ -196,7 +236,29 @@ public final class App {
         com.talkinglive.core.AppPaths.ensureDirectories();
         log.info("=== TalkingLive 启动 ===  home={}", AppPaths.home());
 
-        // ① 进程级 DPI awareness 必须在任何窗口创建之前（TECH-PLAN §7 第 3 项）
+        // ① 单实例保护。
+        //    跑起两份的后果很具体：桌面上出现两颗悬浮球、两套前台窗口监听、
+        //    两次注入——用户看到的是「一堆球挡着、点哪儿都怪怪的」。
+        //    宁可明确拒绝启动第二次，也不要让它变成一件说不清的事。
+        if (!opts.allowMultiple) {
+            singleInstanceLock = acquireSingleInstanceLock();
+            if (singleInstanceLock == null) {
+                String msg = "TalkingLive 已经在运行了。\n"
+                        + "桌面上应该已经有一颗悬浮球 —— 请用它（左键开始/结束听写，右键菜单）。\n"
+                        + "如果找不到它，它可能被拖到屏幕边缘贴边收起了，或者被全屏程序遮住；\n"
+                        + "此时可以用托盘图标，或先结束旧的 TalkingLive 进程再启动。\n"
+                        + "（确实要同时跑多份，请加 --allow-multiple）";
+                log.warn("检测到已有实例在运行，本次启动中止");
+                if (!opts.headless && !opts.selfCheck && !opts.micTest) {
+                    showFatal("TalkingLive 已经在运行", msg);
+                } else {
+                    System.out.println("[single-instance] " + msg.replace("\n", " "));
+                }
+                return;
+            }
+        }
+
+        // ② 进程级 DPI awareness 必须在任何窗口创建之前（TECH-PLAN §7 第 3 项）
         DpiScale.initProcessAwareness();
 
         // ② 配置：读取并**强制校验**（§4.3）。非法配置必须拒绝并提示，不能静默用默认值。
