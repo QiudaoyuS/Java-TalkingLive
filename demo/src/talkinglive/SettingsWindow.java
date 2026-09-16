@@ -136,10 +136,17 @@ class SettingsWindow extends JFrame {
         c.gridx = 3;                p.add(end, c);
 
         row++;
-        c.gridx = 0; c.gridy = row; p.add(label("静音兜底"), c);
+        c.gridx = 0; c.gridy = row; p.add(label("静音"), c);
         c.gridx = 1;                p.add(silence, c);
-        c.gridx = 2; c.gridwidth = 2; p.add(label("秒（0 = 关闭静音触发）"), c);
+        c.gridx = 2; c.gridwidth = 2; p.add(label("秒后结束录制"), c);
         c.gridwidth = 1;
+
+        row++;
+        c.gridx = 0; c.gridy = row; c.gridwidth = 4;
+        c.insets = new Insets(0, 4, 6, 10);
+        p.add(hint("静音超过设定秒数即自动结束本段；填 0 表示关闭。"), c);
+        c.gridwidth = 1;
+        c.insets = new Insets(6, 4, 6, 10);
 
         row++;
         c.gridx = 0; c.gridy = row; p.add(label("发送方式"), c);

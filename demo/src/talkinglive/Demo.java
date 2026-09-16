@@ -166,7 +166,7 @@ public class Demo implements FloatingBall.Listener {
 
         log("INFO", "应用启动 version=0.1.0-demo");
         log("INFO", "配置加载 唤醒词=\"" + cfgWakeWord + "\" 结束词=\"" + cfgEndWord
-                + "\" 静音兜底=" + cfgSilenceSeconds + "s");
+                + "\" 静音结束录制=" + cfgSilenceSeconds + "s");
         log("INFO", "音频设备打开 16kHz/16bit/mono device=\"(模拟)\"");
         log("INFO", "状态变更 IDLE（等待唤醒词）");
         log("INFO", "提示：桌面右侧有一颗悬浮球，右键它可以看到菜单");
@@ -453,8 +453,8 @@ public class Demo implements FloatingBall.Listener {
     private void startSilenceCountdown() {
         final int total = cfgSilenceSeconds;
         if (total <= 0) {
-            renderBar(lastPartial, "", "已关闭静音兜底 · 请说结束词");
-            log("INFO", "[state] 静音兜底已关闭，等待结束词");
+            renderBar(lastPartial, "", "静音自动结束已关闭 · 请说结束词");
+            log("INFO", "[state] 静音自动结束已关闭，等待结束词");
             return;
         }
         silenceLeft = total;
@@ -463,7 +463,7 @@ public class Demo implements FloatingBall.Listener {
             silenceLeft--;
             if (silenceLeft <= 0) {
                 stopTimers();
-                log("INFO", "[state] 静音兜底触发 持续=" + total + ".0s");
+                log("INFO", "[state] 静音超时 " + total + ".0s，自动结束本段");
                 sm.fire(StateMachine.Event.SILENCE);
             } else {
                 renderSilence();
@@ -474,7 +474,7 @@ public class Demo implements FloatingBall.Listener {
 
     private void renderSilence() {
         renderBar(lastPartial, "",
-                "等待结束词「" + cfgEndWord + "」· 静音兜底 " + silenceLeft + "s");
+                "等待结束词「" + cfgEndWord + "」· 静音 " + silenceLeft + "s 后结束录制");
     }
 
     void simulateEndWord() {
@@ -493,7 +493,7 @@ public class Demo implements FloatingBall.Listener {
             return;
         }
         stopTimers();
-        log("INFO", "[state] 静音兜底触发（手动模拟）");
+        log("INFO", "[state] 静音超时触发（手动模拟）");
         sm.fire(StateMachine.Event.SILENCE);
     }
 

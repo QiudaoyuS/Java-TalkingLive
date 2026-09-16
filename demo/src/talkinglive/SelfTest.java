@@ -103,7 +103,7 @@ public class SelfTest {
     private static void testSilenceFallback() {
         StateMachine sm = new StateMachine();
         sm.fire(WAKE);
-        check("静音兜底可结束听写", sm.fire(SILENCE) && sm.state() == COMMITTING);
+        check("静音超时可结束听写", sm.fire(SILENCE) && sm.state() == COMMITTING);
     }
 
     private static void testWindowChangeEndsSegment() {
