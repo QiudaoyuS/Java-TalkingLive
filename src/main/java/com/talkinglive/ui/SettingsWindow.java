@@ -243,7 +243,7 @@ public class SettingsWindow extends JFrame {
 
         JLabel path = new JLabel("更多参数在 config.json");
         path.setFont(Theme.font(11));
-        path.setForeground(Theme.DIM);
+        path.setForeground(Theme.TEXT_FAINT);
         path.setToolTipText(com.talkinglive.core.AppPaths.configFile().toString());
         p.add(path, BorderLayout.CENTER);
 
@@ -346,6 +346,14 @@ public class SettingsWindow extends JFrame {
 
     // ==================== 零件 ====================
 
+    /**
+     * 输入框。
+     *
+     * <p>白色主题下"边界感"不能靠加深背景来做 —— 窗口底已经是浅灰了，再深就脏。
+     * Apple 的做法是**白底 + 1px 极浅描边 + 极淡投影**：控件的边界来自投影，
+     * 而描边只是防止它在纯白区域里消失。实测只靠"背景略深"时，
+     * 窗口底与输入框底的对比只有 4%（#f6f6f8 对 #ffffff），看起来发平。
+     */
     private JTextField field(String value, int cols) {
         JTextField f = new JTextField(value, cols);
         f.setFont(Theme.font(12));
@@ -354,7 +362,7 @@ public class SettingsWindow extends JFrame {
         f.setCaretColor(Theme.TEXT);
         f.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(Theme.BORDER),
-                new EmptyBorder(4, 7, 4, 7)));
+                new EmptyBorder(4, 8, 4, 8)));
         f.setPreferredSize(new Dimension(f.getPreferredSize().width, 28));
         return f;
     }

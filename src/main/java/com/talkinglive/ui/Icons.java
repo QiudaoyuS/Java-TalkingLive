@@ -92,12 +92,37 @@ public final class Icons {
     }
 
     /**
-     * 托盘/窗口图标用的多尺寸位图：Windows 会在 16/24/32/48 之间挑一个，
-     * 只给一个尺寸的话任务栏与托盘会出现两种清晰度。这里返回最大尺寸，
-     * 由 {@code TrayIcon.setImageAutoSize(true)} 交给系统缩。
+     * 托盘 / 窗口图标。
+     *
+     * <p>形状与悬浮球的内容一致：**三根声浪柱**（中间高两边低）。这一点比以前更重要 ——
+     * 悬浮球里现在是声浪柱，托盘图标如果还是话筒，用户会在两处看到两个不同的产品形象。
+     *
+     * <p>用深色柱而不是白底浅柱：托盘区域可能是浅色也可能是深色，
+     * 但**深色在两者上都有对比度**，白底图标在浅色任务栏上会消失。
+     * 这也是 macOS 菜单栏图标的做法（单色、靠形状识别）。
      */
     public static BufferedImage trayImage() {
-        return image(Kind.MIC, TRAY, Theme.ballRing("IDLE", false));
+        int size = TRAY;
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = img.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE);
+        float k = size / (float) BASE;
+        g.scale(k, k);
+        g.setColor(Theme.TEXT);
+        paintTrayWave(g, TRAY);
+        g.dispose();
+        return img;
+    }
+
+    /** 三根声浪柱：与悬浮球内容同源，只是柱数少一点（小尺寸下五根会糊在一起）。 */
+    private static void paintTrayWave(Graphics2D g, int size) {
+        g.setStroke(round(stroke(size, 2.0f)));
+        float[] hs = {9f, 19f, 9f};
+        for (int i = 0; i < hs.length; i++) {
+            float x = 5f + i * 7f;
+            g.draw(new Line2D.Float(x, 12f - hs[i] / 2f, x, 12f + hs[i] / 2f));
+        }
     }
 
     /** 语义色：让调用方不用记「哪个图标配哪个颜色」。 */
@@ -106,7 +131,7 @@ public final class Icons {
             case CHECK -> Theme.OK;
             case CROSS -> Theme.ERR;
             case WARN -> Theme.WARN;
-            case PAUSED -> Theme.DIM;
+            case PAUSED -> Theme.TEXT_FAINT;
             case GEAR, DOCUMENT, WAVE, STETHOSCOPE -> Theme.ACCENT;
             default -> Theme.TEXT;
         };

@@ -91,16 +91,66 @@ if not exist "target\lib" (
   )
 )
 
-rem ---- 3. launch. If the JVM is not 21 it prints a clear version error. ----
-echo.
-"%JAVA_EXE%" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar "target\talkinglive.jar" %*
+rem ---- 3. launch ----
+rem
+rem Use javaw.exe (GUI subsystem) instead of java.exe. java.exe is a console
+rem program, so double-clicking run.cmd leaves a black console window on the
+rem desktop -- which contradicts the product's shape ("one floating ball,
+rem nothing else"). The user explicitly asked to hide it.
+rem
+rem Cost: javaw throws stdout/stderr away, so the console shows nothing.
+rem Therefore:
+rem   1) Normal start uses javaw; failures are reported by the app's own
+rem      dialog (see the catch in App.main). After hiding the console that
+rem      dialog is the ONLY failure path -- it must not be removed.
+rem   2) To see console output use tools\run-console.cmd (it uses java.exe).
+rem   3) Subcommands that print their result to stdout (--doctor, --self-check,
+rem      --mic-test) also use java.exe, see the check below.
+set "JAVAW_EXE=%JAVA_EXE:java.exe=javaw.exe%"
+if not exist "%JAVAW_EXE%" set "JAVAW_EXE=%JAVA_EXE%"
+
+rem Subcommands whose whole point is console output; javaw would show nothing.
+set "NEEDS_CONSOLE="
+for %%a in (%*) do (
+  if /i "%%a"=="--doctor"      set "NEEDS_CONSOLE=1"
+  if /i "%%a"=="--self-check"  set "NEEDS_CONSOLE=1"
+  if /i "%%a"=="--mic-test"    set "NEEDS_CONSOLE=1"
+  if /i "%%a"=="--console"     set "NEEDS_CONSOLE=1"
+  if /i "%%a"=="--help"        set "NEEDS_CONSOLE=1"
+  if /i "%%a"=="-h"            set "NEEDS_CONSOLE=1"
+)
+
+if defined NEEDS_CONSOLE (
+  "%JAVA_EXE%" -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -jar "target\talkinglive.jar" %*
+  set "RC=%ERRORLEVEL%"
+  if not "%RC%"=="0" (
+    echo.
+    echo [Exited with code %RC%]
+    echo If this mentions "class file version", JAVA_HOME is not JDK 21.
+    echo Current JAVA_HOME = %JAVA_HOME%
+    pause
+  )
+  endlocal
+  exit /b %RC%
+)
+
+rem ---- normal start: no console window ----
+rem
+rem start /wait makes the script wait for the app, so the exit code is still
+rem available and failures can still pause. /b avoids flashing an extra
+rem window in the task bar.
+start "" /b /wait "%JAVAW_EXE%" -Dfile.encoding=UTF-8 -jar "target\talkinglive.jar" %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (
   echo.
-  echo [Exited with code %RC%]
-  echo If this mentions "class file version", JAVA_HOME is not JDK 21.
-  echo Current JAVA_HOME = %JAVA_HOME%
+  echo [TalkingLive exited with code %RC%]
+  echo.
+  echo Startup problems should have shown a dialog. If none appeared, please
+  echo check the log:
+  echo   %LOCALAPPDATA%\TalkingLive\logs\talkinglive.log
+  echo.
+  echo For console output, run:  tools\run-console.cmd
   pause
 )
 endlocal

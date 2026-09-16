@@ -105,6 +105,24 @@ public class FloatingBall extends JWindow {
     private float pulsePhase = 0f;
     private final Timer pulseTimer;
 
+    /**
+     * 当前声浪电平（原始归一化 RMS，0..1）。由音频线程经 {@link #setLevel} 写入。
+     *
+     * <p>用 {@code double} 而不是原子类型：它是**显示**用的，偶尔读到撕裂的旧值
+     * 只会让某根柱子高一点点，下一帧就修好了；为它引入同步反而会在音频线程上
+     * 制造锁竞争。
+     */
+    private volatile double rawLevel = 0;
+
+    /** 平滑后的显示电平（0..1）。在 EDT 上逐帧向 {@link #rawLevel} 靠近。 */
+    private double displayLevel = 0;
+    /** 待唤醒时的闲置起伏相位，让球看起来"活着"而不是一块静止的图案。 */
+    private double idlePhase = 0;
+    private final Timer levelTimer;
+
+    /** 声浪柱的显示电平上限 —— RMS 直接映射的话正常说话只有 0.05，柱子几乎不动。 */
+    private static final double LEVEL_FULL_SCALE = 0.22;
+
     /** 贴边状态下轮询鼠标位置——不依赖 ENTERED 事件是否送达。 */
     private Timer dockWatcher;
     private int outsideTicks = 0;
@@ -139,6 +157,22 @@ public class FloatingBall extends JWindow {
             }
             repaint();
         });
+
+        // 声浪的逐帧推进：新电平**立刻**跟上（不然说话时柱子会慢半拍），
+        // 回落则慢一些（不然每个字的间隙柱子都会塌到底，看起来像在闪）。
+        // 33ms ≈ 30fps，对这种小幅动画足够，也不会把 EDT 占满。
+        levelTimer = new Timer(33, e -> {
+            double target = Math.min(1.0, rawLevel / LEVEL_FULL_SCALE);
+            displayLevel = target >= displayLevel
+                    ? displayLevel + (target - displayLevel) * 0.55
+                    : displayLevel + (target - displayLevel) * 0.18;
+            idlePhase += 0.11;
+            if (idlePhase > Math.PI * 2) {
+                idlePhase -= Math.PI * 2;
+            }
+            repaint();
+        });
+        levelTimer.start();
 
         installMouseHandlers();
     }
@@ -181,6 +215,49 @@ public class FloatingBall extends JWindow {
             pulseTimer.start();
         }
         repaint();
+    }
+
+    /**
+     * 更新声浪电平（原始归一化 RMS，0..1）。**会被音频线程调用，必须立刻返回。**
+     *
+     * <p>它只写一个 volatile 字段，平滑与重绘都交给 EDT 上的 {@link #levelTimer} ——
+     * 音频线程上不能做任何有代价的事，否则丢帧就是丢音频。
+     */
+    public void setLevel(double rms) {
+        this.rawLevel = rms < 0 ? 0 : rms;
+    }
+
+    /**
+     * 把悬浮球当前的画面画到一张离屏图上（供自检断言）。
+     *
+     * <p>为什么需要它：本轮的核心外观需求是「柱子跟随声浪大小变化」，而这类事情
+     * 光靠肉眼截图确认不可靠 —— 截图的坐标要过 DPI 换算、还要求当时真的有人在说话。
+     * 离屏渲染把"画面"变成可比对的像素：给一个电平和另一个电平，两张图必须不同，
+     * 而且电平原样反映在柱子的高度上。
+     */
+    public java.awt.image.BufferedImage renderForTest() {
+        java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
+                Math.max(1, getWidth()), Math.max(1, getHeight()),
+                java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        java.awt.Graphics2D g = img.createGraphics();
+        panel.paint(g);
+        g.dispose();
+        return img;
+    }
+
+    /** 当前显示电平（供自检断言「柱子确实会随声音变化」）。 */
+    public double displayLevelForTest() {
+        return displayLevel;
+    }
+
+    /**
+     * 立刻把显示电平推到目标值（仅供自检）。
+     *
+     * <p>正常路径上电平由 {@code levelTimer} 逐帧平滑逼近 —— 那是刻意的（见构造函数里的
+     * 说明），但自检不能等它跑几十帧，所以这里直通。
+     */
+    public void settleLevelForTest() {
+        displayLevel = Math.min(1.0, rawLevel / LEVEL_FULL_SCALE);
     }
 
     /** 依据保存的配置恢复位置与贴边状态（§4.4「位置与贴边状态需持久化到配置」）。 */
@@ -550,68 +627,128 @@ public class FloatingBall extends JWindow {
             Graphics2D g2 = (Graphics2D) g.create();
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
                     RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL,
+                    RenderingHints.VALUE_STROKE_PURE);
 
             int cx = getWidth() / 2;
             int cy = getHeight() / 2;
             int r = BALL_SIZE / 2;
 
-            // 听写中的脉冲光圈
+            // 听写中的脉冲光圈：白色主题下用状态色的**淡**描边（浓了会像警报）
             if ("LISTENING".equals(state) && !paused) {
                 int pr = (int) (r + pulsePhase * (r * 0.5));
-                int alpha = (int) (150 * (1f - pulsePhase));
-                g2.setColor(new Color(226, 94, 94, Math.max(alpha, 0)));
-                g2.setStroke(new BasicStroke(2.4f));
+                int alpha = (int) (90 * (1f - pulsePhase));
+                g2.setColor(new Color(Theme.ERR.getRed(), Theme.ERR.getGreen(),
+                        Theme.ERR.getBlue(), Math.max(alpha, 0)));
+                g2.setStroke(new BasicStroke(2.0f));
                 g2.draw(new Ellipse2D.Float(cx - pr, cy - pr, pr * 2f, pr * 2f));
             }
 
-            // 投影
-            g2.setColor(new Color(0, 0, 0, 70));
+            // 投影：极淡、只偏下 3px。白色浮层靠它"浮起来"，
+            // 投影一重就从"系统原生"变成"网页按钮"。
+            g2.setColor(Theme.SHADOW_STRONG);
             g2.fill(new Ellipse2D.Float(cx - r, cy - r + 3, r * 2f, r * 2f));
 
-            // 球体
+            // 球体（白色主题下始终是白球，状态靠内部波浪的颜色与幅度表达）
             g2.setColor(Theme.ballBase(state, paused));
             g2.fill(new Ellipse2D.Float(cx - r, cy - r, r * 2f, r * 2f));
 
-            // 边缘
+            // 边缘：1px 极浅描边。hover 时略加深，作为"可点"的反馈
             Color ring = Theme.ballRing(state, paused);
-            g2.setColor(hover ? ring.brighter() : ring);
-            g2.setStroke(new BasicStroke(hover ? 2.2f : 1.4f));
-            g2.draw(new Ellipse2D.Float(cx - r, cy - r, r * 2f - 1, r * 2f - 1));
+            g2.setColor(hover ? Theme.HOVER : ring);
+            g2.setStroke(new BasicStroke(hover ? 1.6f : 1.0f));
+            g2.draw(new Ellipse2D.Float(cx - r + 0.5f, cy - r + 0.5f, r * 2f - 1, r * 2f - 1));
 
-            // 收起时只露出一条，把图标往露出的一侧挪，否则看到的是空白
+            // 内容：暂停 = 斜杠；否则 = 声浪柱
             if (docked != AppConfig.DockSide.NONE && !revealed) {
+                // 收起时只露出一条，把图案往露出的一侧挪，否则看到的是空白
                 int shift = docked == AppConfig.DockSide.LEFT ? BALL_INSET : -BALL_INSET;
                 Graphics2D g3 = (Graphics2D) g2.create();
                 g3.translate(shift, 0);
-                if (paused) {
-                    drawPaused(g3, cx, cy);
-                } else {
-                    drawMic(g3, cx, cy);
-                }
+                drawContent(g3, cx, cy);
                 g3.dispose();
-            } else if (paused) {
-                drawPaused(g2, cx, cy);
             } else {
-                drawMic(g2, cx, cy);
+                drawContent(g2, cx, cy);
             }
 
             g2.dispose();
         }
     }
 
-    /**
-     * 球心的话筒。
-     *
-     * <p>形状来自 {@link Icons}（与托盘图标同一份路径），这里只负责把它摆到球心、
-     * 缩到球内合适的大小。以前这里和 {@code App.trayImage()} 各画一份，
-     * 结果两处形状和粗细都不一样 —— 那正是「图标大小不一致」的一半原因。
-     */
-    private void drawMic(Graphics2D g2, int cx, int cy) {
-        drawIcon(g2, Icons.Kind.MIC, cx, cy, MIC_ICON_SIZE, new Color(232, 236, 246, 235));
+    private void drawContent(Graphics2D g2, int cx, int cy) {
+        if (paused) {
+            drawPaused(g2, cx, cy);
+        } else {
+            drawWaveBars(g2, cx, cy);
+        }
     }
 
+    /**
+     * 声浪柱 —— 悬浮球的内容。
+     *
+     * <p>替代了原来的话筒图标：用户明确要求"拾音器一样的波浪柱，跟随收音的声浪大小变化"。
+     * 这不只是好看一点：话筒是一个静态图案，而柱子**本身就是麦克风正在工作的证据** ——
+     * 说话时它长高、安静时它收平，用户不必去别处确认"到底有没有在录"。
+     *
+     * <p><b>柱子从同一条底线向上长，而不是从中心上下对称伸展。</b>
+     * 这个选择有实测依据：对称伸展的柱子在变高时，像素只是从一头搬到另一头，
+     * **总墨量几乎不变**（自检 F1 就是这么把它抓出来的：电平 0.00→0.68，
+     * 柱子像素 2314→2314）。从底线向上长才是"音量"的通用表达 ——
+     * 语音备忘录、会议软件的音量条都是这个画法，而且墨量真的随音量增加。
+     *
+     * <p>其余三处刻意的设计：
+     * <ul>
+     *   <li><b>五根柱子，中间高两边低</b>：均衡器的通用形状，看一眼就知道是音频。</li>
+     *   <li><b>待唤醒时的"闲置起伏"</b>：完全不动的柱子会被误读成"卡住了"。
+     *       幅度极小的正弦错相位起伏让它看起来是活的，又不至于在用户没说话时
+     *       假装听到了什么。</li>
+     *   <li><b>最低高度不为 0</b>：柱子塌成一条线会让整颗球显得空。留一点底。</li>
+     * </ul>
+     */
+    private void drawWaveBars(Graphics2D g2, int cx, int cy) {
+        boolean live = "LISTENING".equals(state) && !paused;
+        // 形状因子：中间最高，向两侧递减（均衡器的通用形状）
+        double[] shape = {0.5, 0.78, 1.0, 0.78, 0.5};
+        int bars = shape.length;
+        int gap = 3;
+        int barWidth = 3;
+        int totalWidth = bars * barWidth + (bars - 1) * gap;
+        int left = cx - totalWidth / 2 + barWidth / 2;
+
+        double level = live ? displayLevel : 0;
+        // 底线：略微偏下，给柱子留出最长的生长空间
+        int baseY = cy + (int) (BALL_SIZE * 0.17);
+        int maxHeight = (int) (BALL_SIZE * 0.56);
+
+        g2.setColor(Theme.waveColor(state, paused));
+        g2.setStroke(new BasicStroke(barWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+
+        for (int i = 0; i < bars; i++) {
+            double f;
+            if (live) {
+                // 每根柱子给一点差异，否则五根一模一样地跳，像进度条而不像声浪
+                double jitter = 0.78 + 0.22 * Math.sin(idlePhase * 1.9 + i * 1.4);
+                f = Math.max(level * jitter, 0.07);
+            } else {
+                // 闲置起伏：0.16–0.30 之间轻轻呼吸
+                f = 0.16 + 0.14 * (0.5 + 0.5 * Math.sin(idlePhase + i * 1.1));
+            }
+            int h = Math.max(3, (int) Math.round(maxHeight * shape[i] * f));
+            int x = left + i * (barWidth + gap);
+            g2.draw(new java.awt.geom.Line2D.Float(x, baseY - h, x, baseY));
+        }
+    }
+
+    /**
+     * 暂停图案：一条斜杠。
+     *
+     * <p>形状来自 {@link Icons}（与托盘图标同一份路径），这里只负责把它摆到球心、
+     * 缩到球内合适的大小与颜色。它取代了原来的话筒图标 —— 球的内容现在是声浪柱，
+     * 而"暂停"必须与"正在拾音"一眼可分，所以用一个完全不同的形状（斜杠）而不是
+     * 改颜色：颜色在灰度/色觉障碍下不可靠，形状可靠。
+     */
     private void drawPaused(Graphics2D g2, int cx, int cy) {
-        drawIcon(g2, Icons.Kind.PAUSED, cx, cy, MIC_ICON_SIZE, new Color(210, 216, 230, 235));
+        drawIcon(g2, Icons.Kind.PAUSED, cx, cy, MIC_ICON_SIZE, Theme.TEXT_FAINT);
     }
 
     private void drawIcon(Graphics2D g2, Icons.Kind kind, int cx, int cy, int size, Color color) {

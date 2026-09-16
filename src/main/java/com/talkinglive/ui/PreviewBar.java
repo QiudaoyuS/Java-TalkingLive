@@ -58,16 +58,20 @@ public class PreviewBar extends JWindow {
                 Graphics2D g2 = (Graphics2D) g.create();
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
                         RenderingHints.VALUE_ANTIALIAS_ON);
+                // 白色浮层：先画一层极淡投影再画白底。投影只偏下 2px、alpha 22 ——
+                // 白色主题的"浮起来"全靠它，投影一重就变成廉价的网页卡片。
+                g2.setColor(Theme.SHADOW);
+                g2.fill(new RoundRectangle2D.Float(0, 2, getWidth() - 1, getHeight() - 3, 20, 20));
                 g2.setColor(Theme.SURFACE);
-                g2.fill(new RoundRectangle2D.Float(0, 0, getWidth() - 1, getHeight() - 1, 18, 18));
+                g2.fill(new RoundRectangle2D.Float(0, 0, getWidth() - 1, getHeight() - 3, 20, 20));
                 g2.setColor(Theme.SURFACE_BORDER);
                 g2.setStroke(new BasicStroke(1f));
-                g2.draw(new RoundRectangle2D.Float(0.5f, 0.5f, getWidth() - 2, getHeight() - 2, 18, 18));
+                g2.draw(new RoundRectangle2D.Float(0.5f, 0.5f, getWidth() - 2, getHeight() - 4, 20, 20));
                 g2.dispose();
             }
         };
         root.setOpaque(false);
-        root.setBorder(new EmptyBorder(10, 15, 13, 15));
+        root.setBorder(new EmptyBorder(11, 16, 14, 16));
 
         statusLabel.setFont(Theme.font(11));
         statusLabel.setForeground(Theme.TEXT_STATUS);
@@ -94,14 +98,19 @@ public class PreviewBar extends JWindow {
 
         StringBuilder html = new StringBuilder();
         html.append("<html><body style='width:").append(Theme.PREVIEW_TEXT_WIDTH).append("px'>");
+        // 两级文字样式（§4.4）：已稳定的用主色实色，仍在变动的尾部用弱化色。
+        // 颜色从 Theme 取而不是写死 —— 换主题时这里曾经漏改过，只剩这两行还是深色主题的色值。
         if (hasStable) {
-            html.append("<span style='color:#eef1f8'>").append(esc(stable)).append("</span>");
+            html.append("<span style='color:").append(hex(Theme.TEXT_STABLE)).append("'>")
+                    .append(esc(stable)).append("</span>");
         }
         if (hasPending) {
-            html.append("<span style='color:#717890'>").append(esc(pending)).append("</span>");
+            html.append("<span style='color:").append(hex(Theme.TEXT_VOLATILE)).append("'>")
+                    .append(esc(pending)).append("</span>");
         }
         if (!hasStable && !hasPending) {
-            html.append("<span style='color:#717890'>（等待语音…）</span>");
+            html.append("<span style='color:").append(hex(Theme.TEXT_VOLATILE))
+                    .append("'>（等待语音…）</span>");
         }
         html.append("</body></html>");
         textLabel.setText(html.toString());
@@ -150,6 +159,11 @@ public class PreviewBar extends JWindow {
 
     private static String esc(String s) {
         return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /** AWT 颜色 → HTML 用的 {@code #rrggbb}（Swing 的 HTML 不认 rgba）。 */
+    private static String hex(Color c) {
+        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
     }
 
     /** 自检用：当前显示的文字。 */

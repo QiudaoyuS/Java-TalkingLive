@@ -19,6 +19,7 @@ import com.talkinglive.ui.DiagnosticsWindow;
 import com.talkinglive.ui.FloatingBall;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
+import com.talkinglive.ui.Theme;
 import java.awt.GraphicsEnvironment;
 import java.awt.Point;
 import java.awt.Rectangle;
@@ -605,9 +606,18 @@ public final class SelfTest {
                 texts[1] = uiBar.statusForTest();
             });
             robot.delay(300);
-            boolean twoTier = texts[0] != null && texts[0].contains("eef1f8") && texts[0].contains("717890");
+            // 断言**行为**（两段用了不同的颜色）而不是写死色值。
+            // 上一版这里写死了 "#eef1f8" / "#717890" —— 那是深色主题的值，
+            // 换白色主题时这条自检立刻失败。它失败得对（说明断言过期了），
+            // 但它测错了东西：§4.4 要求的是"已稳定部分与仍在变动的尾部**可区分**"，
+            // 而不是"必须是这两个色号"。现在改成拿 Theme 的实际色值去比。
+            String stableHex = hex(Theme.TEXT_STABLE);
+            String volatileHex = hex(Theme.TEXT_VOLATILE);
+            boolean twoTier = texts[0] != null
+                    && texts[0].contains(stableHex) && texts[0].contains(volatileHex)
+                    && !stableHex.equalsIgnoreCase(volatileHex);
             add("UI", "E. 浮窗两级文字样式（已稳定/仍在变）", twoTier,
-                    "两段 span 颜色不同：" + twoTier);
+                    "稳定=" + stableHex + " 变动=" + volatileHex + " 两段都在=" + twoTier);
             add("UI", "E. 浮窗显示状态行", texts[1] != null && texts[1].contains("听写中"),
                     "status=" + texts[1]);
 
@@ -627,6 +637,38 @@ public final class SelfTest {
             });
             robot.delay(300);
             add("UI", "F. 设置窗口可打开且关闭 != 退出", settingsOk[0], settingsDetail[0]);
+
+            // F1) 悬浮球的声浪柱确实随电平变化
+            //     本轮的核心外观需求：「柱子跟随收音的声浪大小变化」。
+            //     用离屏渲染把画面变成像素来比对 —— 不依赖截图，也不要求当时真有人说话。
+            final double[] levels = new double[2];
+            final long[] ink = new long[2];       // 声浪柱的像素数（只数蓝色柱子）
+            final boolean[] differs = {false};
+            onEdt(() -> {
+                uiBall.setState("LISTENING");
+                // 安静：电平 0
+                uiBall.setLevel(0);
+                uiBall.settleLevelForTest();
+                levels[0] = uiBall.displayLevelForTest();
+                java.awt.image.BufferedImage quiet = uiBall.renderForTest();
+                ink[0] = barPixels(quiet);
+                // 大声：明显超过满量程的一部分
+                uiBall.setLevel(0.15);
+                uiBall.settleLevelForTest();
+                levels[1] = uiBall.displayLevelForTest();
+                java.awt.image.BufferedImage loud = uiBall.renderForTest();
+                ink[1] = barPixels(loud);
+                differs[0] = !sameImage(quiet, loud);
+                uiBall.setLevel(0);
+                uiBall.setState("IDLE");
+            });
+            robot.delay(200);
+            // 大声时柱子更高 → 柱子像素必须明显更多；且两张图必须不同
+            add("UI", "F1. 声浪柱随电平变化（安静 vs 大声）",
+                    levels[1] > levels[0] && differs[0] && ink[1] > ink[0],
+                    "电平 " + String.format("%.2f→%.2f", levels[0], levels[1])
+                            + "、柱子像素 " + ink[0] + "→" + ink[1]
+                            + "、画面不同=" + differs[0]);
 
             // F2) 精简契约：设置页只应有 5 个可改项（唤醒词/结束词/静音/自动发送/发送键），
             //     且没有页签 —— 日志/状态/自检已搬到独立的诊断窗口。
@@ -848,6 +890,51 @@ public final class SelfTest {
         void failNext(String reason) {
             this.failNext = reason;
         }
+    }
+
+    /** AWT 颜色 → HTML 用的 {@code #rrggbb}（与 PreviewBar 里的渲染保持一致）。 */
+    private static String hex(java.awt.Color c) {
+        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
+    }
+
+    /**
+     * 统计**声浪柱**的像素数（只数偏蓝的像素）。
+     *
+     * <p>不能数"不透明像素"：白球本身就有两千多个不透明像素，柱子高矮完全被淹没了
+     * —— 第一版就是数错了量，结果电平 0.00→0.68 而数字一动不动（2314→2314）。
+     * 这里用"蓝通道明显高于红通道"来认柱子：听写中的柱子是系统蓝 #007aff，
+     * 而球体是白的、描边是灰的、投影是黑的，三者都满足 R≳B。
+     */
+    private static long barPixels(java.awt.image.BufferedImage img) {
+        long n = 0;
+        for (int y = 0; y < img.getHeight(); y++) {
+            for (int x = 0; x < img.getWidth(); x++) {
+                int argb = img.getRGB(x, y);
+                int a = argb >>> 24;
+                int r = (argb >> 16) & 0xFF;
+                int b = argb & 0xFF;
+                if (a > 40 && b > r + 40) {
+                    n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    /** 两张离屏渲染图是否逐像素相同。 */
+    private static boolean sameImage(java.awt.image.BufferedImage a,
+            java.awt.image.BufferedImage b) {
+        if (a.getWidth() != b.getWidth() || a.getHeight() != b.getHeight()) {
+            return false;
+        }
+        for (int y = 0; y < a.getHeight(); y++) {
+            for (int x = 0; x < a.getWidth(); x++) {
+                if (a.getRGB(x, y) != b.getRGB(x, y)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     /** 数页签数量（没有 JTabbedPane 就是 0 —— 设置窗口精简后应当如此）。 */

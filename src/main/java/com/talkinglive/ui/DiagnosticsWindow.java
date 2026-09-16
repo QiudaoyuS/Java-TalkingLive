@@ -203,7 +203,8 @@ public class DiagnosticsWindow extends JFrame {
         JLabel value = new JLabel("<html><body style='width:" + VALUE_WIDTH + "px'>"
                 + esc(line.value())
                 + (line.detail() == null || line.detail().isBlank()
-                        ? "" : "<br><span style='color:#8a90a6'>" + esc(line.detail()) + "</span>")
+                        ? "" : "<br><span style='color:" + hex(Theme.TEXT_FAINT) + "'>"
+                                + esc(line.detail()) + "</span>")
                 + "</body></html>");
         value.setFont(Theme.font(11));
         value.setForeground(Theme.TEXT_MUTED);
@@ -219,11 +220,15 @@ public class DiagnosticsWindow extends JFrame {
         p.setBorder(new EmptyBorder(14, 16, 14, 16));
 
         logArea.setEditable(false);
-        // 必须含中文字形：Consolas 之类没有中文字形，中文会变成乱码方块
-        logArea.setFont(Theme.font(11));
-        logArea.setBackground(new Color(18, 20, 27));
-        logArea.setForeground(new Color(150, 200, 170));
-        logArea.setBorder(new EmptyBorder(8, 10, 8, 10));
+        // 等宽字体 + 中文字形：Consolas 之类没有中文字形，中文会变成乱码方块，
+        // 所以走 Theme.font（它优先挑中文字形好的家族）。
+        logArea.setFont(Theme.mono(11));
+        // 白色主题下的"代码/日志面"：极浅灰底 + 深色字。
+        // 深色终端面放在白色窗口里会像一块补丁，与 Apple 式简洁相反。
+        logArea.setBackground(Theme.CODE_BG);
+        logArea.setForeground(Theme.CODE_TEXT);
+        logArea.setCaretColor(Theme.CODE_TEXT);
+        logArea.setBorder(new EmptyBorder(10, 12, 10, 12));
         JScrollPane sp = new JScrollPane(logArea);
         sp.setBorder(BorderFactory.createLineBorder(Theme.BORDER));
         p.add(sp, BorderLayout.CENTER);
@@ -268,10 +273,11 @@ public class DiagnosticsWindow extends JFrame {
         p.setBorder(new EmptyBorder(14, 16, 14, 16));
 
         selfCheckArea.setEditable(false);
-        selfCheckArea.setFont(Theme.font(11));
-        selfCheckArea.setBackground(new Color(18, 20, 27));
-        selfCheckArea.setForeground(new Color(200, 210, 230));
-        selfCheckArea.setBorder(new EmptyBorder(8, 10, 8, 10));
+        selfCheckArea.setFont(Theme.mono(11));
+        selfCheckArea.setBackground(Theme.CODE_BG);
+        selfCheckArea.setForeground(Theme.CODE_TEXT);
+        selfCheckArea.setCaretColor(Theme.CODE_TEXT);
+        selfCheckArea.setBorder(new EmptyBorder(10, 12, 10, 12));
         p.add(new JScrollPane(selfCheckArea), BorderLayout.CENTER);
 
         JPanel bottom = new JPanel(new BorderLayout(10, 0));
@@ -303,7 +309,7 @@ public class DiagnosticsWindow extends JFrame {
     private JLabel small(String text) {
         JLabel l = new JLabel(text);
         l.setFont(Theme.font(11));
-        l.setForeground(Theme.DIM);
+        l.setForeground(Theme.TEXT_FAINT);
         return l;
     }
 
@@ -331,5 +337,10 @@ public class DiagnosticsWindow extends JFrame {
 
     private static String esc(String s) {
         return s == null ? "" : s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    /** AWT 颜色 → HTML 用的 {@code #rrggbb}（Swing 的 HTML 不认 rgba）。 */
+    private static String hex(java.awt.Color c) {
+        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
     }
 }

@@ -45,7 +45,7 @@ public final class LoadingWindow extends JFrame {
             JLabel sub = new JLabel("<html><body style='width:260px;text-align:center'>"
                     + detail + "</body></html>", SwingConstants.CENTER);
             sub.setFont(Theme.font(11));
-            sub.setForeground(Theme.DIM);
+            sub.setForeground(Theme.TEXT_FAINT);
             root.add(sub, BorderLayout.SOUTH);
         }
 

@@ -190,12 +190,17 @@ public final class App {
         } catch (RuntimeException | IOException e) {
             // 启动阶段的失败必须可见：产品平时没有界面，静默退出的表现是
             // 「双击了没反应」，用户完全无从判断（§7）。
+            //
+            // ★ 自从启动器改用 javaw 隐藏控制台（用户要求「不要黑窗口」），
+            //   这个弹窗从「最好有」变成**唯一**的失败通路 —— 没有它，
+            //   javaw 会把异常栈丢进虚空，用户只会看到「双击了没反应」。
+            //   所以这里的条件只排除真正在无界面环境跑的情况（--doctor 等）。
             log.error("启动失败：{}", e.toString(), e);
-            if (opts.console || !opts.headless) {
+            if (!java.awt.GraphicsEnvironment.isHeadless()) {
                 app.showFatal("TalkingLive 启动失败", e.getMessage() == null ? e.toString() : e.getMessage());
             }
-            if (!opts.headless) {
-                throw e;
+            if (opts.console || opts.headless) {
+                throw e;   // 控制台模式：把栈也打出来，便于排查
             }
             System.exit(1);
         }
@@ -642,6 +647,15 @@ public final class App {
 
         @Override
         public void onPcm(byte[] pcm, double rms) {
+            // 悬浮球的声浪柱（用户要求「跟随收音的声浪大小变化」）。
+            // 放在**最前面**且不做任何判断：它反映的是"麦克风此刻听到了多大声"，
+            // 与状态机无关 —— 待唤醒时也照常更新，这样球始终是活的。
+            // setLevel 只是写一个 volatile 字段，开销可忽略，可以在音频线程上调。
+            FloatingBall b = ball;
+            if (b != null) {
+                b.setLevel(rms);
+            }
+
             // 唤醒/结束词检测：常驻运行，暂停时不喂（「忽略唤醒词与结束词」§2.3）
             WakeWordDetector wd = wakeDetector;
             if (wd != null && !paused) {
@@ -1070,8 +1084,26 @@ public final class App {
 
     private void startUi(Options opts) {
         try {
-            UIManager.setLookAndFeel(new com.formdev.flatlaf.FlatDarkLaf());
+            // Apple 式简洁 + 白色主色调：用 FlatLaf 的**浅色**外观，并把
+            // 几个默认值改成更接近系统原生的样子（圆角、极浅描边、
+            // 系统蓝作强调色、输入框不画那圈粗焦点环）。
+            com.formdev.flatlaf.FlatLightLaf.setup();
             UIManager.put("Component.focusWidth", 0);
+            UIManager.put("Component.innerFocusWidth", 0);
+            UIManager.put("Component.arc", 8);
+            UIManager.put("Button.arc", 8);
+            UIManager.put("TextComponent.arc", 8);
+            UIManager.put("CheckBox.arc", 5);
+            UIManager.put("Component.borderColor", new java.awt.Color(0, 0, 0, 30));
+            UIManager.put("Component.focusedBorderColor", Theme.ACCENT);
+            UIManager.put("Panel.background", Theme.BG);
+            UIManager.put("Component.accentColor", Theme.ACCENT);
+            UIManager.put("Component.selectionBackground", new java.awt.Color(0, 122, 255, 46));
+            UIManager.put("Component.selectionForeground", Theme.TEXT);
+            // 滚动条做细：默认那根粗滚动条在白色窗口里非常显眼
+            UIManager.put("ScrollBar.width", 10);
+            UIManager.put("ScrollBar.thumbArc", 10);
+            UIManager.put("ScrollBar.track", Theme.BG);
         } catch (Exception e) {
             log.warn("FlatLaf 不可用，使用默认外观：{}", e.toString());
         }
