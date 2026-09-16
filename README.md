@@ -28,6 +28,17 @@
 
 ## 运行
 
+**最省事的方式：双击 `run.cmd`**（它会自己找 JDK 21、必要时自动构建、然后启动悬浮球）。
+
+```powershell
+.\run.cmd                # 常驻后台，桌面上只有一颗悬浮球
+.\run.cmd --mic-test     # 麦克风实测（15 秒，实时音量条）—— 建议第一次先跑这个
+.\run.cmd --settings     # 启动并打开设置窗口
+.\run.cmd --doctor       # 环境自检后退出
+```
+
+或者手动构建后直接跑 jar：
+
 ```powershell
 .\mvnw.cmd package
 
