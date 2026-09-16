@@ -24,14 +24,15 @@ type selftest-report.txt
 echo.
 echo [3/3] 启动 Demo ...
 echo.
-echo  提示：Demo 会弹出两个窗口 ——
-echo    * 「交互原型控制台」：用来触发各种场景（真实产品里没有这个窗口）
-echo    * 深色浮动预览条：贴在「模拟光标处」输入框的下方，这是真实产品的界面
+echo  启动后桌面上只会出现一颗「悬浮球」，没有主窗口。
 echo.
-echo  请重点试一件事：浮窗弹出时，在下面那个白色输入框里打字，
-echo  看光标会不会被抢走。抢走就是致命 bug。
+echo    右键悬浮球  -^> 弹出菜单（暂停监听 / 设置... / 查看日志 / 退出）
+echo    菜单「设置...」 -^> 打开设置窗口（常规 / 日志 / 演示）
+echo    左键悬浮球  -^> 手动开始或结束听写
+echo    拖动悬浮球  -^> 移动位置
 echo.
-echo  参数 --auto 可自动循环演示整段流程，不用手动点按钮。
+echo  想快速看整段流程：加 --auto 会自动循环演示并打开「演示」页签。
+echo  想直接看设置界面：加 --settings。
 echo.
 java -Dfile.encoding=UTF-8 -cp out talkinglive.Demo %*
 exit /b 0

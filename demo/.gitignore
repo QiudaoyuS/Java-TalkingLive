@@ -4,6 +4,7 @@ out/
 
 # 自检报告（每次运行生成）
 selftest-report.txt
+ui-selftest-report.txt
 
 # 调试残留
 err.txt
