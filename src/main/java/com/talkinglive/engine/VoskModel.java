@@ -2,39 +2,47 @@ package com.talkinglive.engine;
 
 import com.sun.jna.Pointer;
 import com.talkinglive.system.VoskNative;
+import com.talkinglive.text.TextUtils;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Optional;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 小 Vosk 模型的加载、持有与**词表查询**。
+ * 小 Vosk 模型的加载、持有、**词表查询**与识别器创建。
  *
- * <p>加载模型是全局昂贵操作（42MB 模型 + 声学模型常驻），唤醒检测与实时预览
- * 共用同一个 {@code Model} 实例，只各自持有自己的 {@code Recognizer}——
- * 这与「麦克风只开一路」（§4.3）是同一个思路：稀缺资源只有一份。
+ * <p>本类直接走自己声明的 {@link VoskNative}，不用 {@code org.vosk.Model}：
+ * 原因（词表查询缺失 + 中文语法被按 GBK 编码）写在 {@code VoskNative} 的类注释里。
  *
- * <p>{@link #findWord} 是附录 C 要求的显式词表校验：<b>Vosk 对词表外的词静默忽略</b>，
- * 不能依赖引擎报错。注意 {@code graph/} 下没有 {@code words.txt}，词表被编译进
- * {@code Gr.fst} 二进制里，所以只能用 {@code vosk_model_find_word()} 查询。
+ * <p>加载模型是全局昂贵操作（模型 + 声学模型常驻），唤醒检测与实时预览
+ * **共用同一个模型句柄**，只各自持有自己的识别器——与「麦克风只开一路」（§4.3）
+ * 是同一个思路：稀缺资源只有一份。
+ *
+ * <p>注意 {@code graph/} 下没有 {@code words.txt}，词表被编译进 {@code Gr.fst} 二进制
+ * 里，所以只能用 {@link #findWordId} 查询（附录 D.1 的坑）。
  */
 public final class VoskModel implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(VoskModel.class);
 
-    private final org.vosk.Model model;
+    private final Pointer handle;
     private final Path path;
+    private volatile boolean closed;
+    /** 防重复释放。 */
+    private final java.util.concurrent.atomic.AtomicBoolean freed =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
-    private VoskModel(org.vosk.Model model, Path path) {
-        this.model = model;
+    private VoskModel(Pointer handle, Path path) {
+        this.handle = handle;
         this.path = path;
     }
 
     /**
      * 加载模型。
      *
-     * @throws IOException 目录不存在或不完整
+     * @throws IOException 目录不存在、不完整，或原生层拒绝加载
      */
     public static VoskModel load(Path dir) throws IOException {
         if (dir == null) {
@@ -43,30 +51,40 @@ public final class VoskModel implements AutoCloseable {
         if (!Files.isDirectory(dir)) {
             throw new IOException("Vosk 模型目录不存在：" + dir);
         }
-        // 目录结构的完整性检查：这几项缺任何一个，vosk_model_new 都会崩在原生层，
-        // 给出一个没有上下文的 native 报错。这里提前把它变成可读的中文提示。
+        // 目录结构完整性检查：这几项缺任何一个，vosk_model_new 都会崩在原生层并给出
+        // 一个没有上下文的 native 报错。这里提前把它变成可读的中文提示。
         for (String required : new String[] {"am", "conf", "graph", "ivector"}) {
             if (!Files.isDirectory(dir.resolve(required))) {
                 throw new IOException("Vosk 模型不完整：缺少 " + required + "/ 目录（" + dir + "）");
             }
         }
-        // Vosk 引擎自己的日志走 stderr，会污染控制台；只留 WARNING。
-        org.vosk.LibVosk.setLogLevel(org.vosk.LogLevel.WARNINGS);
+        // Vosk 自己的日志走 stderr（GBK 控制台下还会乱码），只留 WARNING。
+        VoskNative vosk = VoskNative.get();
+        try {
+            vosk.vosk_set_log_level(0);
+        } catch (RuntimeException e) {
+            log.debug("设置 Vosk 日志级别失败（忽略）：{}", e.toString());
+        }
+
         long t0 = System.nanoTime();
-        org.vosk.Model m = new org.vosk.Model(dir.toAbsolutePath().toString());
+        Pointer h;
+        try {
+            h = vosk.vosk_model_new(dir.toAbsolutePath().toString());
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            throw new IOException("Vosk 模型加载失败（" + dir + "）：" + e.getMessage(), e);
+        }
+        if (h == null) {
+            throw new IOException("Vosk 模型加载失败（返回空句柄）：" + dir
+                    + "；请确认模型完整，获取方式见 docs/DESIGN.md 附录 D。");
+        }
         long ms = (System.nanoTime() - t0) / 1_000_000;
         log.info("Vosk 模型已加载：{}（耗时 {}ms）", dir, ms);
-        return new VoskModel(m, dir.toAbsolutePath());
+        return new VoskModel(h, dir.toAbsolutePath());
     }
 
-    /** 底层模型；{@code KaldiRecognizer} 需要它。 */
-    public org.vosk.Model raw() {
-        return model;
-    }
-
-    /** 原生指针，供 {@code vosk_model_find_word} 使用。 */
+    /** 原生模型句柄；识别器由它创建。 */
     public Pointer pointer() {
-        return model.getPointer();
+        return handle;
     }
 
     public Path path() {
@@ -74,36 +92,103 @@ public final class VoskModel implements AutoCloseable {
     }
 
     /**
-     * 词是否在模型词表内（附录 C.2 第 1 条：**必须显式查询**）。
+     * 该模型是否支持**运行时动态词表**（即受限语法）。
      *
-     * @return true 表示在词表内
+     * <p>这是 {@code DESIGN.md} 附录 B.2 的关键结论：大模型词表静态、运行时不可修改，
+     * 只有小模型能胜任唤醒词检测。C 侧的判据是「模型是否加载了 HCL 与 G 两个 FST」——
+     * 只有它们都存在时，{@code KaldiRecognizer(model, rate, grammar)} 才会真正
+     * 用语法重建解码图；否则它只打一行
+     * {@code WARNING: Runtime graphs are not supported by this model}
+     * 然后**忽略语法**继续跑完整词表。那种情况下唤醒词检测会悄悄失效。
      */
-    public boolean findWord(String word) {
-        return findWordId(word) >= 0;
+    public boolean supportsRuntimeGrammar() {
+        return Files.isRegularFile(path.resolve("graph").resolve("HCLr.fst"))
+                && Files.isRegularFile(path.resolve("graph").resolve("Gr.fst"));
     }
 
     /**
-     * 查询词并返回**词表 id**（不在表内为 -1；空词返回 -1）。
+     * 查询词在词表内的 id（附录 C.2 第 1 条：**必须显式查询**）。
      *
-     * <p>单独暴露是为了可诊断：本产品对「词表外」的判断完全压在这一个原生调用上，
-     * 一旦它的语义与预期不符（附录 C 的那种静默失效就会出现），必须有办法
-     * 直接看到原始返回值，而不是只看到一个 boolean。
-     *
-     * <p>注意 C 侧返回的是 {@code int}。早期把这里写成「返回指针」时表现为
-     * **任何词都返回「在词表内」**——因为 id 数值被 JNA 当成了地址。
+     * @return 词 id；{@code -1} 表示不在词表内；空词也返回 -1
+     * @throws WordLookupUnavailable 词表查询能力不可用（原生库问题）——
+     *         **必须抛出**：查不了就意味着「改了配置没反应」这类静默失效拦不住
      */
     public int findWordId(String word) {
         if (word == null || word.isBlank()) {
             return -1;
         }
+        ensureOpen();
         try {
-            return VoskNative.get().vosk_model_find_word(model.getPointer(), word);
+            return VoskNative.get().vosk_model_find_word(handle, word);
         } catch (UnsatisfiedLinkError | NoClassDefFoundError e) {
-            // 这是**必须可见**的失败：词表查不了，就意味着「改了配置没反应」这类
-            // 静默失效无法被拦住。抛出而不是装作查过了。
             throw new WordLookupUnavailable("无法查询 Vosk 词表（vosk_model_find_word 不可用）："
                     + e.getMessage(), e);
         }
+    }
+
+    /** 词是否在词表内。 */
+    public boolean findWord(String word) {
+        return findWordId(word) >= 0;
+    }
+
+    /** 便于单测/自检断言，同时保留「不在表内 = -1」的语义。 */
+    public Optional<Integer> findWordOptional(String word) {
+        int id = findWordId(word);
+        return id < 0 ? Optional.empty() : Optional.of(id);
+    }
+
+    /** 创建一个普通流式识别器（实时预览用）。 */
+    public Recognizer createRecognizer(float sampleRate) throws IOException {
+        return create(sampleRate, null);
+    }
+
+    /** 创建一个受限语法识别器（唤醒/结束词检测用）。 */
+    public Recognizer createGrammarRecognizer(float sampleRate, String grammar) throws IOException {
+        if (grammar == null || grammar.isBlank()) {
+            throw new IOException("受限语法不能为空");
+        }
+        return create(sampleRate, grammar);
+    }
+
+    private Recognizer create(float sampleRate, String grammar) throws IOException {
+        ensureOpen();
+        try {
+            Pointer h = grammar == null
+                    ? VoskNative.get().vosk_recognizer_new(handle, sampleRate)
+                    : VoskNative.get().vosk_recognizer_new_grm(handle, sampleRate, grammar);
+            if (h == null) {
+                throw new IOException("创建 Vosk 识别器失败（返回空句柄）"
+                        + (grammar == null ? "" : "；语法=" + grammar));
+            }
+            return new Recognizer(h, grammar);
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            throw new IOException("创建 Vosk 识别器失败："
+                    + (grammar == null ? "" : "语法 " + grammar + " —— ") + e.getMessage(), e);
+        }
+    }
+
+    private void ensureOpen() {
+        if (closed) {
+            throw new IllegalStateException("Vosk 模型已关闭");
+        }
+    }
+
+    @Override
+    public void close() {
+        closed = true;
+        if (freed.compareAndSet(false, true)) {
+            try {
+                VoskNative.get().vosk_model_free(handle);
+                log.info("Vosk 模型已释放：{}", path);
+            } catch (RuntimeException | UnsatisfiedLinkError e) {
+                log.warn("释放 Vosk 模型时出错：{}", e.toString());
+            }
+        }
+    }
+
+    @Override
+    public String toString() {
+        return "VoskModel{" + path + "}";
     }
 
     /** 词表查询能力不可用。 */
@@ -113,17 +198,94 @@ public final class VoskModel implements AutoCloseable {
         }
     }
 
-    @Override
-    public void close() {
-        try {
-            model.close();
-        } catch (RuntimeException e) {
-            log.warn("关闭 Vosk 模型时出错：{}", e.toString());
-        }
-    }
+    /**
+     * 识别器句柄包装。
+     *
+     * <p>结果 JSON 的解析统一走 {@link #textOf(String)}，把 Vosk 的中文词间空格去掉
+     * （它按词输出并带空格，直接显示会变成「今天 天气 不错」）。
+     */
+    public static final class Recognizer implements AutoCloseable {
 
-    @Override
-    public String toString() {
-        return "VoskModel{" + path + "}";
+        private final Pointer handle;
+        private final String grammar;
+        private final java.util.concurrent.atomic.AtomicBoolean freed =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        private volatile boolean closed;
+
+        Recognizer(Pointer handle, String grammar) {
+            this.handle = handle;
+            this.grammar = grammar;
+        }
+
+        public String grammar() {
+            return grammar;
+        }
+
+        /**
+         * 喂一段 16kHz / 16bit / 单声道 PCM。
+         *
+         * @return true 表示检测到端点，结果已定稿（此时应读 {@link #result()}）
+         */
+        public boolean accept(byte[] pcm, int length) {
+            if (closed || pcm == null || length <= 0) {
+                return false;
+            }
+            return VoskNative.get().vosk_recognizer_accept_waveform(handle, pcm, length) != 0;
+        }
+
+        public boolean accept(byte[] pcm) {
+            return accept(pcm, pcm == null ? 0 : pcm.length);
+        }
+
+        /** 定稿结果文本（端点触发后调用）。 */
+        public String result() {
+            return closed ? "" : textOf(VoskNative.get().vosk_recognizer_result(handle));
+        }
+
+        /** 中间结果文本（随时可能被改写）。 */
+        public String partialResult() {
+            return closed ? "" : textOf(VoskNative.get().vosk_recognizer_partial_result(handle));
+        }
+
+        /** 吐出剩余音频并定稿。**注意**：它会同时清空识别状态。 */
+        public String finalResult() {
+            return closed ? "" : textOf(VoskNative.get().vosk_recognizer_final_result(handle));
+        }
+
+        /** 清空识别状态，保留模型。 */
+        public void reset() {
+            if (!closed) {
+                VoskNative.get().vosk_recognizer_reset(handle);
+            }
+        }
+
+        @Override
+        public void close() {
+            closed = true;
+            if (freed.compareAndSet(false, true)) {
+                try {
+                    VoskNative.get().vosk_recognizer_free(handle);
+                } catch (RuntimeException | UnsatisfiedLinkError e) {
+                    log.warn("释放 Vosk 识别器时出错：{}", e.toString());
+                }
+            }
+        }
+
+        /** Vosk 结果 JSON → 去空格的可读文本；解析失败返回空串。 */
+        public static String textOf(String json) {
+            if (json == null || json.isBlank()) {
+                return "";
+            }
+            String raw;
+            try {
+                raw = com.talkinglive.core.JsonCodec.str(
+                        com.talkinglive.core.JsonCodec.parseObject(json), "text", "");
+            } catch (RuntimeException e) {
+                // 引擎给出了非预期内容：不改写、不崩溃，只当没有结果。
+                // 音频线程不能因为一行 JSON 死掉。
+                return "";
+            }
+            return TextUtils.joinStreamTokens(raw);
+        }
     }
 }

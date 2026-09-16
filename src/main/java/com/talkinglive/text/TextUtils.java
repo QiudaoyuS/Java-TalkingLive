@@ -117,7 +117,9 @@ public final class TextUtils {
             return false;
         }
         char c = s.charAt(s.length() - 1);
-        return "。！？!?；;…".indexOf(c) >= 0;
+        // 覆盖中英文的句末标点：。！？!?…；; 以及英文句点 .
+        // （英文句点必须算——「hello.」这句话是完整的，不该再补一个「。」）
+        return "。！？!?；;….".indexOf(c) >= 0;
     }
 
     /** 归一化空白：连续空白压成一个空格，首尾去空白。但不动全角标点。 */

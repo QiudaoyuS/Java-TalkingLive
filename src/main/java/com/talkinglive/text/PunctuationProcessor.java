@@ -56,7 +56,11 @@ public final class PunctuationProcessor implements TextPostProcessor {
                 s = TextUtils.removeWord(s, w);
             }
         }
-        s = s.replace('\u3000', ' ').replace("\uFEFF", "");
+        // 不可见字符直接**删除**，不要替换成半角空格：中文正文里 U+3000 通常是
+        // 排版噪声（Vosk 分词、输入法、网页复制都可能带进来），换成空格会留下
+        // 「今天 天气」这种多余空隙。BOM 同理。
+        s = s.replace("\u3000", "").replace("\uFEFF", "");
+        // 其它控制字符（保留换行与制表，它们可能是有意的段落分隔）
         s = s.replaceAll("[\\p{Cntrl}&&[^\n\t]]", "");
         if (collapseWhitespace) {
             s = TextUtils.collapseWhitespace(s);

@@ -168,6 +168,15 @@ public final class StateMachine {
     /** 当前提交中的段落代数与结束原因；{@link Event#REFINE_DONE} 时用来组装 CommitContext。 */
     private long commitGeneration = 0;
     private EndReason commitReason = EndReason.MANUAL;
+    /**
+     * 本段的 {@link Event#REFINE_DONE} 是否已经放行过。
+     *
+     * <p>必须有这个闸门：精化是**异步**的（App 在后台线程跑完再投递事件），
+     * 而超时兜底、重试、以及「精化失败后又按预览兜底再投一次」这类路径都可能让
+     * REFINE_DONE 到两次。放行两次的后果是**文字被注入两遍**——用户会看到
+     * 内容重复，而且撤销栈里也多一笔。§2.1 说的「迟到事件是常态」正是这个意思。
+     */
+    private boolean commitReadyFired = false;
 
     private final List<Listener> listeners = new ArrayList<>();
     private final Map<Event, Integer> ignoredCounts = new EnumMap<>(Event.class);
@@ -390,6 +399,12 @@ public final class StateMachine {
             ignore(e, "已暂停，忽略精化完成");
             return;
         }
+        if (commitReadyFired) {
+            // 幂等闸门：第二次放行会让文字注入两遍。
+            ignore(e, "本段已经放行过注入，忽略重复的精化完成");
+            return;
+        }
+        commitReadyFired = true;
         CommitContext ctx = new CommitContext(commitGeneration, !foregroundChanged, commitReason);
         for (Listener l : List.copyOf(listeners)) {
             l.onCommitReady(ctx);
@@ -409,6 +424,7 @@ public final class StateMachine {
     private void endSegment(EndReason reason, Event cause) {
         commitGeneration = generation;
         commitReason = reason;
+        commitReadyFired = false;   // 新的一段提交：重新开闸
         transition(State.COMMITTING, cause);
         for (Listener l : List.copyOf(listeners)) {
             l.onSegmentEndRequested(reason);

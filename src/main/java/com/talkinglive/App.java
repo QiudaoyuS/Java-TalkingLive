@@ -1,0 +1,1303 @@
+package com.talkinglive;
+
+import com.talkinglive.audio.AudioCapture;
+import com.talkinglive.audio.SilenceDetector;
+import com.talkinglive.core.AppConfig;
+import com.talkinglive.core.AppPaths;
+import com.talkinglive.core.DictationSession;
+import com.talkinglive.core.InMemoryLogAppender;
+import com.talkinglive.core.Logging;
+import com.talkinglive.core.StateMachine;
+import com.talkinglive.engine.SpeechRecognizer;
+import com.talkinglive.engine.TextRefiner;
+import com.talkinglive.engine.TextRefiners;
+import com.talkinglive.engine.VoskKeywordDetector;
+import com.talkinglive.engine.VoskModel;
+import com.talkinglive.engine.VoskSpeechRecognizer;
+import com.talkinglive.engine.WakeWordDetector;
+import com.talkinglive.system.CaretTracker;
+import com.talkinglive.system.DpiScale;
+import com.talkinglive.system.ForegroundWatcher;
+import com.talkinglive.system.MicValidator;
+import com.talkinglive.system.Win32WindowStyles;
+import com.talkinglive.system.WindowsTextInjector;
+import com.talkinglive.text.CommitPolicy;
+import com.talkinglive.text.PreviewText;
+import com.talkinglive.text.PunctuationProcessor;
+import com.talkinglive.text.TextInjector;
+import com.talkinglive.text.TextPostProcessor;
+import com.talkinglive.text.TextUtils;
+import com.talkinglive.text.WholeSegmentPolicy;
+import com.talkinglive.ui.FloatingBall;
+import com.talkinglive.ui.PreviewBar;
+import com.talkinglive.ui.SettingsWindow;
+import com.talkinglive.ui.Theme;
+import java.awt.AWTException;
+import java.awt.EventQueue;
+import java.awt.Image;
+import java.awt.MenuItem;
+import java.awt.PopupMenu;
+import java.awt.SystemTray;
+import java.awt.TrayIcon;
+import java.awt.image.BufferedImage;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.swing.SwingUtilities;
+import javax.swing.UIManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * 装配与启动 —— **唯一有 main 的类**（{@code DESIGN.md} §4.5）。
+ *
+ * <p>本类只做三件事：把各层装起来、把事件接起来、把状态画出来。
+ * 所有决策与算法都在 {@code core} / {@code text} / {@code engine} 里，
+ * 因此本类不参与单测——它需要的那些逻辑已经被拆出去单测过了。
+ *
+ * <p>一次听写的完整路径（与 {@link StateMachine.Listener} 的契约一一对应）：
+ * <pre>
+ *   音频线程 ──▶ AudioCapture ──┬─▶ WakeWordDetector（受限语法，检测唤醒/结束词）
+ *                              └─▶ SpeechRecognizer（流式预览）──▶ PreviewText ──▶ PreviewBar
+ *   状态机 ──▶ onSegmentEndRequested ──▶ 定稿预览文本 + 取 PCM 快照
+ *          ──▶ 后台线程跑 TextRefiner ──▶ REFINE_DONE ──▶ onCommitReady
+ *          ──▶ 校验前台窗口 ──▶ SendInput 注入 ──▶ （可选）自动发送 ──▶ INJECTED
+ * </pre>
+ */
+public final class App {
+
+    private static final Logger log = LoggerFactory.getLogger(App.class);
+
+    // ---- 配置与核心 ----
+    private volatile AppConfig config;
+    private final StateMachine sm = new StateMachine();
+    private final PreviewText preview = new PreviewText();
+    private final CommitPolicy commitPolicy = new WholeSegmentPolicy();
+
+    // ---- 引擎 ----
+    private VoskModel voskModel;
+    private WakeWordDetector wakeDetector;
+    private SpeechRecognizer recognizer;
+    private TextRefiner refiner;
+    private String wakeDetectorError;
+    private String recognizerError;
+    private String modelError;
+
+    // ---- 系统 ----
+    private final TextInjector injector = new WindowsTextInjector();
+    private AudioCapture capture;
+    private ForegroundWatcher foreground;
+    private final SilenceDetector silence =
+            new SilenceDetector(AppConfig.DEFAULT_SILENCE_SECONDS);
+
+    // ---- UI ----
+    private FloatingBall ball;
+    private PreviewBar previewBar;
+    private SettingsWindow settings;
+
+    // ---- 运行时状态 ----
+    private final AtomicReference<DictationSession> session = new AtomicReference<>();
+    private final List<String> notices = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private volatile boolean paused;
+    private volatile MicValidator.Result wordCheck;
+    private volatile String micError;
+    private volatile String lastInjectionError;
+    private TrayIcon trayIcon;
+
+    /** 同类提示的去重时间戳（见 {@link #showNotice}）。 */
+    private final java.util.Map<String, Long> lastNoticeAt = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 同一个标题的提示在这个间隔内只弹一次。 */
+    private static final long NOTICE_THROTTLE_MILLIS = 60_000;
+
+    // ------------------------------------------------------------ main
+
+    public static void main(String[] args) throws Exception {
+        Options opts = Options.parse(args);
+        if (opts.help) {
+            Options.printHelp();
+            return;
+        }
+        App app = new App();
+        try {
+            app.start(opts);
+        } catch (RuntimeException | IOException e) {
+            // 启动阶段的失败必须可见：产品平时没有界面，静默退出的表现是
+            // 「双击了没反应」，用户完全无从判断（§7）。
+            log.error("启动失败：{}", e.toString(), e);
+            if (opts.console || !opts.headless) {
+                app.showFatal("TalkingLive 启动失败", e.getMessage() == null ? e.toString() : e.getMessage());
+            }
+            if (!opts.headless) {
+                throw e;
+            }
+            System.exit(1);
+        }
+    }
+
+    /** 命令行选项。 */
+    static final class Options {
+        boolean settings;
+        boolean headless;
+        boolean console;
+        boolean help;
+        boolean noMicrophone;
+        boolean selfCheck;
+        String refiner;
+
+        static Options parse(String[] args) {
+            Options o = new Options();
+            for (int i = 0; i < args.length; i++) {
+                switch (args[i]) {
+                    case "--settings" -> o.settings = true;
+                    case "--headless", "--doctor" -> o.headless = true;
+                    case "--console" -> o.console = true;
+                    case "--help", "-h" -> o.help = true;
+                    case "--no-microphone" -> o.noMicrophone = true;
+                    case "--self-check" -> o.selfCheck = true;
+                    case "--refiner" -> {
+                        if (i + 1 < args.length) {
+                            o.refiner = args[++i];
+                        }
+                    }
+                    default -> log.warn("忽略未知参数：{}", args[i]);
+                }
+            }
+            return o;
+        }
+
+        static void printHelp() {
+            System.out.println("""
+                    TalkingLive —— 说出唤醒词，讲的话实时出现在任意应用的光标处
+
+                    用法： java -jar talkinglive.jar [选项]
+
+                      （无）             常驻后台，桌面上只有一颗悬浮球
+                      --settings        启动并打开设置窗口
+                      --self-check      跑结构化自检后退出（打印 ASCII 摘要，报告写入文件）
+                      --doctor          环境自检：模型 / 麦克风 / 词表校验 / 注入能力，然后退出
+                      --no-microphone   不打开麦克风（无麦克风环境下试界面用）
+                      --refiner <名>    指定精化引擎：auto | vosk-offline | none
+                      --console         除日志文件外也输出到控制台（默认为真）
+                      --help            显示本帮助
+                    """);
+        }
+    }
+
+    // ------------------------------------------------------------ 启动
+
+    private void start(Options opts) throws IOException {
+        com.talkinglive.core.AppPaths.ensureDirectories();
+        log.info("=== TalkingLive 启动 ===  home={}", AppPaths.home());
+
+        // ① 进程级 DPI awareness 必须在任何窗口创建之前（TECH-PLAN §7 第 3 项）
+        DpiScale.initProcessAwareness();
+
+        // ② 配置：读取并**强制校验**（§4.3）。非法配置必须拒绝并提示，不能静默用默认值。
+        AppPaths.Loaded loaded = AppPaths.loadOrCreateConfig();
+        this.config = loaded.config();
+        if (loaded.created()) {
+            log.info("首次启动，已生成默认配置：{}", AppPaths.configFile());
+            notices.add("已生成默认配置文件：" + AppPaths.configFile());
+        }
+        log.info("配置：wake={} end={} silence={}s autoSend={} sendKey={} maxSegment={}s itn={}",
+                config.wakeWord(), config.endWord(), config.silenceSeconds(), config.autoSend(),
+                config.sendKey().display(), config.maxSegmentSeconds(), config.itn());
+
+        // ③ 引擎
+        loadEngines(opts);
+
+        // ④ 系统
+        silence.setTimeoutSeconds(config.silenceSeconds());
+        foreground = new ForegroundWatcher((from, to) -> sm.handle(StateMachine.Event.FOREGROUND_CHANGED));
+
+        // ⑤ 音频
+        capture = new AudioCapture();
+        capture.addListener(new CaptureBridge());
+        if (!opts.noMicrophone) {
+            boolean ok = capture.start();
+            if (!ok) {
+                micError = capture.lastError();
+                log.error("麦克风不可用：{}", micError);
+                notices.add("麦克风不可用：" + micError + "；程序仍常驻，恢复设备后会自动重连。");
+            }
+        } else {
+            log.info("按参数要求未打开麦克风");
+        }
+
+        sm.addListener(new Orchestrator());
+
+        if (opts.headless) {
+            // --doctor：先做完所有检查再决定要不要碰界面。
+            // 注意这里**不启动 UI**：否则无麦克风时的「采集中断」提示对话框会盖住屏幕，
+            // 让自检与诊断变得不可用（实测踩过）。
+            doctor(opts);
+            shutdown();
+            return;
+        }
+
+        // ⑥ UI
+        startUi(opts);
+
+        if (opts.selfCheck) {
+            runSelfCheckAndExit();
+            return;
+        }
+
+        log.info("启动完成：状态={} 麦克风={} 唤醒检测={} 预览={} 精化={}",
+                sm.state(), capture.available() ? "就绪" : "不可用",
+                wakeDetector != null ? "就绪" : "不可用",
+                recognizer != null ? "就绪" : "不可用",
+                refiner != null ? refiner.engineName() : "不可用");
+    }
+
+    // ------------------------------------------------------------ 引擎装配
+
+    private void loadEngines(Options opts) {
+        Path modelDir = AppPaths.voskModelDir();
+        try {
+            voskModel = VoskModel.load(modelDir);
+        } catch (IOException | RuntimeException e) {
+            modelError = e.getMessage();
+            log.error("Vosk 模型加载失败：{}", modelError);
+            notices.add("Vosk 模型加载失败：" + modelError + "\n获取方式见 docs/DESIGN.md 附录 D。");
+            refiner = new TextRefiners.Unavailable("精化", "Vosk 模型不可用");
+            return;
+        }
+
+        // 词表校验：§4.3 的硬要求。失败即拒绝该配置并提示（附录 C）。
+        try {
+            wordCheck = MicValidator.validate(voskModel::findWord, config.wakeWord(), config.endWord());
+            if (!wordCheck.ok()) {
+                String msg = wordCheck.message();
+                log.error("词表校验失败：{}", msg.replace("\n", " / "));
+                notices.add(msg);
+            } else {
+                log.info("词表校验通过：wake={} end={}", config.wakeWord(), config.endWord());
+            }
+        } catch (RuntimeException e) {
+            log.error("词表校验无法执行：{}", e.toString());
+            notices.add("词表校验无法执行：" + e.getMessage()
+                    + "\n这意味着「词表外的词静默失效」无法被拦住，请检查 Vosk 原生库。");
+        }
+
+        // 唤醒 / 结束词检测
+        try {
+            wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
+                    hit -> onKeywordHit(hit));
+            log.info("唤醒检测就绪：{}", wakeDetector.describe());
+        } catch (IOException | RuntimeException e) {
+            wakeDetectorError = e.getMessage();
+            log.error("唤醒检测不可用：{}", wakeDetectorError);
+            notices.add("唤醒词检测不可用：" + wakeDetectorError
+                    + "\n仍可用悬浮球左键手动开始/结束听写（§2.3 的备用路径）。");
+        }
+
+        // 实时预览
+        try {
+            recognizer = new VoskSpeechRecognizer(voskModel, (kind, text) -> onPreviewText(kind, text));
+            log.info("实时预览就绪：{}", recognizer.describe());
+        } catch (IOException | RuntimeException e) {
+            recognizerError = e.getMessage();
+            log.error("实时预览不可用：{}", recognizerError);
+            recognizer = null;
+        }
+
+        // 精化引擎
+        refiner = createRefiner(opts);
+        log.info("精化引擎：{}", refiner.describe());
+
+        rebuildPostProcess();
+    }
+
+    /**
+     * 建立文本后处理链（§3.4）。
+     *
+     * <p>它的第一职责不是标点（标点由精化引擎的原生能力提供，TECH-PLAN §5.3），
+     * 而是**把唤醒词与结束词从正文里剔掉**——TECH-PLAN §6.3 把「段落音频以唤醒词开头，
+     * 被转出则正文多出『子曰』」列为需验证的正确性风险，这里做兜底。
+     */
+    private void rebuildPostProcess() {
+        postProcess = new PunctuationProcessor(
+                List.of(config.wakeWord(), config.endWord()), true, true);
+    }
+
+    /**
+     * 选择精化引擎。
+     *
+     * <p>默认 {@code auto}：有 SenseVoice 就用 SenseVoice，否则退回
+     * {@link TextRefiners.VoskOffline}（对整段音频做一次离线 Vosk 重跑）。
+     * 这一点必须**如实反映在状态页与日志里**——它是 {@code DESIGN.md} §7
+     * 允许的降级路径，但不能让用户以为精化是 SenseVoice 做的。
+     */
+    private TextRefiner createRefiner(Options opts) {
+        String choice = opts.refiner == null ? "auto" : opts.refiner.trim().toLowerCase();
+        return switch (choice) {
+            case "none", "off" -> new TextRefiners.Unavailable("精化（已按参数关闭）", "用户以 --refiner none 关闭");
+            case "vosk-offline" -> new TextRefiners.VoskOffline(voskModel);
+            default -> {
+                if (voskModel == null) {
+                    yield new TextRefiners.Unavailable("精化", "Vosk 模型不可用，无法建立兜底精化路径");
+                }
+                // SenseVoice（sherpa-onnx）当前没有可依赖的 Maven 中央仓 Java 绑定，
+                // 因此这里永远是「显式不可用 + 明确降级」，而不是假装成功。
+                // 接入时只需在此处返回新的 TextRefiner 实现（TECH-PLAN §5.1 唯一替换点）。
+                yield new TextRefiners.VoskOffline(voskModel);
+            }
+        };
+    }
+
+    // ------------------------------------------------------------ 音频分发
+
+    /**
+     * 把采集到的 PCM 分发给两路（§4.1「分发」）。
+     *
+     * <p>与「麦克风只开一路」（§4.3）配套：设备只被 {@code AudioCapture} 打开一次，
+     * 唤醒检测与预览识别都在这里喂数据。
+     */
+    private final class CaptureBridge implements AudioCapture.Listener {
+
+        @Override
+        public void onPcm(byte[] pcm, double rms) {
+            // 唤醒/结束词检测：常驻运行，暂停时不喂（「忽略唤醒词与结束词」§2.3）
+            WakeWordDetector wd = wakeDetector;
+            if (wd != null && !paused) {
+                wd.accept(pcm);
+            }
+
+            if (!sm.listening()) {
+                return;
+            }
+            DictationSession s = session.get();
+            if (s == null) {
+                return;
+            }
+
+            if (silence.accept(rms, pcm.length / 32000.0)) {
+                sm.handle(StateMachine.Event.SILENCE_TIMEOUT);
+                return;
+            }
+            SpeechRecognizer sr = recognizer;
+            if (sr != null) {
+                sr.accept(pcm);
+            }
+            if (s.appendPcm(pcm)) {
+                log.info("单段达到时长上限 {}s，自动结束本段（§7 防止长录音内存增长）",
+                        config.maxSegmentSeconds());
+                sm.handle(StateMachine.Event.MAX_SEGMENT_REACHED);
+            }
+        }
+
+        @Override
+        public void onStreamError(String reason) {
+            micError = reason;
+            notices.add("采集中断：" + reason + "；正在尝试重连…");
+            onUi(() -> {
+                if (ball != null) {
+                    ball.setPaused(true);   // 悬浮球变暗（§7）
+                }
+                showNotice("采集中断", reason + "\n程序仍在运行，将自动尝试重连。");
+            });
+        }
+
+        @Override
+        public void onStreamRecovered() {
+            micError = null;
+            notices.add("麦克风已恢复");
+            if (paused) {
+                // 采集中断导致的临时暂停，恢复后解除
+                onUi(() -> {
+                    paused = false;
+                    sm.handle(StateMachine.Event.RESUME);
+                    if (ball != null) {
+                        ball.setPaused(false);
+                    }
+                });
+            }
+            showNotice("麦克风已恢复", "音频链路已重连。");
+        }
+    }
+
+    // ------------------------------------------------------------ 事件接线
+
+    private void onKeywordHit(WakeWordDetector.Hit hit) {
+        if (paused) {
+            return;
+        }
+        log.info("命中{}词：{}", hit.kind() == WakeWordDetector.Kind.WAKE ? "唤醒" : "结束", hit.word());
+        sm.handle(hit.kind() == WakeWordDetector.Kind.WAKE
+                ? StateMachine.Event.WAKE_WORD
+                : StateMachine.Event.END_WORD);
+    }
+
+    private void onPreviewText(SpeechRecognizer.Kind kind, String fullText) {
+        if (kind == SpeechRecognizer.Kind.FINAL) {
+            preview.commitFinal(fullText);
+        } else {
+            preview.setPartial(fullText);
+        }
+        String stable = preview.committedText();
+        String pending = preview.volatileSuffix();
+        onUi(() -> {
+            if (previewBar == null || !sm.listening()) {
+                return;
+            }
+            if (!preview.hasContent(1)) {
+                return;
+            }
+            previewBar.render(stable, pending, statusLine(), anchorPoint());
+            // 浮窗句柄变化要持续同步给窗口监听（§4.3 必须忽略自身句柄）
+            foreground.ignore(Win32WindowStyles.hwndOf(previewBar));
+        });
+    }
+
+    /** 状态机回调 → 各层动作。 */
+    private final class Orchestrator implements StateMachine.Listener {
+
+        @Override
+        public void onStateChanged(StateMachine.State from, StateMachine.State to,
+                StateMachine.Event cause) {
+            onUi(() -> {
+                if (ball != null) {
+                    ball.setState(to);
+                }
+            });
+            if (to == StateMachine.State.IDLE) {
+                foreground.setEnabled(true);
+            }
+        }
+
+        @Override
+        public void onSegmentStartRequested() {
+            long target = CaretTracker.foregroundWindow();
+            DictationSession s = new DictationSession(sm.generation(), target,
+                    ForegroundWatcher.title(target), config.maxSegmentSeconds());
+            session.set(s);
+            silence.reset();
+            silence.setTimeoutSeconds(config.silenceSeconds());
+            preview.reset();
+            lastInjectionError = null;
+
+            SpeechRecognizer sr = recognizer;
+            if (sr != null) {
+                sr.reset();
+            }
+            foreground.rebase();
+            // 段落期间真的发生切换才算数：先在事件层把自身窗口登记为忽略对象（§4.3）
+            onUi(() -> {
+                if (ball != null) {
+                    foreground.ignore(Win32WindowStyles.hwndOf(ball));
+                }
+                if (previewBar != null) {
+                    foreground.ignore(Win32WindowStyles.hwndOf(previewBar));
+                }
+                if (settings != null && settings.isVisible()) {
+                    foreground.ignore(Win32WindowStyles.hwndOf(settings));
+                }
+            });
+            log.info("段落开始：{}，目标窗口 0x{}（{}）", s,
+                    Long.toHexString(target), ForegroundWatcher.title(target));
+
+            onUi(() -> {
+                if (previewBar == null) {
+                    return;
+                }
+                previewBar.render("", "", "听写中 · 说「" + config.endWord() + "」或静音 "
+                        + config.silenceSeconds() + " 秒结束", anchorPoint());
+                foreground.ignore(Win32WindowStyles.hwndOf(previewBar));
+            });
+        }
+
+        /**
+         * 段落结束：停止录音、定稿预览文本，并发起**异步**精化。
+         *
+         * <p>这里刻意只做同步能做完的事（取快照、定稿），精化跑在后台线程上——
+         * 因为状态机需要立刻进入 COMMITTING，而精化可能是几百毫秒到几秒。
+         */
+        @Override
+        public void onSegmentEndRequested(StateMachine.EndReason reason) {
+            DictationSession s = session.get();
+            if (s == null) {
+                log.warn("段落结束但没有会话上下文（{}），直接回到待唤醒", reason);
+                sm.handle(StateMachine.Event.INJECTED);
+                return;
+            }
+            String previewText;
+            if (recognizer != null) {
+                previewText = recognizer.finish();
+            } else {
+                previewText = preview.finish();
+            }
+            if (previewText == null || previewText.isBlank()) {
+                previewText = preview.finish();
+            }
+            s.setPreviewText(previewText);
+            // lambda 只能捕获 effectively-final 的量：定稿后的预览文本存一份 final 副本
+            final String summary = s.previewText();
+            byte[] pcm = s.pcmSnapshot();
+            long generation = s.generation();
+
+            log.info("段落结束（{}）：时长 {:.2f}s 预览 {}",
+                    reason.display(), s.recordedSeconds(), Logging.describeWithFingerprint(summary));
+
+            onUi(() -> {
+                if (previewBar != null) {
+                    previewBar.setStatus("处理中 · 精化引擎：" + (refiner == null ? "无" : refiner.engineName()));
+                }
+            });
+
+            Thread worker = new Thread(() -> {
+                TextRefiner r = refiner;
+                TextRefiner.Result result;
+                boolean ending = TextUtils.endsWithSentencePunctuation(summary);
+                if (r == null || !r.available()) {
+                    result = TextRefiner.Result.fallback(summary,
+                            r == null ? "无" : r.engineName(),
+                            r == null ? "未装配精化引擎" : r.unavailableReason());
+                } else {
+                    result = r.refine(pcm, summary, ending);
+                }
+                // 段落已被取消/替换时，迟到的精化结果直接丢弃（§2.1）
+                if (session.get() == null || session.get().generation() != generation
+                        || !sm.committing()) {
+                    log.info("精化结果迟到，已丢弃（段落已结束：gen={} 当前状态={}）",
+                            generation, sm.state());
+                    return;
+                }
+                pendingResult.set(result);
+                sm.handle(StateMachine.Event.REFINE_DONE);
+            }, "refine-worker");
+            worker.setDaemon(true);
+            worker.start();
+        }
+
+        @Override
+        public void onCommitReady(StateMachine.CommitContext ctx) {
+            DictationSession s = session.get();
+            TextRefiner.Result result = pendingResult.getAndSet(null);
+            if (s == null || result == null) {
+                log.warn("提交就绪但缺少上下文或精化结果，跳过注入");
+                sm.handle(StateMachine.Event.INJECTED);
+                return;
+            }
+
+            String text = postProcess.process(s.resolveFinalText(result.text()));
+            if (result.refined()) {
+                log.info("精化成功（{}）：耗时 {}ms RTF={} 结果 {}",
+                        result.engine(), result.millis(),
+                        String.format("%.3f", result.rtf(s.recordedSeconds())),
+                        Logging.describeWithFingerprint(text));
+            } else {
+                log.warn("未精化，退回预览文本注入（原因：{}）结果 {}",
+                        result.note(), Logging.describeWithFingerprint(text));
+            }
+
+            if (text.isEmpty()) {
+                log.info("本段没有可注入的文本（可能是误触发或只有静音），不注入");
+                showNotice("本段没有内容", "没有识别到文字，因此没有注入。若经常如此，请检查麦克风与唤醒词。");
+                finishCommit(s);
+                return;
+            }
+
+            if (!ctx.inject() || !sm.shouldInject()) {
+                // §7：提交时前台窗口已变 → 放弃注入 + 明确提示，且不自动发送
+                String msg = "本段已放弃注入：提交时前台窗口已变，为避免把文字误发到别的程序，宁可丢弃。\n"
+                        + "（识别到的内容是：" + abbreviate(text) + "）";
+                lastInjectionError = msg;
+                log.warn("放弃注入：前台窗口已变");
+                showNotice("本段未注入", msg);
+                finishCommit(s);
+                return;
+            }
+
+            // 注入放到独立线程：SendInput 与阻塞式提示都不该占着 EDT
+            Thread worker = new Thread(() -> doInject(s, text, ctx), "inject-worker");
+            worker.setDaemon(true);
+            worker.start();
+        }
+
+        @Override
+        public void onSegmentAbandoned(String why) {
+            DictationSession s = session.getAndSet(null);
+            preview.reset();
+            silence.reset();
+            SpeechRecognizer sr = recognizer;
+            if (sr != null) {
+                // 取消也要把引擎复位，否则残留音频会污染下一段
+                sr.reset();
+            }
+            log.info("放弃本段：{}（会话={}）", why, s);
+            onUi(() -> {
+                if (previewBar != null) {
+                    previewBar.hideBar();
+                }
+            });
+            showNotice("本段已取消", why);
+        }
+    }
+
+    private final AtomicReference<TextRefiner.Result> pendingResult = new AtomicReference<>();
+    private volatile TextPostProcessor postProcess = TextPostProcessor.identity();
+
+    /** 注入 + 自动发送 + 回到 IDLE。在独立线程上执行。 */
+    private void doInject(DictationSession s, String text, StateMachine.CommitContext ctx) {
+        try {
+            CommitPolicy.CommitPlan plan = commitPolicy.plan(s.injectedText(), text);
+            TextInjector.Result r;
+            if (injector instanceof WindowsTextInjector w) {
+                r = w.inject(plan.backspaces(), plan.text(), s.targetWindow());
+            } else {
+                r = injector.inject(plan.backspaces(), plan.text());
+            }
+
+            if (!r.ok()) {
+                lastInjectionError = r.message();
+                log.error("注入失败：{}", r.message());
+                showNotice("注入失败", r.message() + "\n（识别到的内容是：" + abbreviate(text) + "）");
+                finishCommit(s);
+                return;
+            }
+            s.appendInjected(plan.text());
+            log.info("已注入 {}（目标窗口 0x{}）", Logging.describeWithFingerprint(plan.text()),
+                    Long.toHexString(s.targetWindow()));
+
+            if (config.autoSend() && shouldAutoSend(ctx.reason())) {
+                TextInjector.Result pr = injector.press(TextInjector.KeyCombo.fromConfig(config.sendKey()));
+                if (!pr.ok()) {
+                    log.warn("自动发送失败：{}", pr.message());
+                    showNotice("自动发送失败", pr.message());
+                }
+            } else if (config.autoSend()) {
+                log.info("静音超时结束且未开启「静音超时后发送」，只注入不发送");
+            }
+            onUi(() -> {
+                if (previewBar != null) {
+                    previewBar.hideBar();
+                }
+            });
+            finishCommit(s);
+        } catch (RuntimeException e) {
+            log.error("注入过程中发生异常：{}", e.toString(), e);
+            lastInjectionError = e.toString();
+            finishCommit(s);
+        }
+    }
+
+    /**
+     * 静音超时是否也要自动发送。
+     *
+     * <p>附录 A 单列了「静音超时后发送」这一项，默认关闭：静音兜底本来就是
+     * 「用户忘了说结束词」的场景，此时再自动敲一次 Enter 风险更大。
+     */
+    private boolean shouldAutoSend(StateMachine.EndReason reason) {
+        if (reason == StateMachine.EndReason.SILENCE_TIMEOUT) {
+            return config.sendOnSilenceTimeout();
+        }
+        return true;
+    }
+
+    private void finishCommit(DictationSession s) {
+        session.compareAndSet(s, null);
+        preview.reset();
+        silence.reset();
+        sm.handle(StateMachine.Event.INJECTED);
+    }
+
+    // ------------------------------------------------------------ UI
+
+    private void startUi(Options opts) {
+        try {
+            UIManager.setLookAndFeel(new com.formdev.flatlaf.FlatDarkLaf());
+            UIManager.put("Component.focusWidth", 0);
+        } catch (Exception e) {
+            log.warn("FlatLaf 不可用，使用默认外观：{}", e.toString());
+        }
+
+        onUi(() -> {
+            ball = new FloatingBall(null, new BallActions());
+            // 不抢焦点必须在窗口**第一次显示之前**设好，否则会先闪一下焦点（§4.4）
+            ball.addNotify();
+            Win32WindowStyles.applyNoActivateToolWindow(ball);
+            ball.setGeometryListener((x, y, dock) -> {
+                config.ball().setPosition(x, y);
+                config.ball().setDock(dock);
+                persistConfig();
+            });
+            ball.applySavedGeometry(config.ball());
+            ball.setState(sm.state());
+            ball.setPaused(paused);
+            ball.setVisible(true);
+
+            previewBar = new PreviewBar(null);
+            previewBar.addNotify();
+            Win32WindowStyles.applyNoActivateToolWindow(previewBar);
+
+            settings = new SettingsWindow(new SettingsHost());
+
+            installTray();
+
+            foreground.start();
+            if (ball != null) {
+                foreground.ignore(Win32WindowStyles.hwndOf(ball));
+            }
+            if (previewBar != null) {
+                foreground.ignore(Win32WindowStyles.hwndOf(previewBar));
+            }
+
+            if (opts.settings) {
+                settings.showTab(SettingsWindow.TAB_GENERAL);
+            }
+            if (!notices.isEmpty()) {
+                // 启动期攒下的失败必须可见（§7）
+                showNotice("TalkingLive 已启动，但有需要注意的事项",
+                        String.join("\n\n", notices));
+            }
+        });
+    }
+
+    private void installTray() {
+        if (!SystemTray.isSupported()) {
+            log.info("系统托盘不可用，托盘入口略过（悬浮球仍是主要入口）");
+            return;
+        }
+        try {
+            PopupMenu menu = new PopupMenu();
+
+            MenuItem manual = new MenuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
+            manual.setEnabled(!paused);
+            manual.addActionListener(e -> onBallLeftClick());
+            menu.add(manual);
+
+            menu.addSeparator();
+            MenuItem pause = new MenuItem(paused ? "恢复监听" : "暂停监听");
+            pause.addActionListener(e -> togglePause());
+            menu.add(pause);
+
+            menu.addSeparator();
+            MenuItem settingsItem = new MenuItem("设置...");
+            settingsItem.addActionListener(e -> openSettings(SettingsWindow.TAB_GENERAL));
+            menu.add(settingsItem);
+
+            MenuItem logs = new MenuItem("查看日志");
+            logs.addActionListener(e -> openSettings(SettingsWindow.TAB_LOG));
+            menu.add(logs);
+
+            menu.addSeparator();
+            MenuItem quit = new MenuItem("退出");
+            quit.addActionListener(e -> shutdown());
+            menu.add(quit);
+
+            trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), menu);
+            trayIcon.setImageAutoSize(true);
+            trayIcon.addActionListener(e -> onBallLeftClick());
+            SystemTray.getSystemTray().add(trayIcon);
+            log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
+                    + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
+        } catch (AWTException | RuntimeException e) {
+            log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
+        }
+    }
+
+    /** 托盘图标：画一颗小球。 */
+    private static Image trayImage() {
+        int size = 32;
+        BufferedImage img = new BufferedImage(size, size, BufferedImage.TYPE_INT_ARGB);
+        var g = img.createGraphics();
+        g.setRenderingHint(java.awt.RenderingHints.KEY_ANTIALIASING,
+                java.awt.RenderingHints.VALUE_ANTIALIAS_ON);
+        g.setColor(new java.awt.Color(48, 54, 70));
+        g.fillOval(2, 2, size - 4, size - 4);
+        g.setColor(Theme.DIM);
+        g.drawOval(2, 2, size - 5, size - 5);
+        g.setColor(new java.awt.Color(232, 236, 246));
+        g.fillRoundRect(size / 2 - 4, 7, 8, 12, 8, 8);
+        g.dispose();
+        return img;
+    }
+
+    /** 悬浮球与托盘共用的动作。 */
+    private final class BallActions implements FloatingBall.Listener {
+
+        @Override
+        public void onLeftClick() {
+            ballLeftClick();
+        }
+
+        @Override
+        public void onTogglePause() {
+            togglePause();
+        }
+
+        @Override
+        public void onOpenSettings() {
+            openSettings(SettingsWindow.TAB_GENERAL);
+        }
+
+        @Override
+        public void onOpenLog() {
+            openSettings(SettingsWindow.TAB_LOG);
+        }
+
+        @Override
+        public void onQuit() {
+            shutdown();
+        }
+    }
+
+    private void ballLeftClick() {
+        if (ball != null) {
+            ball.persistGeometry();
+        }
+        sm.handle(StateMachine.Event.TOGGLE);
+    }
+
+    private void onBallLeftClick() {
+        ballLeftClick();
+    }
+
+    private void togglePause() {
+        paused = !paused;
+        sm.handle(paused ? StateMachine.Event.PAUSE : StateMachine.Event.RESUME);
+        onUi(() -> {
+            if (ball != null) {
+                ball.setPaused(paused);
+            }
+            if (trayIcon != null) {
+                trayIcon.setToolTip("TalkingLive —— " + (paused ? "已暂停" : sm.state().display()));
+            }
+        });
+        log.info("监听{}", paused ? "已暂停" : "已恢复");
+    }
+
+    private void openSettings(int tab) {
+        onUi(() -> {
+            if (settings == null) {
+                return;
+            }
+            if (tab == SettingsWindow.TAB_DIAGNOSTICS) {
+                settings.refreshDiagnostics();
+            }
+            settings.showTab(tab);
+            foreground.ignore(Win32WindowStyles.hwndOf(settings));
+        });
+    }
+
+    /**
+     * 提示气泡：注入失败等**静默失败必须可见**（§7）。
+     *
+     * <p><b>必须去重。</b>同一类失败常常是持续的（麦克风被拔掉就会每几秒失败一次），
+     * 若每次都弹一个对话框，屏幕上会堆满窗口——实测症状是**对话框盖住了悬浮球，
+     * 用户连点都点不到**，等于把唯一入口也弄丢了。因此同一个标题在
+     * {@link #NOTICE_THROTTLE_MILLIS} 内只提示一次，其余只进日志。
+     */
+    private void showNotice(String title, String detail) {
+        log.info("提示：{} —— {}", title, detail == null ? "" : detail.replace("\n", " / "));
+
+        long now = System.currentTimeMillis();
+        Long last = lastNoticeAt.get(title);
+        if (last != null && now - last < NOTICE_THROTTLE_MILLIS) {
+            log.debug("同类提示在 {}ms 内已出现过，本次只记日志不再弹窗", NOTICE_THROTTLE_MILLIS);
+            return;
+        }
+        lastNoticeAt.put(title, now);
+
+        onUi(() -> {
+            if (trayIcon != null) {
+                try {
+                    trayIcon.displayMessage(title, detail, TrayIcon.MessageType.INFO);
+                    return;
+                } catch (RuntimeException e) {
+                    log.debug("托盘气泡失败，回退到对话框：{}", e.toString());
+                }
+            }
+            // 对话框是非模态的：模态对话框会阻塞调用线程并可能盖住悬浮球
+            javax.swing.JOptionPane pane = new javax.swing.JOptionPane(detail, javax.swing.JOptionPane.INFORMATION_MESSAGE);
+            javax.swing.JDialog dialog = pane.createDialog(settings, title);
+            dialog.setModal(false);
+            dialog.setAlwaysOnTop(true);
+            dialog.setVisible(true);
+        });
+    }
+
+    private void showFatal(String title, String detail) {
+        try {
+            javax.swing.JOptionPane.showMessageDialog(null, detail, title,
+                    javax.swing.JOptionPane.ERROR_MESSAGE);
+        } catch (RuntimeException e) {
+            System.err.println(title + ": " + detail);
+        }
+    }
+
+    private void onUi(Runnable r) {
+        if (EventQueue.isDispatchThread()) {
+            r.run();
+        } else {
+            SwingUtilities.invokeLater(r);
+        }
+    }
+
+    /**
+     * 浮窗锚点。
+     *
+     * <p>降级链：光标 → 目标窗口矩形 → 跟随鼠标（§4.4）。
+     * {@code CaretTracker} 已经把 Win32 物理像素换算成 AWT 逻辑像素，
+     * 这里不许再乘缩放系数（§4.4 点名的坑）。
+     */
+    private java.awt.Point anchorPoint() {
+        DictationSession s = session.get();
+        long target = s == null ? CaretTracker.foregroundWindow() : s.targetWindow();
+        CaretTracker.Position p = CaretTracker.locate(target, 0, 0);
+        java.awt.Point point = new java.awt.Point(p.x(), p.y());
+        if (!p.source().name().equals("NONE")) {
+            log.debug("浮窗锚点来源：{}", p.source().display());
+        }
+        return point;
+    }
+
+    private String statusLine() {
+        DictationSession s = session.get();
+        double remain = silence.remainingSeconds();
+        String base = switch (sm.state()) {
+            case LISTENING -> "听写中";
+            case COMMITTING -> "提交中";
+            default -> "待唤醒";
+        };
+        if (sm.listening() && silence.enabled()) {
+            return base + " · 静音 " + String.format("%.0f", Math.max(0, remain)) + " 秒后结束";
+        }
+        if (s != null && sm.committing()) {
+            return base + " · 精化引擎：" + (refiner == null ? "无" : refiner.engineName());
+        }
+        return base;
+    }
+
+    private static String abbreviate(String text) {
+        String t = text == null ? "" : text;
+        return t.length() <= 80 ? t : t.substring(0, 80) + "…";
+    }
+
+    // ------------------------------------------------------------ 配置
+
+    /** 由设置窗口调用：校验 → 保存 → 作用于运行中的组件。 */
+    private String applyConfig(AppConfig candidate) {
+        try {
+            candidate.validate();
+        } catch (AppConfig.ConfigException e) {
+            return e.getMessage();
+        }
+        // 词表校验（附录 C）：只有在模型可用时才能查，查不了不阻止保存但会提示。
+        if (voskModel != null) {
+            try {
+                MicValidator.Result r = MicValidator.validate(voskModel::findWord,
+                        candidate.wakeWord(), candidate.endWord());
+                wordCheck = r;
+                if (!r.ok()) {
+                    return r.message();
+                }
+            } catch (RuntimeException e) {
+                log.warn("词表校验无法执行，配置仍被保存：{}", e.toString());
+            }
+        }
+        // 热更新：静音秒数、词表（需要重建识别器）
+        boolean wordsChanged = !candidate.wakeWord().equals(config.wakeWord())
+                || !candidate.endWord().equals(config.endWord());
+        this.config = candidate;
+        silence.setTimeoutSeconds(candidate.silenceSeconds());
+        if (wordsChanged) {
+            rebuildKeywordDetector();
+            rebuildPostProcess();
+        }
+        persistConfig();
+        log.info("配置已更新：wake={} end={} silence={}s autoSend={} maxSegment={}s",
+                candidate.wakeWord(), candidate.endWord(), candidate.silenceSeconds(),
+                candidate.autoSend(), candidate.maxSegmentSeconds());
+        return null;
+    }
+
+    private void rebuildKeywordDetector() {
+        WakeWordDetector old = wakeDetector;
+        try {
+            wakeDetector = new VoskKeywordDetector(voskModel, config.wakeWord(), config.endWord(),
+                    this::onKeywordHit);
+            if (old != null) {
+                old.close();
+            }
+            wakeDetectorError = null;
+            log.info("唤醒/结束词检测已按新配置重建：{}", wakeDetector.describe());
+        } catch (IOException | RuntimeException e) {
+            wakeDetectorError = e.getMessage();
+            log.error("按新配置重建唤醒检测失败，保留旧的：{}", wakeDetectorError);
+            wakeDetector = old;
+        }
+    }
+
+    private void persistConfig() {
+        try {
+            AppPaths.saveConfig(config);
+        } catch (IOException | RuntimeException e) {
+            log.error("保存配置失败：{}", e.toString());
+        }
+    }
+
+    // ------------------------------------------------------------ 状态与自检
+
+    /** 设置窗口的 Host 实现。 */
+    private final class SettingsHost implements SettingsWindow.Host {
+
+        @Override
+        public AppConfig config() {
+            return config;
+        }
+
+        @Override
+        public String applyConfig(AppConfig candidate) {
+            return App.this.applyConfig(candidate);
+        }
+
+        @Override
+        public List<SettingsWindow.StatusLine> status() {
+            return App.this.statusLines();
+        }
+
+        @Override
+        public String diagnosticsReport() {
+            return SelfTest.run().report();
+        }
+
+        @Override
+        public void onVisibilityChanged(boolean visible) {
+            // 设置窗口会真的抢焦点，因此打开期间暂停「切窗口结束段落」判定，
+            // 否则一打开设置就会把正在录的段落判定成「用户切走了」。
+            foreground.setEnabled(!visible);
+            if (settings != null) {
+                foreground.ignore(Win32WindowStyles.hwndOf(settings));
+            }
+        }
+    }
+
+    /** 各组件状态行，供「模型状态」页与 --doctor。 */
+    private List<SettingsWindow.StatusLine> statusLines() {
+        List<SettingsWindow.StatusLine> out = new ArrayList<>();
+
+        out.add(new SettingsWindow.StatusLine("配置文件",
+                AppPaths.configFile().toString(), true, null));
+
+        // 模型
+        if (voskModel != null) {
+            out.add(new SettingsWindow.StatusLine("Vosk 模型", "已加载", true, voskModel.path().toString()));
+        } else {
+            out.add(new SettingsWindow.StatusLine("Vosk 模型", "缺失或损坏", false,
+                    modelError + "  获取方式见 docs/DESIGN.md 附录 D"));
+        }
+
+        // 词表校验逐项
+        addWordLine(out, "唤醒词", config.wakeWord());
+        addWordLine(out, "结束词", config.endWord());
+
+        // 唤醒检测
+        out.add(new SettingsWindow.StatusLine("唤醒/结束词检测",
+                wakeDetector != null ? "就绪" : "不可用",
+                wakeDetector != null,
+                wakeDetector != null ? wakeDetector.describe()
+                        : wakeDetectorError + "（仍可用悬浮球左键手动听写）"));
+
+        // 预览
+        out.add(new SettingsWindow.StatusLine("实时预览",
+                recognizer != null ? "就绪" : "不可用", recognizer != null,
+                recognizer != null ? recognizer.describe() : recognizerError));
+
+        // 精化
+        boolean refinerOk = refiner != null && refiner.available();
+        out.add(new SettingsWindow.StatusLine("精化引擎",
+                refiner == null ? "未装配" : (refinerOk ? "就绪" : "降级"), refinerOk,
+                refiner == null ? null : refiner.describe()
+                        + (refinerOk ? "" : " —— 按 §7 会退回预览文本注入，并明确提示")));
+
+        // 麦克风
+        boolean micOk = capture != null && capture.available();
+        out.add(new SettingsWindow.StatusLine("麦克风", micOk ? "就绪" : "不可用", micOk,
+                capture == null ? null : capture.describe()));
+
+        // 注入
+        out.add(new SettingsWindow.StatusLine("文本注入",
+                injector.available() ? "就绪" : "不可用", injector.available(),
+                injector.available() ? injector.describe() : injector.unavailableReason()));
+
+        // 托盘
+        out.add(new SettingsWindow.StatusLine("托盘图标",
+                trayIcon != null ? "已安装" : "不可用", trayIcon != null,
+                trayIcon != null ? "⚠ Windows 11 默认折叠它，悬浮球才是主要入口" : null));
+
+        if (lastInjectionError != null) {
+            out.add(new SettingsWindow.StatusLine("最近一次注入失败", "见日志", false, lastInjectionError));
+        }
+        return out;
+    }
+
+    private void addWordLine(List<SettingsWindow.StatusLine> out, String field, String word) {
+        String key = "词表:" + field;
+        if (voskModel == null) {
+            out.add(new SettingsWindow.StatusLine(key, word, false, "模型不可用，无法校验"));
+            return;
+        }
+        try {
+            int id = voskModel.findWordId(word);
+            boolean ok = id >= 0;
+            out.add(new SettingsWindow.StatusLine(key, word, ok,
+                    ok ? "在词表内（wordId=" + id + "）"
+                       : "不在词表内 —— Vosk 会静默忽略它，永远识别不到"));
+        } catch (RuntimeException e) {
+            out.add(new SettingsWindow.StatusLine(key, word, false, "校验失败：" + e.getMessage()));
+        }
+    }
+
+    /**
+     * 环境自检（{@code --doctor} / {@code --headless}）。
+     *
+     * <p>不启动 UI，因此不含「悬浮球不抢焦点 / 右键菜单能否弹出 / 贴边收起」这几项——
+     * 那些需要真实桌面与真实鼠标，跑在 {@code --self-check} 里。
+     */
+    private void doctor(Options opts) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("TalkingLive 环境自检\n");
+        sb.append("home        : ").append(AppPaths.home()).append('\n');
+        sb.append("config      : ").append(AppPaths.configFile()).append('\n');
+        sb.append("os          : ").append(System.getProperty("os.name")).append(' ')
+                .append(System.getProperty("os.version")).append('\n');
+        sb.append("java        : ").append(System.getProperty("java.version")).append('\n');
+        sb.append("dpi         : ").append(DpiScale.systemDpi()).append(" (scale ")
+                .append(String.format("%.2f", Theme.dpiScale())).append(")\n");
+        for (SettingsWindow.StatusLine line : statusLines()) {
+            sb.append(String.format("%-16s: %-10s %s%s%n", line.name(), line.value(),
+                    line.ok() ? "[ok]  " : "[FAIL]",
+                    line.detail() == null ? "" : line.detail().replace("\n", " | ")));
+        }
+        sb.append('\n').append(SelfTest.run().report());
+        sb.append("\n注：--doctor 不启动 UI，因此上面没有「悬浮球不抢焦点 / 右键菜单」那几项。\n")
+                .append("    那几项需要真实桌面与真实鼠标，请用 --self-check 单独跑。\n");
+        String text = sb.toString();
+        System.out.println(toAscii(text));
+        try {
+            Path report = AppPaths.home().resolve("doctor-report.txt");
+            java.nio.file.Files.writeString(report, text, java.nio.charset.StandardCharsets.UTF_8);
+            System.out.println("\n[doctor] full report written to " + report);
+        } catch (IOException e) {
+            System.out.println("[doctor] cannot write report: " + e);
+        }
+    }
+
+    /** 跑自检并退出（{@code --self-check}）。 */
+    private void runSelfCheckAndExit() {
+        SelfTest.Result r = SelfTest.run();
+        String ascii = toAscii(r.report());
+        System.out.println(ascii);
+        try {
+            Path report = AppPaths.home().resolve("selftest-report.txt");
+            java.nio.file.Files.writeString(report, r.report(), java.nio.charset.StandardCharsets.UTF_8);
+            System.out.println("[self-check] report written to " + report);
+        } catch (IOException e) {
+            System.out.println("[self-check] cannot write report: " + e);
+        }
+        System.out.println("[self-check] " + r.passed() + " passed, " + r.failed() + " failed");
+        System.exit(r.failed() == 0 ? 0 : 1);
+    }
+
+    /**
+     * 控制台只输出 ASCII 摘要。
+     *
+     * <p>理由来自 demo 阶段踩过的坑：Windows 控制台默认代码页是 GBK，
+     * 中文会乱码并**掩盖真正的失败信息**（§9.2）。报告文件用 UTF-8 写，内容完整。
+     */
+    private static String toAscii(String s) {
+        StringBuilder sb = new StringBuilder(s.length());
+        for (char c : s.toCharArray()) {
+            sb.append(c < 128 ? c : '?');
+        }
+        return sb.toString();
+    }
+
+    /** 诊断报告文本（供测试与自检页）。 */
+    public String diagnosticsText() {
+        return SelfTest.run().report();
+    }
+
+    // ------------------------------------------------------------ 关闭
+
+    private void shutdown() {
+        log.info("正在退出…");
+        try {
+            if (capture != null) {
+                capture.close();
+            }
+        } catch (RuntimeException e) {
+            log.warn("关闭音频采集出错：{}", e.toString());
+        }
+        try {
+            if (foreground != null) {
+                foreground.close();
+            }
+        } catch (RuntimeException e) {
+            log.warn("关闭窗口监听出错：{}", e.toString());
+        }
+        closeQuietly(wakeDetector);
+        closeQuietly(recognizer);
+        closeQuietly(refiner);
+        closeQuietly(voskModel);
+        persistConfig();
+        onUi(() -> {
+            if (trayIcon != null && SystemTray.isSupported()) {
+                SystemTray.getSystemTray().remove(trayIcon);
+            }
+            if (ball != null) {
+                ball.dispose();
+            }
+            if (previewBar != null) {
+                previewBar.dispose();
+            }
+            if (settings != null) {
+                settings.dispose();
+            }
+        });
+        log.info("=== TalkingLive 退出 ===");
+        if (System.getProperty("talkinglive.noExit", "false").equals("true")) {
+            return;   // 自检模式：不真的结束 JVM
+        }
+        System.exit(0);
+    }
+
+    private static void closeQuietly(AutoCloseable c) {
+        if (c == null) {
+            return;
+        }
+        try {
+            c.close();
+        } catch (Exception e) {
+            log.warn("关闭资源出错：{}", e.toString());
+        }
+    }
+
+    // ------------------------------------------------------------ 测试支撑
+
+    AppConfig configForTest() {
+        return config;
+    }
+
+    StateMachine stateMachineForTest() {
+        return sm;
+    }
+
+    List<SettingsWindow.StatusLine> statusForTest() {
+        return statusLines();
+    }
+
+    /** 供自检在无麦克风环境下驱动完整流程。 */
+    void injectAudioForTest(byte[] pcm) {
+        new CaptureBridge().onPcm(pcm, SilenceDetector.rms16le(pcm));
+    }
+
+    String applyConfigForTest(AppConfig candidate) {
+        return applyConfig(candidate);
+    }
+}

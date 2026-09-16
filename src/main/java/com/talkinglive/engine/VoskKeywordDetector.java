@@ -37,7 +37,7 @@ public final class VoskKeywordDetector implements WakeWordDetector {
 
     private static final double BYTES_PER_SECOND = 16000 * 2;
 
-    private final org.vosk.Recognizer recognizer;
+    private final VoskModel.Recognizer recognizer;
     private final String wakeWord;
     private final String endWord;
     private final HitListener listener;
@@ -77,13 +77,30 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         }
 
         String grammar = buildGrammar(this.wakeWord, this.endWord);
+        if (!model.supportsRuntimeGrammar()) {
+            // 受限语法是唤醒词可自定义的前提（附录 B.2：只有小模型支持运行时改词表）。
+            // 走到这里说明装的是大模型或词表静态的模型 —— 必须明确拒绝，不能假装能用。
+            throw new VocabularyException(Map.of(
+                    "模型能力",
+                    "该模型不支持运行时词表（缺少 HCLr.fst/Gr.fst），无法用受限语法检测自定义唤醒词。"
+                            + "请换用 vosk-model-small-cn-0.22。"));
+        }
         log.info("唤醒/结束词受限语法已建立：wake={} end={} grammar={}",
                 this.wakeWord, this.endWord, grammar);
-        this.recognizer = new org.vosk.Recognizer(model.raw(), 16000.0f, grammar);
+        this.recognizer = model.createGrammarRecognizer(16000.0f, grammar);
     }
 
     /**
      * 构造受限语法。
+     *
+     * <p><b>格式是纯字符串数组，不是 {@code {"phrase_list":[...]}}！</b>
+     * 这一点很容易搞错：Vosk 的 Python 绑定确实用 {@code phrase_list}，但它自己会
+     * 把里面的列表取出来再交给 C API；C 侧（{@code kaldi_recognizer.cc}）拿到
+     * 字符串后直接 {@code json::JSON::Load} 然后 {@code obj.length() / obj[i]}。
+     * 传对象进去的实测症状是：
+     * <pre>WARNING (VoskAPI:UpdateGrammarFst():recognizer.cc:283)
+     * Expecting array of strings, got: '{"phrase_list":[...]}'
+     * java.lang.Error: Invalid memory access</pre>
      *
      * <p>公开为静态方法是为了**可单测**：语法的形状（词的顺序、是否含 {@code [unk]}）
      * 是这个类里唯一能在无麦克风环境下验证的逻辑。
@@ -99,10 +116,9 @@ public final class VoskKeywordDetector implements WakeWordDetector {
             phrases.add(e);
         }
         phrases.add(UNK);
-        String json = phrases.stream()
+        return phrases.stream()
                 .map(VoskKeywordDetector::quote)
-                .collect(java.util.stream.Collectors.joining(",", "{\"phrase_list\":[", "]}"));
-        return json;
+                .collect(java.util.stream.Collectors.joining(",", "[", "]"));
     }
 
     /** JSON 字符串字面量转义。语法里会出现中文（无需转义）但也要挡住引号与反斜杠。 */
@@ -133,17 +149,19 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         if (closed || pcm == null || length <= 0) {
             return;
         }
-        if (recognizer.acceptWaveForm(pcm, length)) {
-            String text = VoskJson.text(recognizer.getResult());
-            Hit hit = match(text);
+        // 识别器按「数组 + 长度」工作；偏移不为 0 时先切一份。
+        // 采集线程每次给的都是独立数组，实际不会走到这里。
+        byte[] data = (offset == 0 && length == pcm.length)
+                ? pcm : java.util.Arrays.copyOfRange(pcm, offset, offset + length);
+        if (recognizer.accept(data, data.length)) {
+            Hit hit = match(recognizer.result());
             if (hit != null) {
                 listener.onHit(hit);
             }
             secondsSinceReset = 0;
             return;
         }
-        String partial = VoskJson.text(recognizer.getPartialResult());
-        Hit hit = match(partial);
+        Hit hit = match(recognizer.partialResult());
         if (hit != null) {
             listener.onHit(hit);
             // 命中后立刻清空，避免同一句话在随后的若干块里反复命中。
@@ -151,7 +169,7 @@ public final class VoskKeywordDetector implements WakeWordDetector {
             secondsSinceReset = 0;
             return;
         }
-        secondsSinceReset += length / BYTES_PER_SECOND;
+        secondsSinceReset += data.length / BYTES_PER_SECOND;
         if (secondsSinceReset >= RESET_AFTER_SECONDS) {
             recognizer.reset();
             secondsSinceReset = 0;
@@ -230,9 +248,17 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         }
 
         private static String buildMessage(Map<String, String> unknown) {
-            StringBuilder sb = new StringBuilder("这些词不在 Vosk 模型词表内，永远不会被识别到（Vosk 对词表外的词静默忽略）：");
+            StringBuilder sb = new StringBuilder(
+                    "这些词不在 Vosk 模型词表内，永远不会被识别到（Vosk 对词表外的词静默忽略）：");
             unknown.forEach((k, v) -> sb.append("\n  · ").append(k).append("：").append(v));
-            sb.append("\n请在设置窗口换成词表内的词。可用的备选：小助手 / 结束 / 完毕 / 输入。");
+            // 按**不合格的字段**分别给建议。早期这里写死了结束词的备选，
+            // 结果唤醒词出问题时也会推荐「到此为止」——单测直接把它抓出来了。
+            String advice = com.talkinglive.core.WordSuggestions.adviceFor(unknown);
+            if (!advice.isEmpty()) {
+                sb.append("\n请在设置窗口换成词表内的词：").append(advice).append("。");
+            } else {
+                sb.append("\n请在设置窗口换成模型词表内的词。");
+            }
             return sb.toString();
         }
     }

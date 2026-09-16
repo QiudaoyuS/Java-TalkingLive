@@ -8,7 +8,7 @@ import org.slf4j.LoggerFactory;
 /**
  * 实时预览：小 Vosk **流式**识别（{@code DESIGN.md} §4.2）。
  *
- * <p>只有 Vosk 提供流式输出，能让字边说边长；它的准确率（CER 17%）不够，
+ * <p>只有 Vosk 提供流式输出，能让字边说边长；它的准确率（小模型 CER 17%）不够，
  * 但预览要的是**即时反馈**，准确率由 {@link TextRefiner} 在段末补上。
  *
  * <p>调用方通过 {@link TextListener} 拿到「整段到目前为止的完整文本」，其中
@@ -21,17 +21,17 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
 
     private final VoskModel model;
     private final TextListener listener;
-    private org.vosk.Recognizer recognizer;
 
     /** 已经定稿的部分（来自各次 FINAL 结果，按顺序拼接）。 */
     private final StringBuilder finalized = new StringBuilder();
 
+    private VoskModel.Recognizer recognizer;
     private volatile boolean closed;
 
     public VoskSpeechRecognizer(VoskModel model, TextListener listener) throws IOException {
         this.model = model;
         this.listener = listener;
-        this.recognizer = new org.vosk.Recognizer(model.raw(), 16000.0f);
+        this.recognizer = model.createRecognizer(16000.0f);
     }
 
     @Override
@@ -39,18 +39,16 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         if (closed || recognizer == null || pcm == null || length <= 0) {
             return;
         }
-        // Vosk 的 Java 绑定按「数组 + 有效长度」工作，且它从数组起始处读；
-        // 因此偏移不为 0 时先切一份。采集线程每次给的都是独立数组，实际不会走到这里。
-        byte[] data = offset == 0 && length == pcm.length ? pcm : java.util.Arrays.copyOfRange(pcm, offset, offset + length);
-        if (recognizer.acceptWaveForm(data, data.length)) {
-            String t = VoskJson.text(recognizer.getResult());
+        byte[] data = (offset == 0 && length == pcm.length)
+                ? pcm : java.util.Arrays.copyOfRange(pcm, offset, offset + length);
+        if (recognizer.accept(data, data.length)) {
+            String t = recognizer.result();
             if (!t.isEmpty()) {
                 finalized.append(t);
             }
             listener.onText(Kind.FINAL, finalized.toString());
         } else {
-            String partial = VoskJson.text(recognizer.getPartialResult());
-            listener.onText(Kind.PARTIAL, finalized + partial);
+            listener.onText(Kind.PARTIAL, finalized + recognizer.partialResult());
         }
     }
 
@@ -63,7 +61,7 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         // 这里把预览的全程文本记为 out，再 reset 识别器——
         // 避免 Vosk 把已经计入 finalized 的内容再吐一遍造成重复。
         String out = TextUtils.collapseWhitespace(finalized.toString());
-        recognizer.getFinalResult();
+        recognizer.finalResult();
         recognizer.reset();
         listener.onText(Kind.FINAL, out);
         log.debug("预览段落定稿：{}", com.talkinglive.core.Logging.describeWithFingerprint(out));
@@ -78,7 +76,7 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         }
         if (recognizer == null) {
             try {
-                recognizer = new org.vosk.Recognizer(model.raw(), 16000.0f);
+                recognizer = model.createRecognizer(16000.0f);
             } catch (IOException e) {
                 log.warn("重建预览识别器失败：{}", e.toString());
             }
@@ -109,11 +107,7 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
     public synchronized void close() {
         closed = true;
         if (recognizer != null) {
-            try {
-                recognizer.close();
-            } catch (RuntimeException e) {
-                log.warn("关闭预览识别器时出错：{}", e.toString());
-            }
+            recognizer.close();
             recognizer = null;
         }
     }

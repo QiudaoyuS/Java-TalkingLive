@@ -97,13 +97,20 @@ public final class VoskNativeLoader {
                 }
                 // 用绝对路径加载：JNA 的 Native.load 支持路径形式（含分隔符即按路径处理）。
                 //
-                // ★ 必须显式指定 UTF-8：Vosk 的 C API 收 const char* + strlen，字符串是 UTF-8。
-                //   JNA 默认用平台编码（本机是 GBK），会把「子曰」编成 GBK 字节交给 Vosk，
-                //   而 Vosk 按 UTF-8 解释——查出来的结果毫无意义（实测表现为
-                //   **任何词都返回「在词表内」**，于是附录 C 的静默失效完全拦不住）。
-                java.util.Map<String, Object> opts = new java.util.HashMap<>();
-                opts.put(Library.OPTION_STRING_ENCODING, "UTF-8");
-                VoskNative loaded = Native.load(lib.toAbsolutePath().toString(), VoskNative.class, opts);
+                // ★★ 必须显式指定 UTF-8，这是本项目最关键的一处修复 ★★
+                //   原因一：Vosk 的 C API 收 const char* + strlen，字符串是 UTF-8。
+                //     JNA 默认用**平台编码**（本机中文 Windows 是 GBK），于是
+                //     「子曰」「到此为止」被编成 GBK 字节交给按 UTF-8 解释的 Vosk。
+                //     实测症状：vosk_model_find_word 对任何词都返回「在词表内」
+                //     （附录 C 的静默失效完全拦不住），且受限语法直接崩：
+                //       WARNING (VoskAPI:UpdateGrammarFst():recognizer.cc:283)
+                //       Expecting array of strings, got: '{"phrase_list":["??","????","[unk]"]}'
+                //       java.lang.Error: Invalid memory access
+                //         at org.vosk.LibVosk.vosk_recognizer_new_grm(Native Method)
+                //   原因二：官方 Java 绑定 org.vosk.LibVosk 就是这样加载的，
+                //     所以它必然带这个 bug —— 中西文混排场景下只能绕开它。
+                VoskNative loaded = Native.load(lib.toAbsolutePath().toString(), VoskNative.class,
+                        VoskNative.utf8Options());
                 nativeDir = dir;
                 instance = loaded;
                 failure = null;

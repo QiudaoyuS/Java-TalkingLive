@@ -132,6 +132,28 @@ public final class Win32 {
         boolean SetForegroundWindow(HWND hwnd);
 
         int GA_ROOT = 2;
+
+        /** 某屏幕点（物理像素）上最上层的窗口。用于自检诊断点击为何没送达。 */
+        HWND WindowFromPoint(com.sun.jna.platform.win32.WinDef.POINT p);
+    }
+
+    /**
+     * 只用来读写窗口扩展样式的 user32 视图。
+     *
+     * <p>刻意用 {@link W32APIOptions#DEFAULT_OPTIONS}（Unicode 类型映射）而不是
+     * {@code W32APIOptions.UNICODE_OPTIONS}：后者的 {@code LPARAM} 被映射成
+     * {@code Pointer}，而 {@code SetWindowLongPtr} 的第三个参数是 {@code LONG_PTR}（数值），
+     * 两者对不上会编译失败。本接口只读位标志、不涉及字符串，用默认映射最省事。
+     */
+    public interface WinStyle extends StdCallLibrary {
+        WinStyle INSTANCE = Native.load("user32", WinStyle.class, W32APIOptions.DEFAULT_OPTIONS);
+
+        /** 读窗口样式。64 位下返回 LONG_PTR。 */
+        com.sun.jna.platform.win32.BaseTSD.LONG_PTR GetWindowLongPtrW(HWND hwnd, int nIndex);
+
+        /** 写窗口样式。 */
+        com.sun.jna.platform.win32.BaseTSD.LONG_PTR SetWindowLongPtrW(HWND hwnd, int nIndex,
+                com.sun.jna.platform.win32.BaseTSD.LONG_PTR dwNewLong);
     }
 
     /** kernel32。 */

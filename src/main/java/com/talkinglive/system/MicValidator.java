@@ -25,14 +25,14 @@ public final class MicValidator {
     }
 
     /**
-     * 词表外的常用备选（{@code DESIGN.md} 附录 B.1 的实测结论）。
+     * 词表外的常用备选（{@code DESIGN.md} 附录 B.1 的实测结论，见
+     * {@link com.talkinglive.core.WordSuggestions}）。
      *
      * <p>写进提示里是因为用户第一次配置时**不可能知道**模型的词表里有什么——
      * 而「本段结束」不在表内这件事恰恰是 Step 0 踩出来的。
      */
-    public static final Map<String, List<String>> SUGGESTIONS = Map.of(
-            "唤醒词", List.of("子曰", "小助手", "子", "曰"),
-            "结束词", List.of("到此为止", "结束", "完毕", "输入"));
+    public static final Map<String, List<String>> SUGGESTIONS =
+            com.talkinglive.core.WordSuggestions.BY_FIELD;
 
     private MicValidator() {}
 
@@ -124,7 +124,6 @@ public final class MicValidator {
         List<String> s = SUGGESTIONS.get(field);
         return s == null || s.isEmpty() ? null : String.join(" / ", s);
     }
-
     /** 一个总是通过的查询器，用于离线测试与非 Vosk 引擎。 */
     public static WordLookup acceptAll() {
         return word -> true;

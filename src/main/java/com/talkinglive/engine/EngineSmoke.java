@@ -30,8 +30,7 @@ public final class EngineSmoke {
         }
         long t0 = System.currentTimeMillis();
         try (VoskModel model = VoskModel.load(dir)) {
-            System.out.println("[smoke] model loaded in " + (System.currentTimeMillis() - t0) + " ms");
-            String[][] probes = {
+            System.out.println("[smoke] model loaded in " + (System.currentTimeMillis() - t0) + " ms");            String[][] probes = {
                 {"子曰", "唤醒词（DESIGN.md 附录 B.1，应采用）"},
                 {"小助手", "唤醒词备选，应在表内"},
                 {"到此为止", "结束词（附录 B.1，应采用）"},
@@ -60,7 +59,37 @@ public final class EngineSmoke {
             }
 
             System.out.println("[smoke] --- grammar construction ---");
-            System.out.println("[smoke] grammar = " + VoskKeywordDetector.buildGrammar("子曰", "到此为止"));
+            String grammar = VoskKeywordDetector.buildGrammar("子曰", "到此为止");
+            System.out.println("[smoke] grammar = " + grammar);
+            boolean grammarShapeOk = grammar.equals("[\"子曰\",\"到此为止\",\"[unk]\"]");
+            System.out.println("[smoke] " + (grammarShapeOk ? "ok  " : "BAD ")
+                    + "grammar is a plain JSON array (C API format, not phrase_list object)");
+            if (!grammarShapeOk) {
+                failures++;
+            }
+            System.out.println("[smoke] runtime grammar supported by model = "
+                    + model.supportsRuntimeGrammar()
+                    + "  (HCLr.fst + Gr.fst present -> small model, DESIGN.md Appendix B.2)");
+
+            System.out.println("[smoke] --- grammar recognizer creation (was: Invalid memory access) ---");
+            try (VoskModel.Recognizer grm = model.createGrammarRecognizer(16000.0f, grammar)) {
+                // 喂 1 秒静音：能走到这里就说明受限语法被 Vosk 接受了
+                grm.accept(new byte[32000]);
+                System.out.println("[smoke] ok   restricted-grammar recognizer created and fed 1s silence");
+            } catch (Exception e) {
+                System.out.println("[smoke] BAD  grammar recognizer failed: " + e);
+                failures++;
+            }
+
+            System.out.println("[smoke] --- plain streaming recognizer ---");
+            try (VoskModel.Recognizer rec = model.createRecognizer(16000.0f)) {
+                rec.accept(new byte[32000]);
+                System.out.println("[smoke] ok   streaming recognizer created, partial='"
+                        + rec.partialResult() + "'");
+            } catch (Exception e) {
+                System.out.println("[smoke] BAD  streaming recognizer failed: " + e);
+                failures++;
+            }
 
             System.out.println("[smoke] --- MicValidator wiring ---");
             MicValidator.Result r = MicValidator.validate(model::findWord, "子曰", "到此为止");

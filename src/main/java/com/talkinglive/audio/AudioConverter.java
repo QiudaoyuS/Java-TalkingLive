@@ -39,6 +39,13 @@ public final class AudioConverter {
         if (src == null || src.length == 0) {
             return new byte[0];
         }
+        // 已经是目标格式时直接返回拷贝：不做任何数值往返。
+        // 这一步不只是省时间——Float→double→Int16 的取整在静音附近会出现 ±1 的抖动
+        // （实测 440Hz 正弦在 16kHz→16kHz 路径上第 12 个样本 62 变成 61）。
+        // 这种抖动无害，但会让「48k 麦克风恰好以 16k 打开」这条真实路径平白多一层噪声。
+        if (isAlreadyTarget(format)) {
+            return src.clone();
+        }
         double[] mono = toMonoDoubles(src, format);
         float ratio = monoRatio(format);
         double[] resampled = ratio == 1.0 ? mono : resample(mono, ratio);
@@ -233,6 +240,11 @@ public final class AudioConverter {
             int count = 0;
             if (maxStart >= 0) {
                 count = (int) Math.floor((maxStart - pos) / ratio) + 1;
+                // 本次输出不能超过「这块音频总共能支撑的目标样本数」。
+                // 不加这个夹取时，小数相位 pos 的累积会让每块边界偶尔多吐一个样本，
+                // 长流上表现为缓慢多出样本（实测 1 秒 48k→16k 会多出 8 个）。
+                int totalAffordable = (int) Math.floor(buf.length / ratio);
+                count = Math.min(count, totalAffordable);
             }
             if (count <= 0) {
                 carry = buf;

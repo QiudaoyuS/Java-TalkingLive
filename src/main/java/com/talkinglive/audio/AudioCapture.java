@@ -35,8 +35,18 @@ public final class AudioCapture implements AutoCloseable {
     /** 读块大小（源格式帧数）。2048 帧在 48kHz 下约 43ms，兼顾延迟与系统调用次数。 */
     private static final int READ_FRAMES = 2048;
 
-    /** 重连间隔。 */
-    private static final long RETRY_MILLIS = 3000;
+    /**
+     * 重连的起始间隔与上限。
+     *
+     * <p>用退避而不是固定 3 秒：麦克风长时间不存在时（笔记本没插、被禁用），
+     * 固定间隔会让日志每 3 秒刷一行错误，而且 {@link Listener#onStreamError} 会被
+     * 反复触发——那在上层意味着**反复弹提示**。实测症状更严重：
+     * 弹出来的对话框盖住了悬浮球，连点都点不到。
+     */
+    private static final long RETRY_MIN_MILLIS = 3000;
+    private static final long RETRY_MAX_MILLIS = 30_000;
+
+    private long retryDelay = RETRY_MIN_MILLIS;
 
     /** 采集回调。在采集线程上被调用，必须快速返回。 */
     public interface Listener {
@@ -209,9 +219,12 @@ public final class AudioCapture implements AutoCloseable {
         while (!closing.get()) {
             TargetDataLine l = this.line;
             if (l == null || !l.isOpen()) {
-                if (!reconnect()) {
-                    sleep(RETRY_MILLIS);
+                if (reconnect()) {
+                    continue;
                 }
+                sleep(retryDelay);
+                // 退避：失败次数越多，重试越稀疏，避免日志与提示被刷爆
+                retryDelay = Math.min(RETRY_MAX_MILLIS, retryDelay * 2);
                 continue;
             }
             AudioFormat fmt = actualFormat;
@@ -258,12 +271,14 @@ public final class AudioCapture implements AutoCloseable {
         notifyError(reason);
         closeQuietly(line);
         line = null;
+        retryDelay = RETRY_MIN_MILLIS;   // 从中断开始重新退避
     }
 
     private boolean reconnect() {
         log.info("尝试重连麦克风…");
         if (openLine()) {
             log.info("麦克风已恢复：{}", deviceName);
+            retryDelay = RETRY_MIN_MILLIS;
             for (Listener l : listeners) {
                 try {
                     l.onStreamRecovered();
