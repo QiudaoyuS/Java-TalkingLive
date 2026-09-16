@@ -80,6 +80,51 @@ class TrayMenuTest {
         }
     }
 
+    /**
+     * ★ 这条是三轮排查换来的结论，最容易被后人不小心改回去。
+     *
+     * <p>只要给 {@code TrayIcon} 挂了 {@code PopupMenu}，<b>Windows 就会在右键时
+     * 自己把它弹出来</b> —— 这与 {@code MouseListener} 是两套**并行**机制，
+     * 互不干扰。于是原生菜单（画不出中文）总是先弹，我们那条 Swing 菜单根本没机会。
+     *
+     * <p>症状是"中文菜单死活出不来、出来的是英文/方块"，而且看起来像事件没送到 Java，
+     * 极容易往错误方向查（我为此改了三轮）。
+     */
+    @Test
+    @DisplayName("TrayIcon 不得挂原生 PopupMenu —— 挂上它 Windows 就会自己弹那个画不出中文的菜单")
+    void trayIconHasNoNativePopupMenu() throws IOException {
+        List<String> lines = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8);
+        for (int i = 0; i < lines.size(); i++) {
+            String t = lines.get(i).strip();
+            if (t.startsWith("*") || t.startsWith("//") || t.startsWith("/*")) {
+                continue;   // 注释里正是解释这件事的地方
+            }
+            if (t.contains("new TrayIcon(")) {
+                assertTrue(t.contains(", null)"),
+                        "第 " + (i + 1) + " 行的 TrayIcon 必须在构造时传 null 作为 PopupMenu：\n  " + t
+                                + "\n传了 PopupMenu 的话，Windows 会在右键时自己弹那个原生菜单"
+                                + "（150% DPI 下画不出中文），而它与 MouseListener 是并行机制，"
+                                + "我们自己的 Swing 菜单根本没机会显示。");
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("左键单击托盘图标仍能开始/结束听写（不再走 ActionListener 之后）")
+    void trayLeftClickStillWorks() throws IOException {
+        List<String> lines = Files.readAllLines(APP_JAVA, StandardCharsets.UTF_8);
+        boolean handlesButton1 = lines.stream()
+                .map(String::strip)
+                .filter(t -> !t.startsWith("*") && !t.startsWith("//"))
+                .anyMatch(t -> t.contains("BUTTON1"));
+        assertTrue(handlesButton1,
+                """
+                        由于不再给 TrayIcon 挂 PopupMenu，addActionListener 也不会再被触发
+                        （那个事件只由 PopupMenu 产生）。左键必须在 MouseListener 里判 BUTTON1，
+                        否则托盘左键会失效。
+                        """);
+    }
+
     @Test
     @DisplayName("悬浮球的 Swing 菜单能画出中文（托盘右键用的就是它）")
     void swingMenuRendersChinese() {

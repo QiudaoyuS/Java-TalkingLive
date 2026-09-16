@@ -1163,34 +1163,6 @@ public final class App {
             return;
         }
         try {
-            // ⚠ 关于托盘的菜单，这里有一段踩坑记录，改动前请先读完。
-            //
-            // TrayIcon **只能**接 java.awt.PopupMenu —— 那是**原生 Win32 菜单**，
-            // 不是 Swing 自绘的。实测：给它每个 MenuItem setFont(Theme.menuFont(12))
-            // **没有用**，在 150% DPI 下菜单里的汉字仍然全是方块（用户反馈
-            // 「托盘右键菜单也是乱码」，与日志方块是两回事）。
-            //
-            // 而悬浮球用的 Swing JPopupMenu 是自绘的，中文字形完全正常。
-            //
-            // 所以策略是：托盘右键**不走原生菜单**，改弹悬浮球那一个 Swing 菜单
-            // （见 BallActions.onTrayRightClick）。原生菜单只留作兜底，
-            // 并且它的文字**刻意全部用 ASCII** —— 万一它真的被显示出来，
-            // 至少不会出现方块（英文字形任何字体都有）。
-            PopupMenu fallback = new PopupMenu();
-
-            MenuItem settingsItem = new MenuItem("Settings...");
-            settingsItem.addActionListener(e -> openSettings());
-            fallback.add(settingsItem);
-
-            MenuItem logs = new MenuItem("Status & Log...");
-            logs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_STATUS));
-            fallback.add(logs);
-
-            fallback.addSeparator();
-            MenuItem quit = new MenuItem("Quit");
-            quit.addActionListener(e -> shutdown());
-            fallback.add(quit);
-
             // ★ 托盘菜单的**独立宿主**：1×1 透明窗口，只在弹菜单时挪到托盘位置。
             //   有了它，托盘菜单完全不依赖悬浮球 —— 悬浮球被挪走/收起/关掉都不影响。
             //   不抢焦点必须在**第一次显示之前**设好，否则弹菜单那一瞬会把前台窗口
@@ -1199,36 +1171,56 @@ public final class App {
             trayMenuAnchor.addNotify();
             Win32WindowStyles.applyNoActivateToolWindow(trayMenuAnchor);
 
-            trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), fallback);
-            trayIcon.setImageAutoSize(true);
-            trayIcon.addActionListener(e -> onBallLeftClick());
-            // 右键（含 Windows 11 托盘溢出面板里的右键）→ 弹 Swing 菜单。
+            // ⚠⚠ 关于托盘的右键菜单，这里有一段**三轮才查清**的记录，改动前务必读完。
             //
-            // ⚠ 判据必须是"按下了右键按钮"，**不能**用 isPopupTrigger()。
-            //   实测：TrayIcon 的鼠标事件上 isPopupTrigger() 在 Windows 下不置位，
-            //   于是监听器从不生效、原生菜单照旧弹出来 —— 用户看到的正是那个
-            //   英文兜底菜单（"变成英文了"）。这是第二版改法，第一版就是栽在
-            //   isPopupTrigger 上（悬浮球是 Swing 组件，同一判据在那边是好的，
-            //   于是很容易误以为托盘也一样）。
-            //   pressed/released 都要接：不同 Windows 版本对托盘图标上报的时机不同，
-            //   靠 400ms 时间去重防止连弹两次。
+            // 事实链：
+            //   1. TrayIcon 只能接 java.awt.PopupMenu —— 那是**原生 Win32 菜单**。
+            //      实测在 150% DPI 下它不认 AWT 设的字体，中文全画成方块
+            //      （给它每个 MenuItem setFont(Theme.menuFont) 也无效）。
+            //   2. 于是改用 Swing JPopupMenu，由 TrayIcon 的 MouseListener 触发。
+            //      但**中文还是没出来，出来的是原生菜单**。
+            //   3. 真正的根因：**只要给 TrayIcon 挂了 PopupMenu，Windows 就会在右键时
+            //      自己把它弹出来** —— 这与 MouseListener 是**两套并行机制**，
+            //      互不干扰。所以原生菜单总是会先弹（而它只有英文），
+            //      我那条 Swing 菜单的日志一次都没出现过，就是铁证。
+            //
+            // 结论：**不要给 TrayIcon 挂任何 PopupMenu**，构造时传 null。
+            // 右键只剩 MouseListener 这一条路，于是弹的必然是我们的 Swing 菜单（中文）。
+            // 代价：左键单击不再走 ActionListener（它只由 PopupMenu 触发），
+            //      所以改用 MouseListener 判 BUTTON1。
+            trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), null);
+            trayIcon.setImageAutoSize(true);
+            // 右键（含 Windows 11 托盘溢出面板里的右键）→ 弹托盘自己的 Swing 菜单。
+            //
+            // ⚠ 判据必须是"按下了右键按钮"，**不能**用 isPopupTrigger()：
+            //   实测 TrayIcon 的鼠标事件上它在 Windows 下不置位。
+            //   而 isPopupTrigger() 在 Swing 组件上是可靠的（悬浮球那边就靠它），
+            //   这个差别很容易被忽略。
+            // pressed/released 都要接：不同 Windows 版本上报时机不同，靠 400ms 去重。
             java.awt.event.MouseAdapter trayMouse = new java.awt.event.MouseAdapter() {
                 @Override
                 public void mousePressed(java.awt.event.MouseEvent e) {
-                    maybeShowTrayMenu(e);
+                    if (e.getButton() == java.awt.event.MouseEvent.BUTTON1) {
+                        onBallLeftClick();     // 左键：开始 / 结束听写
+                    } else {
+                        maybeShowTrayMenu(e);
+                    }
                 }
 
                 @Override
                 public void mouseReleased(java.awt.event.MouseEvent e) {
-                    maybeShowTrayMenu(e);
+                    // 左键只在 pressed 上处理，避免按一次触发两次
+                    if (e.getButton() != java.awt.event.MouseEvent.BUTTON1) {
+                        maybeShowTrayMenu(e);
+                    }
                 }
             };
             trayIcon.addMouseListener(trayMouse);
             SystemTray.getSystemTray().add(trayIcon);
             log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
                     + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
-            log.info("托盘右键：弹出**托盘自己的** Swing 菜单（原生菜单在 150% DPI 下画不出中文；"
-                    + "宿主是独立的 TrayMenuAnchor，不借用悬浮球）");
+            log.info("托盘右键：弹出**托盘自己的** Swing 菜单（且**没有**挂原生 PopupMenu ——"
+                    + "挂上它 Windows 就会自己弹那个画不出中文的菜单）");
         } catch (AWTException | RuntimeException e) {
             log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
         }
