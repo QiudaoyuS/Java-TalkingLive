@@ -1159,53 +1159,103 @@ public final class App {
             return;
         }
         try {
-            PopupMenu menu = new PopupMenu();
-            // ★ 托盘菜单必须显式设字体。
-            //   它是 AWT 的 PopupMenu（不是 Swing 的 JPopupMenu），原来**一个字体都没设**，
-            //   于是走 JVM 默认菜单字体；那个默认在 150% DPI 下解析不到中文字形，
-            //   菜单里的汉字全成了方块（用户反馈「托盘右键菜单也是乱码」）。
-            //   Theme.menuFont 保证选到有中文字形的字体，两条菜单现在用同一个。
-            java.awt.Font menuFont = Theme.menuFont(12);
+            // ⚠ 关于托盘的菜单，这里有一段踩坑记录，改动前请先读完。
+            //
+            // TrayIcon **只能**接 java.awt.PopupMenu —— 那是**原生 Win32 菜单**，
+            // 不是 Swing 自绘的。实测：给它每个 MenuItem setFont(Theme.menuFont(12))
+            // **没有用**，在 150% DPI 下菜单里的汉字仍然全是方块（用户反馈
+            // 「托盘右键菜单也是乱码」，与日志方块是两回事）。
+            //
+            // 而悬浮球用的 Swing JPopupMenu 是自绘的，中文字形完全正常。
+            //
+            // 所以策略是：托盘右键**不走原生菜单**，改弹悬浮球那一个 Swing 菜单
+            // （见 BallActions.onTrayRightClick）。原生菜单只留作兜底，
+            // 并且它的文字**刻意全部用 ASCII** —— 万一它真的被显示出来，
+            // 至少不会出现方块（英文字形任何字体都有）。
+            PopupMenu fallback = new PopupMenu();
 
-            MenuItem manual = new MenuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
-            manual.setFont(menuFont);
-            manual.setEnabled(!paused);
-            manual.addActionListener(e -> onBallLeftClick());
-            menu.add(manual);
-
-            menu.addSeparator();
-            MenuItem pause = new MenuItem(paused ? "恢复监听" : "暂停监听");
-            pause.setFont(menuFont);
-            pause.addActionListener(e -> togglePause());
-            menu.add(pause);
-
-            menu.addSeparator();
-            MenuItem settingsItem = new MenuItem("设置...");
-            settingsItem.setFont(menuFont);
+            MenuItem settingsItem = new MenuItem("Settings...");
             settingsItem.addActionListener(e -> openSettings());
-            menu.add(settingsItem);
+            fallback.add(settingsItem);
 
-            MenuItem logs = new MenuItem("状态与诊断…");
-            logs.setFont(menuFont);
+            MenuItem logs = new MenuItem("Status & Log...");
             logs.addActionListener(e -> openDiagnostics(DiagnosticsWindow.TAB_STATUS));
-            menu.add(logs);
+            fallback.add(logs);
 
-            menu.addSeparator();
-            MenuItem quit = new MenuItem("退出");
-            quit.setFont(menuFont);
+            fallback.addSeparator();
+            MenuItem quit = new MenuItem("Quit");
             quit.addActionListener(e -> shutdown());
-            menu.add(quit);
+            fallback.add(quit);
 
-            trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), menu);
+            trayIcon = new TrayIcon(trayImage(), "TalkingLive —— " + sm.state().display(), fallback);
             trayIcon.setImageAutoSize(true);
             trayIcon.addActionListener(e -> onBallLeftClick());
+            // 右键（含 Windows 11 托盘溢出面板里的右键）→ 弹 Swing 菜单。
+            // isPopupTrigger() 是判断右键的跨平台正确方式；不同 Windows 版本
+            // 分别在 pressed 或 released 上置位，所以两个事件都要查。
+            trayIcon.addMouseListener(new java.awt.event.MouseAdapter() {
+                @Override
+                public void mousePressed(java.awt.event.MouseEvent e) {
+                    maybeShowTrayMenu(e);
+                }
+
+                @Override
+                public void mouseReleased(java.awt.event.MouseEvent e) {
+                    maybeShowTrayMenu(e);
+                }
+            });
             SystemTray.getSystemTray().add(trayIcon);
             log.info("托盘图标已就绪（⚠ Windows 11 默认把它收进「隐藏的图标」折叠面板，"
                     + "用户需手动拖出来一次 —— 所以它只是二级入口，悬浮球才是主要入口）");
+            log.info("托盘右键已改为弹出 Swing 菜单（原生菜单在 150% DPI 下画不出中文）");
         } catch (AWTException | RuntimeException e) {
             log.warn("托盘图标创建失败（不影响主要入口）：{}", e.toString());
         }
     }
+
+    /**
+     * 托盘图标被右键时弹出**与悬浮球同一个** Swing 菜单。
+     *
+     * <p>为了避免弹出两次，用一个很短的时间窗去重：不同 Windows 版本会把
+     * {@code isPopupTrigger()} 置在 pressed 或 released 上，两者都监听是必须的，
+     * 但个别情况下两个事件都会置位 —— 那时会连弹两次。
+     */
+    private void maybeShowTrayMenu(java.awt.event.MouseEvent e) {
+        if (!e.isPopupTrigger()) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (now - lastTrayMenuAt < 400) {
+            return;
+        }
+        lastTrayMenuAt = now;
+        // 事件坐标是**托盘图标的局部坐标**，转成屏幕坐标后交给悬浮球弹菜单。
+        // 悬浮球窗口是常驻的、且 WS_EX_NOACTIVATE（不抢焦点），正好适合当弹窗宿主。
+        java.awt.Point screen = e.getPoint();
+        java.awt.Component src = e.getComponent();
+        if (src != null) {
+            try {
+                screen = src.getLocationOnScreen();
+                screen.translate(e.getX(), e.getY());
+            } catch (RuntimeException ex) {
+                // 拿不到组件位置（极少见）时退回鼠标真实位置
+                java.awt.PointerInfo pi = java.awt.MouseInfo.getPointerInfo();
+                if (pi == null) {
+                    return;
+                }
+                screen = pi.getLocation();
+            }
+        }
+        final java.awt.Point at = screen;
+        onUi(() -> {
+            if (ball != null) {
+                ball.showMenuAtScreen(ball, at.x, at.y);
+            }
+        });
+    }
+
+    /** 上一次托盘右键弹菜单的时间（用于去重，见 {@link #maybeShowTrayMenu}）。 */
+    private volatile long lastTrayMenuAt;
 
     /** 托盘图标：与悬浮球同源的矢量话筒（{@link Icons}），不再各画一份。 */
     private static Image trayImage() {

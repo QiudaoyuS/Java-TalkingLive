@@ -532,6 +532,30 @@ public class FloatingBall extends JWindow {
      * 弹出来」是这个设计里真实存在的风险点（§4.4）。
      */
     public void showMenuAt(int x, int y) {
+        buildMenu().show(this, x, y);
+    }
+
+    /**
+     * 按**屏幕坐标**弹出同一个菜单，调用方自己指定"挂在哪个组件上"。
+     *
+     * <p>存在的理由是托盘入口：{@code TrayIcon} 用的 {@code java.awt.PopupMenu} 是
+     * **原生 Win32 菜单**，实测在 150% DPI 下**不认 AWT 设的字体**，
+     * 汉字全画成方块（给每个 MenuItem setFont 也没用 —— 那一版改过，无效）。
+     * 而 Swing 的 {@code JPopupMenu} 是自绘的，中文字形完全正常。
+     * 所以托盘右键不再走原生菜单，改弹这一个。
+     *
+     * @param invoker    用哪个组件当弹窗的宿主（决定坐标系与生命周期），通常传悬浮球
+     * @param screenX    屏幕坐标 X（Win32 与 AWT 在同一坐标空间，见 DpiScale）
+     * @param screenY    屏幕坐标 Y
+     */
+    public void showMenuAtScreen(java.awt.Component invoker, int screenX, int screenY) {
+        java.awt.Point p = new java.awt.Point(screenX, screenY);
+        javax.swing.SwingUtilities.convertPointFromScreen(p, invoker);
+        buildMenu().show(invoker, p.x, p.y);
+    }
+
+    /** 构造菜单（悬浮球右键与托盘右键共用同一份，避免两处文案/行为漂移）。 */
+    private JPopupMenu buildMenu() {
         JPopupMenu menu = new JPopupMenu();
         // 菜单字体走 Theme.menuFont：它保证有中文字形（详情见 Theme.menuFont 的注释）——
         // 这里曾经用 Theme.font，两者在本机恰好都指向 YaHei UI，但语义不同：
@@ -565,7 +589,7 @@ public class FloatingBall extends JWindow {
         quit.addActionListener(a -> listener.onQuit());
         menu.add(quit);
 
-        menu.show(this, x, y);
+        return menu;
     }
 
     private static JMenuItem item(String text) {
