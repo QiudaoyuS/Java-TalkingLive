@@ -122,6 +122,14 @@ public final class Win32 {
 
         HWND GetFocus();
 
+        /**
+         * 查某个键/鼠标键是否处于按下状态（自检与现场快照用）。
+         *
+         * <p>修饰键若被卡在按下状态，表现正是「点任务栏、关闭按钮都没反应」
+         * 而屏幕上看不出任何异常——这是「点不动」类问题里最容易被忽略的一条。
+         */
+        short GetAsyncKeyState(int vKey);
+
         boolean GetWindowRect(HWND hwnd, com.sun.jna.platform.win32.WinDef.RECT lpRect);
 
         /** 进程/窗口 DPI。 */

@@ -213,6 +213,9 @@ class ArchitectureTest {
      *       结论就相反，必须能当场实测。实测过程中还因此误判过一次窗口位置。</li>
      *   <li>{@code system.WindowProbe} —— 探测屏幕某位置实际归属哪个窗口，
      *       用于排查「点了没反应」。</li>
+     *   <li>{@code system.BlockSnapshot} —— 「点不动」问题的现场快照：一次性抓下
+     *       大窗口/置顶窗口、卡住的修饰键、前台窗口、光标下的窗口。
+     *       这类问题的现场只存在几秒（重启就没了），事后无法复现，必须能当场取证。</li>
      *   <li>{@code ReproClick} —— 验证「应用运行时别的窗口还能不能收到真实鼠标点击」。
      *       这是用户报告「屏幕被抢占、什么都点不动」时的判据工具：它用 Robot 发真实点击，
      *       覆盖悬浮球常驻 / 浮窗显示中 / 贴边轮询 / 菜单打开四种状态。</li>
@@ -222,7 +225,7 @@ class ArchitectureTest {
      */
     private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
             java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java",
-                    "DpiProbe.java", "WindowProbe.java",
+                    "DpiProbe.java", "WindowProbe.java", "BlockSnapshot.java",
                     "ReproClick.java", "ReproBlock.java", "ReproTray.java");
 
     @Test
