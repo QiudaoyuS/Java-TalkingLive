@@ -154,6 +154,26 @@ public final class AppConfig {
     public static final int DEFAULT_CHAR_GAP_MILLIS = 20;
     public static final int MIN_CHAR_GAP_MILLIS = 0;
     public static final int MAX_CHAR_GAP_MILLIS = 200;
+
+    /**
+     * 热词纠正表：{@code "说的词=想要的写法"}，多项用逗号或换行分隔。
+     *
+     * <p><b>为什么需要它</b>：实测 {@code vosk-model-small-cn-0.22} 的中文词表里
+     * **没有任何英文**（A–Z、AI、APP、CPU 全部不在表内），所以它永远输出不了「AI」；
+     * 而流式预览用的正是小模型。大模型认识 AI/APP/CPU/PDF 这些，但仍可能按字母
+     * 拆成「A I」。拆开的字母串会被 {@code HotwordCorrector} 自动拼回去，
+     * 剩下的情况（说的词与想要的写法之间没有字符级关系）就需要用户显式指出。
+     *
+     * <p>例：{@code "诶爱=AI, 皮迪艾夫=PDF"}。
+     *
+     * <p><b>为什么不做内置近音词表</b>：猜错会**改掉用户本来正确的正文**，
+     * 比少一个字严重。所以只做「用户说了算」的映射。
+     *
+     * <p>它是文本类配置而非数值类，因此对它的校验只有「解析出至少一项」——
+     * 配置串格式不对的项目**静默跳过**，不让热词把整个配置校验带崩。
+     */
+    private String hotwords = "";
+
     private final Ball ball = new Ball();
 
     // ------------------------------------------------------------ 访问器
@@ -238,6 +258,43 @@ public final class AppConfig {
         this.charGapMillis = v;
     }
 
+    /** 热词纠正表原文（{@code 说的词=想要的写法}，逗号或换行分隔）。 */
+    public String hotwords() {
+        return hotwords;
+    }
+
+    public void setHotwords(String v) {
+        this.hotwords = v == null ? "" : v.strip();
+    }
+
+    /**
+     * 解析后的热词表。
+     *
+     * <p>解析放在这里而不是复用 {@code text.HotwordCorrector.parse}：
+     * {@code core} **不得依赖 {@code text}**（{@code ArchitectureTest} 会强制拦住，
+     * §4.5 的测试策略前提）。两处各有一个解析器是刻意接受的小重复 ——
+     * 替代方案是让 core 依赖 text 或把解析器提到共享层，都比一份 5 行的解析更贵。
+     */
+    public java.util.Map<String, String> hotwordMap() {
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+        if (hotwords == null || hotwords.isBlank()) {
+            return out;
+        }
+        for (String item : hotwords.split("[,，;；\\n\\r]+")) {
+            String s = item.strip();
+            int i = s.indexOf('=');
+            if (i <= 0 || i == s.length() - 1) {
+                continue;   // 格式不对的项跳过：热词是锦上添花，不该让配置整体失败
+            }
+            String from = s.substring(0, i).strip();
+            String to = s.substring(i + 1).strip();
+            if (!from.isEmpty() && !to.isEmpty() && !from.equals(to)) {
+                out.put(from, to);
+            }
+        }
+        return out;
+    }
+
     public Ball ball() {
         return ball;
     }
@@ -289,6 +346,9 @@ public final class AppConfig {
         m.put("maxSegmentSeconds", maxSegmentSeconds);
         m.put("itn", itn);
         m.put("charGapMillis", charGapMillis);
+        // 空字符串也写出去：让用户能在配置文件里看到「有热词这个功能」，
+        // 否则一个从没配过热词的人根本不知道它存在。
+        m.put("hotwords", hotwords);
         m.put("ball", ball.toJson());
         return m;
     }
@@ -315,6 +375,7 @@ public final class AppConfig {
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
         c.itn = JsonCodec.bool(m, "itn", true);
         c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
+        c.hotwords = JsonCodec.str(m, "hotwords", "").strip();
         // 连续输入模式（continuousMode / stopWord / continuousIdleSeconds）已被移除：
         // 实测用起来比单段模式更繁琐 —— 说完结束词还要等静音超时才收尾，
         // 而单段模式里「到此为止」本身就立刻停止录音。旧配置里残留的这三个键

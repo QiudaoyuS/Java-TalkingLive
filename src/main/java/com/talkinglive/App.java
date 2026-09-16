@@ -24,6 +24,7 @@ import com.talkinglive.system.MicValidator;
 import com.talkinglive.system.Win32WindowStyles;
 import com.talkinglive.system.WindowsTextInjector;
 import com.talkinglive.text.CommitPolicy;
+import com.talkinglive.text.HotwordCorrector;
 import com.talkinglive.text.PreviewText;
 import com.talkinglive.text.PunctuationProcessor;
 import com.talkinglive.text.TextInjector;
@@ -528,10 +529,17 @@ public final class App {
      * <p>它的第一职责不是标点（标点由精化引擎的原生能力提供，TECH-PLAN §5.3），
      * 而是**把唤醒词与结束词从正文里剔掉**——TECH-PLAN §6.3 把「段落音频以唤醒词开头，
      * 被转出则正文多出『子曰』」列为需验证的正确性风险，这里做兜底。
+     *
+     * <p><b>热词纠正放在标点处理之前</b>：先按用户意图改字，再去处理标点。
+     * 反过来（先标点后纠正）会让「A I」这类被标点切开的字母串躲过拼合。
      */
     private void rebuildPostProcess() {
-        postProcess = new PunctuationProcessor(
-                List.of(config.wakeWord(), config.endWord()), true, true);
+        postProcess = new HotwordCorrector(config.hotwordMap())
+                .andThen(new PunctuationProcessor(
+                        List.of(config.wakeWord(), config.endWord()), true, true));
+        if (!config.hotwordMap().isEmpty()) {
+            log.info("热词纠正已启用：{} 条（内容不记录，只记条数）", config.hotwordMap().size());
+        }
     }
 
     /**
@@ -679,10 +687,14 @@ public final class App {
     }
 
     private void onPreviewText(SpeechRecognizer.Kind kind, String fullText) {
+        // 预览也过后处理链：否则预览条里的「A I」与最终落字的「AI」会不一样，
+        // 用户会以为字被改了。链里的标点处理对预览是幂等的（预览本来就没标点），
+        // 真正起作用的是热词纠正那一层。
+        String text = postProcess.process(fullText);
         if (kind == SpeechRecognizer.Kind.FINAL) {
-            preview.commitFinal(fullText);
+            preview.commitFinal(text);
         } else {
-            preview.setPartial(fullText);
+            preview.setPartial(text);
         }
         String stable = preview.committedText();
         String pending = preview.volatileSuffix();
@@ -866,6 +878,7 @@ public final class App {
                         Logging.prefix(result.text(), Logging.DIAG_PREFIX_CODE_POINTS),
                         Logging.prefix(text, Logging.DIAG_PREFIX_CODE_POINTS));
             }
+            maybeHintLostPreviewEnglish(s.previewText(), text);
             if (text.isEmpty()) {
                 log.info("本段没有可注入的文本（可能是误触发或只有静音），不注入");
                 showNotice("本段没有内容", "没有识别到文字，因此没有注入。若经常如此，请检查麦克风与唤醒词。");
@@ -985,6 +998,41 @@ public final class App {
         preview.reset();
         silence.reset();
         sm.handle(StateMachine.Event.INJECTED);
+    }
+
+    /**
+     * 预览丢英文的提示：小模型（流式预览用的那个）的中文词表里**没有任何英文**
+     * （实测 A–Z、AI、APP、CPU 全部不在表内），所以预览条里看不到英文词，
+     * 而最终落字走大模型 —— 它会补上。
+     *
+     * <p>为什么要专门提示：不提示的话用户会以为「它没听见我说的 AI」，
+     * 而事实是「听见了，只是预览显示不出来」。这类**预期差**比功能缺失更让人困惑，
+     * 而且用户没法自己看出来（预览条上没有任何线索）。
+     *
+     * <p>只在「精化结果里有英文、预览里没有」时提示 —— 也就是确实发生了这件事才说，
+     * 平时不占屏幕。
+     */
+    private void maybeHintLostPreviewEnglish(String previewText, String finalText) {
+        String previewStr = previewText == null ? "" : previewText;
+        String word = asciiWordOf(finalText);
+        if (word.isEmpty()) {
+            return;   // 结果里没有英文词，那就没这回事
+        }
+        // 找不到才提示：大小写可能不同，因此用不区分大小写的包含判断
+        if (previewStr.toLowerCase(java.util.Locale.ROOT)
+                .contains(word.toLowerCase(java.util.Locale.ROOT))) {
+            return;
+        }
+        log.info("预览丢英文：小模型词表不含英文，落字由大模型补上（词长 {} 字符）", word.length());
+        showNotice("预览不含英文词", "小模型的中文词表里没有英文字母，所以预览条显示不出「"
+                + word + "」这类词；最终落字由大模型完成，会正常写入。");
+    }
+
+    /** 取一段文本里第一段连续的 ASCII 字母数字（长度 ≥2 才算「英文词」）。 */
+    private static String asciiWordOf(String text) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("[A-Za-z]{2,}[A-Za-z0-9]*").matcher(text == null ? "" : text);
+        return m.find() ? m.group() : "";
     }
 
     // ------------------------------------------------------------ UI
