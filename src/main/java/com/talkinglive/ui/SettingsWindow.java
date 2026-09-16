@@ -99,6 +99,8 @@ public class SettingsWindow extends JFrame {
     private JLabel wakeMark;
     private JLabel endMark;
     private JLabel problemLabel;
+    /** 「已保存」提示的自动淡出计时器（见 showSaved）。 */
+    private Timer savedTimer;
 
     public SettingsWindow(Host host) {
         super("TalkingLive 设置");
@@ -119,6 +121,20 @@ public class SettingsWindow extends JFrame {
         setLocationRelativeTo(null);
 
         reloadFromConfig();
+        // 构造完成后把状态提示清空：`reloadFromConfig` 会把控件逐个填上配置值，
+        // 其中下拉框/勾选框的赋值会触发监听器 → 走到 commit → 显示「已保存」。
+        // 但用户此刻**什么都没改**，一打开就写「修改已保存」是不实的状态。
+        // 真正的改动会在那次 commit 里重新点亮它。
+        clearStatus();
+    }
+
+    /** 把状态提示恢复成空白（不显示任何结论）。 */
+    private void clearStatus() {
+        savedTimer.stop();
+        problemLabel.setIcon(null);
+        problemLabel.setText(" ");
+        problemLabel.setForeground(Theme.TEXT_FAINT);
+        problemLabel.setToolTipText(null);
     }
 
     // ==================== 表单 ====================
@@ -161,11 +177,17 @@ public class SettingsWindow extends JFrame {
         y = row(p, y, "", autoSendBox, null, null);
         row(p, y, "发送键", sendKeyBox, null, "按哪个键发送；聊天软件想换行就用 Ctrl+Enter");
 
-        // 校验失败提示：只在真的有问题时出现，且占的是**底部固定的一行**，
-        // 不参与布局计算 —— 否则提示一出现界面就跳动。
+        // 改动结果提示（成功或失败都显示在这里）。
+        //
+        // 它在界面上占**固定的一行**：成功时显示「修改已保存并立即生效」，
+        // 失败时显示原因。两者共用同一个标签 —— 用户反馈「没有确认修改按钮」，
+        // 实际缺的不是按钮而是**反馈**（见 commit 的注释）。
+        //
+        // 用固定高度而不是让文字撑开布局：否则提示一出现/消失，窗口就会跳动。
         problemLabel = new JLabel(" ");
         problemLabel.setFont(Theme.font(11));
         problemLabel.setForeground(Theme.ERR);
+        problemLabel.setPreferredSize(new Dimension(300, 20));
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
         c.gridy = 99;
@@ -173,6 +195,10 @@ public class SettingsWindow extends JFrame {
         c.anchor = GridBagConstraints.WEST;
         c.insets = new Insets(6, 0, 0, 0);
         p.add(problemLabel, c);
+
+        // 「已保存」提示 2 秒后自动清掉：留久了会让人以为那是一个需要处理的状态。
+        savedTimer = new Timer(2000, e -> clearStatus());
+        savedTimer.setRepeats(false);
 
         // ---- 行为绑定
         bindText(wakeField, v -> {
@@ -241,13 +267,16 @@ public class SettingsWindow extends JFrame {
         p.setBackground(Theme.BG);
         p.setBorder(new EmptyBorder(0, 18, 12, 18));
 
-        JLabel path = new JLabel("更多参数在 config.json");
+        JLabel path = new JLabel("改动即时生效，无需保存");
         path.setFont(Theme.font(11));
         path.setForeground(Theme.TEXT_FAINT);
-        path.setToolTipText(com.talkinglive.core.AppPaths.configFile().toString());
+        path.setToolTipText("更多参数（含注入间隔等）在 " + com.talkinglive.core.AppPaths.configFile());
         p.add(path, BorderLayout.CENTER);
 
-        JLabel close = new JLabel("关闭", SwingConstants.RIGHT);
+        // 按钮文字是「完成」而不是「关闭」：关掉设置窗口确实等于完成配置，
+        // 而"关闭"会让人以为还有东西没保存。这里和上面那行一起回答同一个疑问 ——
+        // 「我改了到底生效没有、要不要点保存」。
+        JLabel close = new JLabel("完成", SwingConstants.RIGHT);
         close.setFont(Theme.font(12));
         close.setForeground(Theme.ACCENT);
         close.setCursor(java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR));
@@ -264,17 +293,47 @@ public class SettingsWindow extends JFrame {
     // ==================== 提交与刷新 ====================
 
     /**
-     * 一次配置改动：校验 → 保存 → 刷新提示。
+     * 一次配置改动：校验 → 保存 → 把结果**显示出来**。
      *
      * <p>失败时**不破坏当前生效值**（§4.3）—— 显示的是「你刚输入的还不生效，原因是什么」。
+     *
+     * <p><b>成功时也必须显示。</b>用户反馈「设置界面没有确认修改按钮」——
+     * 实际行为是「改完立即生效」，但界面上**一点反馈都没有**：没有保存按钮、
+     * 没有「已保存」提示，页脚只写着「更多参数在 config.json」。
+     * 于是用户会去找那个按钮，找不到就以为"改了没生效"。
+     *
+     * <p>这里刻意**不**改成"暂存 + 点保存才生效"：改完即生效本来就是更好的交互
+     * （少一步、不会忘记保存），用户的真实需求是**知道它生效了**。
+     * 所以给的是可见的确认，而不是一个按钮。
      */
     private void commit(AppConfig candidate) {
         String err = host.applyConfig(candidate);
-        problemLabel.setText(err == null ? " " : err.replace("\n", "  "));
-        if (err != null) {
+        if (err == null) {
+            showSaved();
+        } else {
+            showProblem(err);
             log.info("配置改动被拒绝：{}", err.replace("\n", " / "));
         }
         refreshMarks();
+    }
+
+    /** 显示「已保存」（短暂显示后自动淡出，避免长期占位）。 */
+    private void showSaved() {
+        savedTimer.stop();
+        problemLabel.setIcon(Icons.of(Icons.Kind.CHECK, Icons.SMALL));
+        problemLabel.setText("修改已保存并立即生效");
+        problemLabel.setForeground(Theme.OK);
+        problemLabel.setToolTipText(null);
+        savedTimer.restart();
+    }
+
+    /** 显示失败原因（面向用户，保留到下一次改动）。 */
+    private void showProblem(String err) {
+        savedTimer.stop();
+        problemLabel.setIcon(Icons.of(Icons.Kind.CROSS, Icons.SMALL));
+        problemLabel.setText(err.replace("\n", "  "));
+        problemLabel.setForeground(Theme.ERR);
+        problemLabel.setToolTipText(err);
     }
 
     private void reloadFromConfig() {
