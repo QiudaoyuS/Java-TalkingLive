@@ -25,6 +25,24 @@ public final class MicValidator {
     }
 
     /**
+     * 「这个词能不能逐字拼出来」的判定能力（可选）。
+     *
+     * <p>受限语法接受的是一串 token，而 token 的粒度是**词表条目**。所以一个词
+     * 整体不在词表内，只要它的**每个字**都在，就能拆成单字序列用——这正是
+     * 「用汉字拼出英语发音」的解法（{@code Firay ≈ 飞瑞}）。真实的解析逻辑在
+     * {@code engine.WakePhrase}，这里只保留一个函数式接口，
+     * 好让本类（{@code system} 层，纯逻辑、可单测）不依赖引擎层。
+     *
+     * <p>**只有唤醒词走这条路。** 结束词不拆字：它的后果是"立刻停止录音"，
+     * 而单字在正常说话里出现得太频繁，代价太大（判断在
+     * {@code VoskKeywordDetector} 的构造函数里）。
+     */
+    @FunctionalInterface
+    public interface SpellCheck {
+        boolean canSpell(String word);
+    }
+
+    /**
      * 词表外的常用备选（{@code DESIGN.md} 附录 B.1 的实测结论，见
      * {@link com.talkinglive.core.WordSuggestions}）。
      *
@@ -36,32 +54,68 @@ public final class MicValidator {
 
     private MicValidator() {}
 
-    /** 一个不合法的词。 */
-    public record Problem(String field, String word, String suggestion) {
+    /**
+     * 一个不合法的词。
+     *
+     * @param spelled 该项整体不在词表内，但**逐字都在**——即它其实能用（被拆成单字序列）。
+     *                留着它是因为消息完全不同：不该说"永远不会被识别到"，
+     *                而该告诉用户"要用它就得逐字说清楚"。
+     */
+    public record Problem(String field, String word, String suggestion, boolean spelled) {
+
+        public Problem(String field, String word, String suggestion) {
+            this(field, word, suggestion, false);
+        }
 
         public String describe() {
+            if (spelled) {
+                return field + "「" + word + "」整体不在词表内，已按单字拆开使用"
+                        + "（每个字都在词表内）—— 说这个词时请把每个字都说清楚";
+            }
             String s = field + "「" + word + "」不在 Vosk 模型词表内，永远不会被识别到";
             return suggestion == null || suggestion.isBlank() ? s : s + "；可改用：" + suggestion;
         }
     }
 
-    /** 校验结果。 */
-    public record Result(List<Problem> problems, int checked) {
+    /**
+     * 校验结果。
+     *
+     * @param problems 真正**不合法**的词（功能一定失效）
+     * @param checked  真正查过词表的词数（空词不算查过）
+     * @param spelled  可用但被拆成单字序列的唤醒词——不是问题，但要点出来
+     */
+    public record Result(List<Problem> problems, int checked, List<Problem> spelled) {
+
+        public Result {
+            spelled = spelled == null ? List.of() : List.copyOf(spelled);
+        }
+
+        public Result(List<Problem> problems, int checked) {
+            this(problems, checked, List.of());
+        }
 
         public boolean ok() {
             return problems.isEmpty();
         }
 
-        /** 面向用户的完整消息；通过时返回 null。 */
+        /** 面向用户的完整消息；没有任何要说的时返回 null。 */
         public String message() {
-            if (ok()) {
-                return null;
+            StringBuilder sb = new StringBuilder();
+            if (!problems.isEmpty()) {
+                sb.append("Vosk 对词表外的词是静默忽略的，以下配置永远不会生效：");
+                for (Problem p : problems) {
+                    sb.append("\n  · ").append(p.describe());
+                }
             }
-            StringBuilder sb = new StringBuilder("Vosk 对词表外的词是静默忽略的，以下配置永远不会生效：");
-            for (Problem p : problems) {
-                sb.append("\n  · ").append(p.describe());
+            // 拆字不是错误，但用户必须知道自己被听成的是哪几个字——否则
+            // 「说了没反应」时无从排查。
+            for (Problem p : spelled) {
+                if (sb.length() > 0) {
+                    sb.append('\n');
+                }
+                sb.append("· ").append(p.describe());
             }
-            return sb.toString();
+            return sb.length() == 0 ? null : sb.toString();
         }
 
         public List<String> problemFields() {
@@ -80,7 +134,20 @@ public final class MicValidator {
      * @param pairs  field -> word，例如 {"唤醒词" -> "子曰", "结束词" -> "到此为止"}
      */
     public static Result validate(WordLookup lookup, Map<String, String> pairs) {
+        return validate(lookup, pairs, null);
+    }
+
+    /**
+     * 校验一组词，并允许**唤醒词**走「逐字拆」这条路。
+     *
+     * @param spellCheck 判定"这个词能不能逐字拼出来"；{@code null} 表示不支持拆字
+     *                   （调用方没接引擎时的保守行为：按整词严格校验）。
+     *                   **只对唤醒词生效**，结束词永远要求整词在表内。
+     */
+    public static Result validate(WordLookup lookup, Map<String, String> pairs,
+            SpellCheck spellCheck) {
         List<Problem> problems = new ArrayList<>();
+        List<Problem> spelled = new ArrayList<>();
         int checked = 0;
         for (Map.Entry<String, String> e : pairs.entrySet()) {
             String field = e.getKey();
@@ -98,26 +165,56 @@ public final class MicValidator {
                 // 引向错误的修改方向。重新抛出，让上层报「模型/原生库有问题」。
                 throw ex;
             }
-            if (!in) {
-                problems.add(new Problem(field, word, firstSuggestion(field)));
+            if (in) {
+                continue;
             }
+            // 整体不在表内，但可以逐字拼（只有唤醒词允许）。这类词**能用**，
+            // 所以不进 problems——只在下面 message 里给一句用法提示。
+            if (spellCheck != null
+                    && com.talkinglive.core.WordSuggestions.FIELD_WAKE.equals(field)
+                    && safeSpellCheck(spellCheck, word)) {
+                spelled.add(new Problem(field, word, null, true));
+                continue;
+            }
+            problems.add(new Problem(field, word, firstSuggestion(field)));
         }
         // 两个词相同时单独提示——它不会静默失效，但会立刻自我结束，同样属于
         // 「改了没反应」这一类困惑，放在同一个提示里一起说清楚。
-        String wake = pairs.getOrDefault("唤醒词", "");
-        String end = pairs.getOrDefault("结束词", "");
+        String wake = pairs.getOrDefault(com.talkinglive.core.WordSuggestions.FIELD_WAKE, "");
+        String end = pairs.getOrDefault(com.talkinglive.core.WordSuggestions.FIELD_END, "");
         if (!wake.isBlank() && wake.trim().equals(end.trim())) {
             problems.add(new Problem("结束词", end, "不能与唤醒词相同"));
         }
-        return new Result(problems, checked);
+        return new Result(problems, checked, spelled);
+    }
+
+    /**
+     * 拆字判定失败不能让校验整个崩掉。
+     *
+     * <p>「能不能拆」是**附加**判断：它抛异常说明引擎出了问题，而这个词本身
+     * 已经确知不在表内了，按不合法处理是正确且安全的方向（比放行一个
+     * 可能失效的配置好）。
+     */
+    private static boolean safeSpellCheck(SpellCheck spellCheck, String word) {
+        try {
+            return spellCheck.canSpell(word);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /** 便捷：直接校验唤醒词与结束词。 */
     public static Result validate(WordLookup lookup, String wakeWord, String endWord) {
+        return validate(lookup, wakeWord, endWord, null);
+    }
+
+    /** 便捷：直接校验唤醒词与结束词，并允许唤醒词逐字拆。 */
+    public static Result validate(WordLookup lookup, String wakeWord, String endWord,
+            SpellCheck spellCheck) {
         Map<String, String> pairs = new LinkedHashMap<>();
-        pairs.put("唤醒词", wakeWord);
-        pairs.put("结束词", endWord);
-        return validate(lookup, pairs);
+        pairs.put(com.talkinglive.core.WordSuggestions.FIELD_WAKE, wakeWord);
+        pairs.put(com.talkinglive.core.WordSuggestions.FIELD_END, endWord);
+        return validate(lookup, pairs, spellCheck);
     }
 
     private static String firstSuggestion(String field) {

@@ -210,5 +210,109 @@ class MicValidatorTest {
             assertTrue(s.contains("完毕"));
             assertFalse(s.contains("本段结束"), "备选里不能出现已知不在词表内的词");
         }
+
+        @Test
+        @DisplayName("唤醒词备选里有「飞瑞」——英语唤醒词的示范写法")
+        void spelledWakeSuggestionPresent() {
+            // 「飞瑞」整体不在词表内，但两个字各自都在，所以可拆成 ["飞","瑞"] 使用。
+            // 它摆在候选里不是凑数：中文模型发不出 Firay（词表内拉丁 token 为 0 个），
+            // 用户需要看到一个"英语词写成汉字"的实例才知道这条路存在。
+            assertTrue(MicValidator.SUGGESTIONS.get("唤醒词").contains("飞瑞"));
+        }
+    }
+
+    @Nested
+    @DisplayName("逐字拆开的唤醒词（英语唤醒词的落地方式）")
+    class SpelledWakeWord {
+
+        /** 「飞」与「瑞」都在表内，但「飞瑞」这个整词不在。 */
+        private static final Set<String> SPELLABLE_VOCAB = Set.of(
+                "飞", "瑞", "子曰", "小助手", "到此为止", "结束");
+
+        private static MicValidator.WordLookup lookup() {
+            return MicValidator.ofVocabulary(SPELLABLE_VOCAB);
+        }
+
+        /** 与生产代码同形状的判定：整词不在表内、但每个字都在。 */
+        private static MicValidator.SpellCheck speller() {
+            return word -> word.codePoints()
+                    .mapToObj(cp -> new String(Character.toChars(cp)))
+                    .allMatch(SPELLABLE_VOCAB::contains);
+        }
+
+        @Test
+        @DisplayName("拆得开的唤醒词**通过**校验（否则英语唤醒词根本存不下去）")
+        void spelledWakeWordPasses() {
+            MicValidator.Result r = MicValidator.validate(
+                    lookup(), "飞瑞", "到此为止", speller());
+            assertTrue(r.ok(), "逐字可用的唤醒词不该被拦：" + r.message());
+            assertEquals(0, r.problems().size());
+        }
+
+        @Test
+        @DisplayName("通过但**必须**留下提示：用户要知道自己被拆成了哪几个字")
+        void spelledWakeWordLeavesNotice() {
+            MicValidator.Result r = MicValidator.validate(
+                    lookup(), "飞瑞", "到此为止", speller());
+            assertNotNull(r.message(), "拆字是成功但有话要说，不能静默");
+            assertEquals(1, r.spelled().size());
+            assertTrue(r.spelled().get(0).describe().contains("飞瑞"), r.spelled().get(0).describe());
+            assertTrue(r.spelled().get(0).describe().contains("单字拆开"),
+                    r.spelled().get(0).describe());
+            // 关键：不能被说成"永远不会被识别到"——它明明能用。
+            assertFalse(r.spelled().get(0).describe().contains("永远不会被识别到"),
+                    r.spelled().get(0).describe());
+        }
+
+        @Test
+        @DisplayName("不传拆字能力时按整词严格校验（调用方没接引擎时的保守行为）")
+        void withoutSpellCheckStaysStrict() {
+            MicValidator.Result r = MicValidator.validate(lookup(), "飞瑞", "到此为止");
+            assertFalse(r.ok());
+            assertEquals("唤醒词", r.problems().get(0).field());
+            assertTrue(r.spelled().isEmpty());
+        }
+
+        @Test
+        @DisplayName("**结束词**即使逐字可用也不拆（后果是误停止录音，代价太大）")
+        void endWordNeverSpelled() {
+            // 「结束」是整词在表内；换成「完毕」也在。这里用一个整词不在、
+            // 但字字都在的结束词来验证结束词不会走拆字通道。
+            MicValidator.Result r = MicValidator.validate(
+                    lookup(), "子曰", "飞瑞", speller());
+            assertFalse(r.ok(), "结束词不该允许拆字");
+            assertEquals("结束词", r.problems().get(0).field());
+            assertTrue(r.spelled().isEmpty(), "spelled 只应包含唤醒词");
+        }
+
+        @Test
+        @DisplayName("拆字判定抛异常时按不合法处理（不能放行一个可能失效的配置）")
+        void spellCheckFailureIsSafe() {
+            MicValidator.SpellCheck boom = word -> {
+                throw new IllegalStateException("原生库挂了");
+            };
+            MicValidator.Result r = MicValidator.validate(lookup(), "飞瑞", "到此为止", boom);
+            assertFalse(r.ok());
+            assertEquals("唤醒词", r.problems().get(0).field());
+        }
+
+        @Test
+        @DisplayName("拆不开的词仍然被拦住（逐字可用不是万能通行证）")
+        void genuinelyBadWordStillRejected() {
+            MicValidator.Result r = MicValidator.validate(
+                    lookup(), "小秘书", "到此为止", speller());
+            assertFalse(r.ok(), "「小秘书」的「秘」「书」不在表内，拆不开");
+            assertEquals("唤醒词", r.problems().get(0).field());
+        }
+
+        @Test
+        @DisplayName("没有拆字提示时 message 为 null（成功就是成功，不该有噪声）")
+        void plainSuccessHasNoMessage() {
+            MicValidator.Result r = MicValidator.validate(
+                    lookup(), "小助手", "到此为止", speller());
+            assertTrue(r.ok());
+            assertNull(r.message());
+            assertTrue(r.spelled().isEmpty());
+        }
     }
 }

@@ -118,6 +118,67 @@ class VoskGrammarTest {
     }
 
     @Nested
+    @DisplayName("单字序列语法（英语唤醒词靠这一段）")
+    class SequencedGrammar {
+
+        @Test
+        @DisplayName("唤醒词被拆成单字时按顺序逐个放进语法")
+        void spelledWakeWordBecomesTokenSequence() {
+            // 实测（docs/ENGINE-EXPERIMENT.md §7.5）：["飞瑞",...] 说「飞瑞」得到 [unk]，
+            // 而 ["飞","瑞",...] 得到「飞瑞」——整词不在词表内时只能逐字拆。
+            assertEquals("[\"飞\",\"瑞\",\"到此为止\",\"[unk]\"]",
+                    VoskKeywordDetector.buildGrammar(List.of("飞", "瑞"), List.of("到此为止")));
+        }
+
+        @Test
+        @DisplayName("重复的单字**必须保留**（「飞飞飞」压成一个就是唤醒词失效）")
+        void repeatedTokensKept() {
+            // 实测抓出的 bug：早期按 token 值去重，把 ["飞","飞","飞"] 压成 ["飞"]，
+            // 语法塌成 ["飞","[unk]"] 后说「飞飞飞」永远不命中——静默失效。
+            String g = VoskKeywordDetector.buildGrammar(List.of("飞", "飞", "飞"), List.of());
+            assertEquals("[\"飞\",\"飞\",\"飞\",\"[unk]\"]", g);
+        }
+
+        @Test
+        @DisplayName("结束词与唤醒词撞同一个 token 时只放一次（跨组去重仍要保留）")
+        void crossGroupDeduped() {
+            // 唤醒词「飞瑞」拆出「瑞」，结束词正好也是「瑞」：重复词条会污染
+            // 语言模型估计，所以跨组要去重。与组内保留并不矛盾——
+            // 组内重复是"用户要说两次"，跨组重复是"同一个词条写了两遍"。
+            assertEquals("[\"飞\",\"瑞\",\"[unk]\"]",
+                    VoskKeywordDetector.buildGrammar(List.of("飞", "瑞"), List.of("瑞")));
+        }
+
+        @Test
+        @DisplayName("token 序列里的空白与空串被清理")
+        void tokenSequenceSanitised() {
+            assertEquals("[\"飞\",\"瑞\",\"[unk]\"]",
+                    VoskKeywordDetector.buildGrammar(
+                            java.util.Arrays.asList(" 飞 ", null, "", "瑞"), null));
+        }
+
+        @Test
+        @DisplayName("null 序列等价于空序列（不抛异常）")
+        void nullSequences() {
+            assertEquals("[\"飞\",\"[unk]\"]",
+                    VoskKeywordDetector.buildGrammar(List.of("飞"), (List<String>) null));
+            assertEquals("[\"[unk]\"]",
+                    VoskKeywordDetector.buildGrammar((List<String>) null, null));
+        }
+
+        @Test
+        @DisplayName("token 里的引号仍被转义（语法必须是合法 JSON）")
+        void tokenEscaping() {
+            String g = VoskKeywordDetector.buildGrammar(List.of("飞"), List.of("a\"b"));
+            Object parsed = JsonCodec.parse(g);
+            @SuppressWarnings("unchecked")
+            List<Object> list = (List<Object>) parsed;
+            assertEquals("飞", list.get(0));
+            assertEquals("a\"b", list.get(1));
+        }
+    }
+
+    @Nested
     @DisplayName("词表校验异常（附录 C 的静默失效）")
     class VocabularyException {
 

@@ -8,12 +8,14 @@ import com.talkinglive.core.DictationSession;
 import com.talkinglive.core.Logging;
 import com.talkinglive.core.StateMachine;
 import com.talkinglive.core.StatusLine;
+import com.talkinglive.core.WordSuggestions;
 import com.talkinglive.engine.SpeechRecognizer;
 import com.talkinglive.engine.TextRefiner;
 import com.talkinglive.engine.TextRefiners;
 import com.talkinglive.engine.VoskKeywordDetector;
 import com.talkinglive.engine.VoskModel;
 import com.talkinglive.engine.VoskSpeechRecognizer;
+import com.talkinglive.engine.WakePhrase;
 import com.talkinglive.engine.WakeWordDetector;
 import com.talkinglive.system.CaretTracker;
 import com.talkinglive.system.DpiScale;
@@ -122,6 +124,14 @@ public final class App {
     private final List<String> notices = new java.util.concurrent.CopyOnWriteArrayList<>();
     private volatile boolean paused;
     private volatile MicValidator.Result wordCheck;
+    /**
+     * 上一次配置保存**成功**时想告诉用户的话；null 表示无话可说。
+     *
+     * <p>目前只有一个来源：唤醒词整体不在词表内、被逐字拆成了单字序列。
+     * 它必须与"失败原因"分开走——合在一起会让每次保存都显示"修改被拒绝"，
+     * 正好把事情说反（功能是可用的）。
+     */
+    private volatile String wakeNotice;
     private volatile String micError;
     private volatile String lastInjectionError;
 
@@ -458,13 +468,21 @@ public final class App {
 
         // 词表校验：§4.3 的硬要求。失败即拒绝该配置并提示（附录 C）。
         try {
-            wordCheck = MicValidator.validate(voskModel::findWord, config.wakeWord(), config.endWord());
+            wordCheck = MicValidator.validate(voskModel::findWord,
+                    wakeEndPairs(config.wakeWord(), config.endWord()),
+                    word -> WakePhrase.resolve(voskModel::findWord, word).isPresent());
             if (!wordCheck.ok()) {
                 String msg = wordCheck.message();
                 log.error("词表校验失败：{}", msg.replace("\n", " / "));
                 notices.add(msg);
             } else {
                 log.info("词表校验通过：wake={} end={}", config.wakeWord(), config.endWord());
+            }
+            // 拆字提示独立于成败：唤醒词被拆成单字序列时 wordCheck.ok() 为 true，
+            // 但用户必须知道自己被听成的是哪几个字，否则"说了没反应"无从排查。
+            // 走日志而不是 notices —— 它是提示，不该弹一个"出错了"样子的框。
+            if (wordCheck.ok() && wordCheck.message() != null) {
+                log.info("{}", wordCheck.message().replace("\n", " / "));
             }
         } catch (RuntimeException e) {
             log.error("词表校验无法执行：{}", e.toString());
@@ -1311,8 +1329,25 @@ public final class App {
 
     // ------------------------------------------------------------ 配置
 
+    /**
+     * 唤醒词/结束词 → 词表校验用的 field -> word 映射。
+     *
+     * <p>字段名用 {@link WordSuggestions} 的常量而不是就地写字面量：{@code MicValidator}
+     * 要靠这个字符串决定"哪些字段允许拆字"，两边各写一遍迟早会不一致
+     * （不一致的后果是唤醒词被当成结束词那样严格校验，拆字功能悄悄失效）。
+     */
+    private static java.util.Map<String, String> wakeEndPairs(String wakeWord, String endWord) {
+        java.util.Map<String, String> pairs = new java.util.LinkedHashMap<>();
+        pairs.put(WordSuggestions.FIELD_WAKE, wakeWord);
+        pairs.put(WordSuggestions.FIELD_END, endWord);
+        return pairs;
+    }
+
     /** 由设置窗口调用：校验 → 保存 → 作用于运行中的组件。 */
     private String applyConfig(AppConfig candidate) {
+        // 先清掉上一次的提示：不保留的话，换成正常唤醒词后设置窗口仍会显示
+        // 上一轮的"已拆开使用"，用户会以为改没生效。
+        wakeNotice = null;
         try {
             candidate.validate();
         } catch (AppConfig.ConfigException e) {
@@ -1321,13 +1356,18 @@ public final class App {
         // 词表校验（附录 C）：只有在模型可用时才能查，查不了不阻止保存但会提示。
         if (voskModel != null) {
             try {
-                java.util.Map<String, String> pairs = new java.util.LinkedHashMap<>();
-                pairs.put("唤醒词", candidate.wakeWord());
-                pairs.put("结束词", candidate.endWord());
-                MicValidator.Result r = MicValidator.validate(voskModel::findWord, pairs);
+                MicValidator.Result r = MicValidator.validate(voskModel::findWord,
+                        wakeEndPairs(candidate.wakeWord(), candidate.endWord()),
+                        word -> WakePhrase.resolve(voskModel::findWord, word).isPresent());
                 wordCheck = r;
                 if (!r.ok()) {
                     return r.message();
+                }
+                // 唤醒词被逐字拆开时不是错误，但要如实告诉用户拆成了哪几个字。
+                // 走 wakeNotice 而不是返回值：返回值非 null 会被当成失败。
+                if (r.message() != null) {
+                    wakeNotice = r.message();
+                    log.info("{}", wakeNotice.replace("\n", " / "));
                 }
             } catch (RuntimeException e) {
                 log.warn("词表校验无法执行，配置仍被保存：{}", e.toString());
@@ -1391,8 +1431,18 @@ public final class App {
         }
 
         @Override
+        public String lastApplyNotice() {
+            return App.this.wakeNotice;
+        }
+
+        @Override
         public Boolean wordInVocabulary(String word) {
             return App.this.wordInVocabulary(word);
+        }
+
+        @Override
+        public Boolean canSpellWord(String word) {
+            return App.this.canSpellWord(word);
         }
 
         @Override
@@ -1446,6 +1496,30 @@ public final class App {
             return voskModel.findWordId(word) >= 0;
         } catch (RuntimeException e) {
             log.warn("词表查询失败：{}", e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * 词能否**逐字拆开**使用（整词不在表内、但每个字都在）。
+     *
+     * <p>这是"英语唤醒词"的判定入口：中文模型永远发不出 {@code Firay}
+     * （词表内拉丁 token 为 0 个），但「飞瑞」能——只要每个字单独在表内，
+     * 受限语法就能用单字序列拼出这个词表里不存在的发音。
+     *
+     * @return null 表示模型未就绪、无法判断（界面显示「?」而不是误判为不可用）
+     */
+    private Boolean canSpellWord(String word) {
+        if (voskModel == null) {
+            return null;
+        }
+        if (word == null || word.isBlank()) {
+            return Boolean.FALSE;
+        }
+        try {
+            return WakePhrase.resolve(voskModel::findWord, word).isPresent();
+        } catch (RuntimeException e) {
+            log.warn("拆字判定失败：{}", e.toString());
             return null;
         }
     }

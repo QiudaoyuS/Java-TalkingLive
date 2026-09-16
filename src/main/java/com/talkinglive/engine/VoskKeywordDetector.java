@@ -26,7 +26,7 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     private static final Logger log = LoggerFactory.getLogger(VoskKeywordDetector.class);
 
     /** 受限语法必须显式包含这个符号，否则语法外的语音会让引擎行为不可预期。 */
-    private static final String UNK = "[unk]";
+    private static final String UNK = WakePhrase.UNK;
 
     /**
      * 每积累这么多秒音频就重置一次识别器。
@@ -39,6 +39,13 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     private static final double BYTES_PER_SECOND = 16000 * 2;
 
     private final VoskModel.Recognizer recognizer;
+    /**
+     * 唤醒词解析结果：整词在词表内就是它本身，否则是逐字拆开后的单字序列。
+     * 拆字让「用汉字拼出英语发音」成为可能，见 {@link WakePhrase}。
+     */
+    private final WakePhrase wakePhrase;
+    /** 结束词解析结果；**只允许整词**，不拆字（理由见构造函数）。 */
+    private final WakePhrase endPhrase;
     private final String wakeWord;
     private final String endWord;
     private final HitListener listener;
@@ -55,8 +62,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
      * 构造。
      *
      * @param model    已加载的模型
-     * @param wakeWord 唤醒词
-     * @param endWord  结束词
+     * @param wakeWord 唤醒词；整词不在词表内时允许逐字拆（英语唤醒词靠这个）
+     * @param endWord  结束词；**必须整词在词表内**，不拆字
      * @param listener 命中回调（可能在音频线程上被调用）
      * @throws IOException               识别器创建失败
      * @throws VocabularyException       词不在模型词表内（附录 C）
@@ -68,21 +75,42 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         this.listener = listener;
 
         Map<String, String> unknown = new LinkedHashMap<>();
-        if (this.wakeWord.isEmpty()) {
-            unknown.put("唤醒词", "（空）");
-        } else if (!model.findWord(this.wakeWord)) {
-            unknown.put("唤醒词", this.wakeWord);
+
+        // 唤醒词：先整词，不在表内再逐字拆。拆开是为了支持「用汉字拼出英语发音」——
+        // 实测中文模型永远发不出 Firay（词表内拉丁 token 为 0 个），但「飞瑞」
+        // 这两个字各自都在表内，只要拆成 ["飞","瑞"] 就能匹配上说出口的 "Firay"。
+        this.wakePhrase = this.wakeWord.isEmpty()
+                ? null
+                : WakePhrase.resolve(model::findWord, this.wakeWord).orElse(null);
+        if (this.wakePhrase == null) {
+            unknown.put("唤醒词", this.wakeWord.isEmpty()
+                    ? "（空）"
+                    : this.wakeWord + wakeWordHint(this.wakeWord));
+        } else if (this.wakePhrase.spelled()) {
+            log.info("唤醒词「{}」整体不在词表内，已按单字拆开：{}（{} 个 token）"
+                    + "—— 说这个词时每个字都要说清楚",
+                    this.wakePhrase.display(), this.wakePhrase.describeTokens(),
+                    this.wakePhrase.tokenCount());
         }
-        if (this.endWord.isEmpty()) {
-            unknown.put("结束词", "（空）");
-        } else if (!model.findWord(this.endWord)) {
-            unknown.put("结束词", this.endWord);
+
+        // 结束词：**故意不拆字**。拆字会放宽匹配（每个字都常见），而结束词命中的
+        // 后果是"立刻停止录音"——一个常见字（比如「结」「束」）被随口说出来就会
+        // 误停止，代价比"结束词得换个说法"大得多。整词严格匹配。
+        this.endPhrase = this.endWord.isEmpty()
+                ? null
+                : (model.findWord(this.endWord)
+                        ? new WakePhrase(this.endWord, java.util.List.of(this.endWord))
+                        : null);
+        if (this.endPhrase == null) {
+            unknown.put("结束词", this.endWord.isEmpty() ? "（空）" : this.endWord);
         }
+
         if (!unknown.isEmpty()) {
             throw new VocabularyException(unknown);
         }
 
-        String grammar = buildGrammar(this.wakeWord, this.endWord);
+        String grammar = buildGrammar(
+                this.wakePhrase.tokens(), this.endPhrase.tokens());
         if (!model.supportsRuntimeGrammar()) {
             // 受限语法是唤醒词可自定义的前提（附录 B.2：只有小模型支持运行时改词表）。
             // 走到这里说明装的是大模型或词表静态的模型 —— 必须明确拒绝，不能假装能用。
@@ -95,6 +123,35 @@ public final class VoskKeywordDetector implements WakeWordDetector {
                 this.wakeWord, this.endWord, grammar);
         this.recognizer = model.createGrammarRecognizer(16000.0f, grammar);
     }
+
+    /**
+     * 唤醒词用不了时的附加提示。
+     *
+     * <p>按**为什么用不了**分开给，因为两种情况用户该做的事完全不同：
+     * <ul>
+     *   <li><b>含拉丁字母</b>：中文模型的词表里拉丁 token 数量为 0（实测），
+     *       所以任何英文单词都不可能被识别到。用户输入 {@code Firay} 时最需要
+     *       知道的不是"不在词表内"，而是"请写它的**汉字发音**"。</li>
+     *   <li><b>实测已知不可用</b>：这些词每个字单独都在表内，逐字拆看似可行，
+     *       但真实语音里几乎不可能稳定命中（见 {@code WordSuggestions.KNOWN_ABSENT}）。
+     *       不点破的话，用户会以为是自己的问题。</li>
+     * </ul>
+     */
+    private static String wakeWordHint(String word) {
+        if (HAS_LATIN.matcher(word).find()) {
+            return "（中文模型认不出英语单词，词表里没有任何拉丁词；"
+                    + "请写它的**汉字发音**，例如 Firay 写成「飞瑞」——"
+                    + "只要每个字都在词表内就能用）";
+        }
+        if (com.talkinglive.core.WordSuggestions.KNOWN_ABSENT.contains(word)) {
+            return "（这个词即使逐字拆开也不可用：拆成单字后要连着说对每个字才算命中，"
+                    + "真实语音里几乎不会稳定触发。请换成上面列出的词）";
+        }
+        return "";
+    }
+
+    private static final java.util.regex.Pattern HAS_LATIN =
+            java.util.regex.Pattern.compile("[A-Za-z]");
 
     /**
      * 构造受限语法。
@@ -115,19 +172,62 @@ public final class VoskKeywordDetector implements WakeWordDetector {
      * 而用户说唤醒词的频率远高于结束词。
      */
     public static String buildGrammar(String wakeWord, String endWord) {
-        java.util.List<String> phrases = new java.util.ArrayList<>();
         String w = wakeWord == null ? "" : wakeWord.trim();
         String e = endWord == null ? "" : endWord.trim();
-        if (!w.isEmpty()) {
-            phrases.add(w);
+        return buildGrammar(
+                w.isEmpty() ? java.util.List.of() : java.util.List.of(w),
+                e.isEmpty() ? java.util.List.of() : java.util.List.of(e));
+    }
+
+    /**
+     * 构造受限语法（token 序列版本）。
+     *
+     * <p>唤醒词可能被拆成多个单字 token（见 {@link WakePhrase}），所以这里收的是
+     * **序列**而不是单个词：
+     * <pre>
+     * buildGrammar(List.of("飞","瑞"), List.of("到此为止"))
+     *   → ["飞","瑞","到此为止","[unk]"]
+     * </pre>
+     *
+     * <p>唤醒词的 token 一定排在最前面（受限语法下引擎偏向靠前的词）。
+     *
+     * @param wakeTokens 唤醒词的 token 序列；可为空
+     * @param endTokens  结束词的 token 序列；可为空
+     */
+    public static String buildGrammar(
+            java.util.List<String> wakeTokens, java.util.List<String> endTokens) {
+        java.util.List<String> phrases = new java.util.ArrayList<>();
+        // 唤醒词的 token 原样按顺序放进去，**组内不去重**：唤醒词被拆成单字时
+        // （见 WakePhrase），同一个字重复出现是有意义的 —— 「飞飞飞」必须是
+        // ["飞","飞","飞"]，压成一个 "飞" 会让这个唤醒词彻底失效
+        // （实测：语法塌成 ["飞","[unk]"] 后说「飞飞飞」不命中）。
+        for (String raw : nullToEmpty(wakeTokens)) {
+            String tok = trim(raw);
+            if (!tok.isEmpty()) {
+                phrases.add(tok);
+            }
         }
-        if (!e.isEmpty() && !e.equals(w)) {
-            phrases.add(e);
+        // 结束词与唤醒词共用词表时只放一次：重复词条会污染语言模型估计。
+        // 实测的撞车例子：唤醒词「飞瑞」拆出「瑞」，结束词正好也是「瑞」。
+        java.util.Set<String> seen = new java.util.LinkedHashSet<>(phrases);
+        for (String raw : nullToEmpty(endTokens)) {
+            String tok = trim(raw);
+            if (!tok.isEmpty() && seen.add(tok)) {
+                phrases.add(tok);
+            }
         }
         phrases.add(UNK);
         return phrases.stream()
                 .map(VoskKeywordDetector::quote)
                 .collect(java.util.stream.Collectors.joining(",", "[", "]"));
+    }
+
+    private static java.util.List<String> nullToEmpty(java.util.List<String> list) {
+        return list == null ? java.util.List.of() : list;
+    }
+
+    private static String trim(String s) {
+        return s == null ? "" : s.trim();
     }
 
     /** JSON 字符串字面量转义。语法里会出现中文（无需转义）但也要挡住引号与反斜杠。 */
@@ -222,7 +322,8 @@ public final class VoskKeywordDetector implements WakeWordDetector {
      * 结果文本 → 命中。
      *
      * <p>用包含判断而不是相等：受限语法下引擎可能把一个词切成两段，或者结果里
-     * 夹着 {@code [unk]}。先查结束词再查唤醒词——两者的字不重叠，但真出现
+     * 夹着 {@code [unk]}。**单字序列走严格相等**，细节见 {@link WakePhrase#matches}。
+     * 先查结束词再查唤醒词——两者的字不重叠，但真出现
      * 同时包含的情况时，结束词在语义上更紧急（避免把已经说完的段落继续录下去）。
      */
     private Hit match(String text) {
@@ -233,12 +334,14 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         if (t.isEmpty()) {
             return null;
         }
-        // 先查结束词再查唤醒词——两者的字不重叠，但真出现同时包含的情况时，
-        // 结束词在语义上更紧急（避免把已经说完的段落继续录下去）。
-        if (!endWord.isEmpty() && t.contains(endWord)) {
+        // 判定交给 WakePhrase：整词用包含判断（引擎可能把词切成两段，或结果里夹
+        // [unk]），单字序列用整体相等判断（拆字后每个字都常见，放宽成包含会明显
+        // 抬高误唤醒率）。先查结束词再查唤醒词——两者的字不重叠，但真出现同时
+        // 包含的情况时，结束词在语义上更紧急（避免把已经说完的段落继续录下去）。
+        if (endPhrase != null && endPhrase.matches(t)) {
             return new Hit(Kind.END, endWord, 0);
         }
-        if (!wakeWord.isEmpty() && t.contains(wakeWord)) {
+        if (wakePhrase != null && wakePhrase.matches(t)) {
             return new Hit(Kind.WAKE, wakeWord, 0);
         }
         return null;
@@ -264,8 +367,11 @@ public final class VoskKeywordDetector implements WakeWordDetector {
 
     @Override
     public String describe() {
-        return "小 Vosk · 受限语法（wake=" + wakeWord + ", end=" + endWord
-                + "；长时语音门 " + WakeGate.MAX_SPEECH_RUN_SECONDS + "s 挡外部音频）";
+        StringBuilder sb = new StringBuilder("小 Vosk · 受限语法（wake=");
+        sb.append(wakePhrase == null ? wakeWord : wakePhrase);
+        sb.append(", end=").append(endPhrase == null ? endWord : endPhrase);
+        sb.append("；长时语音门 ").append(WakeGate.MAX_SPEECH_RUN_SECONDS).append("s 挡外部音频）");
+        return sb.toString();
     }
 
     @Override

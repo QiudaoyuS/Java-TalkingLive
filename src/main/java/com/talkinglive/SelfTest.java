@@ -290,6 +290,33 @@ public final class SelfTest {
             add("engine", "受限语法形状正确（纯数组，非 phrase_list 对象）", grammarOk, g);
             add("engine", "模型支持运行时词表（附录 B.2 的关键前提）", model.supportsRuntimeGrammar(),
                     "HCLr.fst + Gr.fst 均存在 —— 只有小模型能改运行时词表");
+
+            // --- 英语唤醒词路线（实测结论，见 docs/ENGINE-EXPERIMENT.md §7.5）---
+            //
+            // 中文模型的词表里**拉丁 token 为 0 个**，所以 Firay 这类英文词永远不可能
+            // 被识别到；但「飞瑞」这两个字各自都在表内，受限语法用单字序列
+            // ["飞","瑞"] 就能匹配上说出口的 "Firay"（实测稳定命中）。
+            // 这一段把它固化成每次自检都跑一遍的断言 —— 否则哪天词表/模型换了，
+            // 用户只会看到"唤醒词没反应"，而程序毫无察觉。
+            var spelling = com.talkinglive.engine.WakePhrase.resolve(model::findWord, "飞瑞");
+            add("engine", "「飞瑞」可逐字拆开（英语唤醒词的落地方式）",
+                    spelling.isPresent() && spelling.get().spelled(),
+                    spelling.map(p -> "tokens=" + p.describeTokens()
+                                    + "、语法=" + com.talkinglive.engine.VoskKeywordDetector
+                                            .buildGrammar(p.tokens(), java.util.List.of("到此为止")))
+                            .orElse("拆不开！英语唤醒词这条路断了"));
+            add("engine", "整词在表内时不拆（「小助手」应保持整词）",
+                    com.talkinglive.engine.WakePhrase.resolve(model::findWord, "小助手")
+                            .map(p -> !p.spelled()).orElse(false),
+                    "拆字只在整词不在表内时才用");
+            add("engine", "「本段结束」不被拆字绕过（附录 B.1 的结论仍然有效）",
+                    com.talkinglive.engine.WakePhrase.resolve(model::findWord, "本段结束").isEmpty(),
+                    "它的四个字虽在表内，但拆开后真实语音里无法稳定命中");
+            MicValidator.Result spelledCheck = MicValidator.validate(model::findWord,
+                    "飞瑞", "到此为止",
+                    word -> com.talkinglive.engine.WakePhrase.resolve(model::findWord, word).isPresent());
+            add("engine", "词表校验放行逐字可用的唤醒词", spelledCheck.ok(),
+                    spelledCheck.problems().isEmpty() ? "已放行并留下提示" : spelledCheck.message());
         } catch (Exception e) {
             add("engine", "Vosk 模型加载", false,
                     e.getMessage() + "（模型缺失时产品仍应常驻并明确提示）");

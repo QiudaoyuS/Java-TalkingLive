@@ -82,8 +82,31 @@ public class SettingsWindow extends JFrame {
          */
         String applyConfig(AppConfig candidate);
 
+        /**
+         * 上一次 {@link #applyConfig} **成功**时想要告诉用户的话；没有则返回 null。
+         *
+         * <p>为什么需要一条独立于返回值的通道：有一种"成功了但用户必须知道"的情况——
+         * 唤醒词整体不在词表内、被逐字拆成了单字序列（见 {@code engine.WakePhrase}）。
+         * 这既不是错误（功能可用，不该显示红 ✗），也不该被静默吞掉
+         * （用户不知道要被听成哪几个字，出问题时无从排查）。
+         * 早期把它并进返回值，结果是**每次都显示"修改被拒绝"**，正好把事情说反了。
+         */
+        default String lastApplyNotice() {
+            return null;
+        }
+
         /** 某个词是否在当前模型的词表内；模型不可用时返回 null（无法校验）。 */
         Boolean wordInVocabulary(String word);
+
+        /**
+         * 某个词能否**逐字拆开**使用（整词不在词表内、但每个字都在）。
+         *
+         * <p>只对唤醒词有意义：结束词不允许拆字（后果是"立刻停止录音"，
+         * 单字太容易误触发）。返回 null 表示模型未就绪、无法判断。
+         */
+        default Boolean canSpellWord(String word) {
+            return null;
+        }
 
         /** 窗口显示/隐藏时通知（用于暂停前台窗口监听）。 */
         default void onVisibilityChanged(boolean visible) {}
@@ -308,11 +331,18 @@ public class SettingsWindow extends JFrame {
      */
     private void commit(AppConfig candidate) {
         String err = host.applyConfig(candidate);
-        if (err == null) {
-            showSaved();
-        } else {
+        if (err != null) {
             showProblem(err);
             log.info("配置改动被拒绝：{}", err.replace("\n", " / "));
+        } else {
+            String notice = host.lastApplyNotice();
+            if (notice == null || notice.isBlank()) {
+                showSaved();
+            } else {
+                // 成功了，但有话要说（唤醒词被逐字拆开）。不能显示成错误：
+                // 功能是可用的，显示红 ✗ 会让用户以为自己配错了。
+                showNotice(notice);
+            }
         }
         refreshMarks();
     }
@@ -325,6 +355,42 @@ public class SettingsWindow extends JFrame {
         problemLabel.setForeground(Theme.OK);
         problemLabel.setToolTipText(null);
         savedTimer.restart();
+    }
+
+    /**
+     * 显示「成功但有话要说」。
+     *
+     * <p>用警告色而不是错误色或成功色：它确实生效了（不是红），但也确实不是
+     * 用户输入的那个整词（不是绿）——唤醒词被拆成单字后，用户必须把每个字都说清楚，
+     * 否则会出现"说了没反应"而以为自己配错了。
+     *
+     * <p>**不自动淡出**：它携带的是行动指引（该怎么念），用户需要能反复看。
+     */
+    private void showNotice(String notice) {
+        savedTimer.stop();
+        problemLabel.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
+        problemLabel.setText(shortNotice(notice));
+        problemLabel.setForeground(Theme.WARN);
+        problemLabel.setToolTipText(notice);
+    }
+
+    /**
+     * 把提示压缩到一行能放下的长度。
+     *
+     * <p>{@code problemLabel} 是按固定高度排版的（见字段注释：让文字撑开布局会让
+     * 窗口跳动），所以放不下整段话。原文不丢——它整段挂在 tooltip 上，
+     * 鼠标停上去就能看到完整解释。
+     */
+    private static String shortNotice(String notice) {
+        String one = notice.replace("\n", "  ").trim();
+        // 取到第一个句号/分号为止：提示正文的第一句就已经说清了"你输入的词被怎么处理了"。
+        for (String stop : new String[] {"。", "；", ";"}) {
+            int i = one.indexOf(stop);
+            if (i > 0) {
+                return one.substring(0, i);
+            }
+        }
+        return one.length() <= 42 ? one : one.substring(0, 42) + "…";
     }
 
     /** 显示失败原因（面向用户，保留到下一次改动）。 */
@@ -368,22 +434,50 @@ public class SettingsWindow extends JFrame {
         silenceBox.setSelectedItem(label);
     }
 
-    /** 唤醒词 / 结束词是否真的在模型词表内（附录 C 的静默失效就靠这一行拦住）。 */
+    /** 唤醒词 / 结束词是否真的能被识别（附录 C 的静默失效就靠这一行拦住）。 */
     private void refreshMarks() {
-        applyMark(wakeMark, wakeField == null ? host.config().wakeWord() : wakeField.getText());
-        applyMark(endMark, endField == null ? host.config().endWord() : endField.getText());
+        applyMark(wakeMark,
+                wakeField == null ? host.config().wakeWord() : wakeField.getText(), true);
+        applyMark(endMark, endField == null ? host.config().endWord() : endField.getText(), false);
     }
 
     private void applyMark(JLabel label, String word) {
+        applyMark(label, word, false);
+    }
+
+    /**
+     * 唤醒词/结束词的行尾标记。
+     *
+     * @param wakeWord 是否是唤醒词那一行；只有唤醒词允许"逐字拆开用"
+     */
+    private void applyMark(JLabel label, String word, boolean wakeWord) {
         if (label == null) {
             return;
         }
-        Boolean in = word == null || word.isBlank() ? Boolean.TRUE : host.wordInVocabulary(word);
+        if (word == null || word.isBlank()) {
+            label.setIcon(Icons.of(Icons.Kind.CHECK, Icons.SMALL));
+            label.setText("");
+            label.setToolTipText("在词表内，可以识别");
+            return;
+        }
+        Boolean in = host.wordInVocabulary(word);
         if (in == null) {
             label.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
             label.setText("");
             label.setToolTipText("模型未就绪，无法校验「" + word + "」");
             return;
+        }
+        // 整词不在表内，但逐字都在 → **能用**（被拆成单字序列）。
+        // 标成警告而不是对勾：它确实不是原样的整词，用户得把每个字说清楚。
+        if (!in && wakeWord) {
+            Boolean spellable = host.canSpellWord(word);
+            if (Boolean.TRUE.equals(spellable)) {
+                label.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
+                label.setText("");
+                label.setToolTipText("「" + word + "」整体不在词表内，但每个字都在 —— "
+                        + "会按单字拆开使用，说的时候请把每个字都说清楚");
+                return;
+            }
         }
         // 图标走 Icons（矢量、随 DPI 缩放），不用「✓」「✗」字符 ——
         // 字符尺寸由字体决定、矢量图标由像素决定，混用就会一大一小
