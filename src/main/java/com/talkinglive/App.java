@@ -1454,6 +1454,11 @@ public final class App {
         }
 
         @Override
+        public java.util.List<String> configWarnings() {
+            return App.this.config.warnings();
+        }
+
+        @Override
         public Boolean wordInVocabulary(String word) {
             return App.this.wordInVocabulary(word);
         }

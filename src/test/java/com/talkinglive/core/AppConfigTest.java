@@ -203,7 +203,11 @@ class AppConfigTest {
             c.setSilenceSeconds(0);
             List<String> w = c.warnings();
             assertEquals(1, w.size(), w.toString());
-            assertTrue(w.get(0).contains("单段最长时长"), w.get(0));
+            // 关键信息必须在**一句话之内**说清：状态标签只有两行（约 560px），
+            // 而这条曾经写到 694px —— 结果被省略号吃掉"60 秒"和"截断"这两个后果。
+            assertTrue(w.get(0).contains("60"), w.get(0));
+            assertTrue(w.get(0).contains("截断"), w.get(0));
+            assertTrue(w.get(0).length() <= 40, "提醒要短到两行放得下：" + w.get(0).length());
             // 关键：它是提醒不是拒绝
             c.validate();
         }

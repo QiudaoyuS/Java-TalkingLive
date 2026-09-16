@@ -2,6 +2,7 @@ package com.talkinglive.ui;
 
 import com.talkinglive.core.AppConfig;
 import com.talkinglive.system.MicValidator;
+import java.util.List;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.Dimension;
@@ -100,6 +101,16 @@ public class SettingsWindow extends JFrame {
             return null;
         }
 
+        /**
+         * 当前配置的**提醒**（合法但可能让用户意外的组合）。
+         *
+         * <p>与 {@link #applyConfig} 的失败原因区分开：那些是"不合法、被拒绝"，这些是
+         * "能用、但你八成想知道"。窗口一打开就要显示，所以不能等用户改一次配置。
+         */
+        default List<String> configWarnings() {
+            return List.of();
+        }
+
         /** 某个词是否在当前模型的词表内；模型不可用时返回 null（无法校验）。 */
         Boolean wordInVocabulary(String word);
 
@@ -127,6 +138,13 @@ public class SettingsWindow extends JFrame {
     private JLabel wakeMark;
     private JLabel endMark;
     private JLabel problemLabel;
+    /**
+     * 正在回填控件（见 {@link #reloadFromConfig}）。
+     *
+     * <p>回填会给控件赋值，而控件上的监听器分不清"被赋值"和"用户改了" ——
+     * 没有这个标志时，设置窗口一构造就会保存两次配置。
+     */
+    private boolean loading;
     /** 「已保存」提示的自动淡出计时器（见 showSaved）。 */
     private Timer savedTimer;
 
@@ -149,11 +167,11 @@ public class SettingsWindow extends JFrame {
         setLocationRelativeTo(null);
 
         reloadFromConfig();
-        // 构造完成后把状态提示清空：`reloadFromConfig` 会把控件逐个填上配置值，
-        // 其中下拉框/勾选框的赋值会触发监听器 → 走到 commit → 显示「已保存」。
-        // 但用户此刻**什么都没改**，一打开就写「修改已保存」是不实的状态。
-        // 真正的改动会在那次 commit 里重新点亮它。
-        clearStatus();
+        // 构造完成后把状态提示换成"当前配置的提醒"（没有就清空）。
+        // `reloadFromConfig` 会把控件逐个填上配置值，其中下拉框/勾选框的赋值会触发
+        // 监听器 → 走到 commit → 显示「已保存」。但用户此刻**什么都没改**，
+        // 一打开就写「修改已保存」是不实的状态。真正的改动会在那次 commit 里重新点亮它。
+        showConfigWarnings();
     }
 
     /** 把状态提示恢复成空白（不显示任何结论）。 */
@@ -163,6 +181,28 @@ public class SettingsWindow extends JFrame {
         problemLabel.setText(" ");
         problemLabel.setForeground(Theme.TEXT_FAINT);
         problemLabel.setToolTipText(null);
+    }
+
+    /**
+     * 打开窗口时把"当前配置的提醒"显示出来（如果有）。
+     *
+     * <p>这些提醒以前**只写进日志**，界面上完全看不到 —— 用户只能自己去翻日志文件。
+     * 而它们说的恰恰是"你的配置能用，但结果可能不是你要的"（例如结束词留空 +
+     * 静音也关着 → 只剩 60 秒上限收尾），属于必须让人看见的信息。
+     *
+     * <p>与"已保存"不同，**不自动淡出**：它是当前配置的状态，不是一次操作的结果。
+     */
+    private void showConfigWarnings() {
+        List<String> warnings = host.configWarnings();
+        if (warnings.isEmpty()) {
+            clearStatus();
+            return;
+        }
+        savedTimer.stop();
+        problemLabel.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
+        setStatusText(String.join(" ", warnings));
+        problemLabel.setForeground(Theme.WARN);
+        problemLabel.setToolTipText(String.join("\n", warnings));
     }
 
     // ==================== 表单 ====================
@@ -207,15 +247,27 @@ public class SettingsWindow extends JFrame {
 
         // 改动结果提示（成功或失败都显示在这里）。
         //
-        // 它在界面上占**固定的一行**：成功时显示「修改已保存并立即生效」，
+        // 它在界面上占**固定的一块**：成功时显示「修改已保存并立即生效」，
         // 失败时显示原因。两者共用同一个标签 —— 用户反馈「没有确认修改按钮」，
         // 实际缺的不是按钮而是**反馈**（见 commit 的注释）。
         //
         // 用固定高度而不是让文字撑开布局：否则提示一出现/消失，窗口就会跳动。
+        //
+        // **高 34px 而不是 20px**：一行放不下时改成换行，不再打省略号。
+        // 这个教训花了两轮才学对 —— 先是把提示写短（还是被截），
+        // 再是把标签加宽（加到 300px 上限还是被截，因为提示本来就比它宽）。
+        // 真正的问题从来不是"文案太长"，而是**截断**这个处理方式本身：
+        // 用户看到「已拆成单字「飞」…」时，恰好丢掉了"拆成了哪几个字"这个唯一重点。
+        //
+        // 34 这个数不是拍的：JLabel 默认上下内边距各 2px，行高 15px（11pt），
+        // 34−4=30 → 正好 2 行。**曾经写 30 只得到 1 行**（26/15=1），
+        // 于是长提示仍然被省略 —— 是自检 F4 把这条抓出来的，肉眼看不出差别。
         problemLabel = new JLabel(" ");
         problemLabel.setFont(Theme.font(11));
         problemLabel.setForeground(Theme.ERR);
-        problemLabel.setPreferredSize(new Dimension(300, 20));
+        problemLabel.setVerticalAlignment(SwingConstants.TOP);
+        problemLabel.setPreferredSize(new Dimension(STATUS_LABEL_WIDTH,
+                statusLabelHeight(problemLabel.getFontMetrics(problemLabel.getFont()))));
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
         c.gridy = 99;
@@ -229,26 +281,45 @@ public class SettingsWindow extends JFrame {
         savedTimer.setRepeats(false);
 
         // ---- 行为绑定
+        //
+        // 每个监听器都先问 `if (loading) return;`：**回填控件也会触发监听器**。
+        //
+        // 这不是洁癖 —— 实测日志显示设置窗口一构造就连续保存了两次配置
+        // （构造时 reloadFromConfig 回填 5 个控件、窗口首次显示时又回填一次），
+        // 每次都重跑词表校验、重打日志、重算提醒。用户什么都没改，
+        // 程序却做了两遍无用功，日志里也留下两遍同样的记录。
         bindText(wakeField, v -> {
+            if (loading) {
+                return;
+            }
             cfg.setWakeWord(v);
             commit(cfg);
         });
         bindText(endField, v -> {
+            if (loading) {
+                return;
+            }
             cfg.setEndWord(v);
             commit(cfg);
         });
         silenceBox.addActionListener(e -> {
-            if (silenceBox.getSelectedIndex() >= 0) {
+            if (!loading && silenceBox.getSelectedIndex() >= 0) {
                 cfg.setSilenceSeconds(SILENCE_CHOICES[silenceBox.getSelectedIndex()]);
                 commit(cfg);
             }
         });
         autoSendBox.addItemListener(e -> {
+            if (loading) {
+                return;
+            }
             cfg.setAutoSend(autoSendBox.isSelected());
             sendKeyBox.setEnabled(autoSendBox.isSelected());
             commit(cfg);
         });
         sendKeyBox.addActionListener(e -> {
+            if (loading) {
+                return;
+            }
             cfg.setSendKey(AppConfig.SendKey.fromDisplay((String) sendKeyBox.getSelectedItem()));
             commit(cfg);
         });
@@ -356,7 +427,7 @@ public class SettingsWindow extends JFrame {
     private void showSaved() {
         savedTimer.stop();
         problemLabel.setIcon(Icons.of(Icons.Kind.CHECK, Icons.SMALL));
-        problemLabel.setText("修改已保存并立即生效");
+        setStatusText("修改已保存并立即生效");
         problemLabel.setForeground(Theme.OK);
         problemLabel.setToolTipText(null);
         savedTimer.restart();
@@ -377,67 +448,304 @@ public class SettingsWindow extends JFrame {
     private void showNotice(MicValidator.Problem notice) {
         savedTimer.stop();
         problemLabel.setIcon(Icons.of(Icons.Kind.WARN, Icons.SMALL));
-        problemLabel.setText(fittingText(notice.brief()));
+        setStatusText(notice.brief());
         problemLabel.setForeground(Theme.WARN);
         problemLabel.setToolTipText(notice.describe());
     }
 
     /**
-     * 把文本截到状态标签放得下的长度。
+     * 把一段话放进固定大小的状态标签：**换行，不截断**。
      *
-     * <p>这里是**按实际字体的像素宽度量**，不是按字符数估算 —— 同一个字符串在
-     * 雅黑与 Segoe UI 下宽度能差 1.5 倍（实测同一条提示 555px 对 361px），
-     * 按字符数猜必然在某个字体或 DPI 下失手，而失手的表现就是用户又看到一个省略号。
+     * <p>截断是错的，已经错过两次：用户看到「唤醒词「飞瑞」已拆成单字「飞」…」，
+     * 丢掉的恰好是"拆成了哪几个字"——那条提示唯一要说的事。
      *
-     * <p>截断时在**码点**边界切，避免把代理对切成半个字。
+     * <p>为什么用 HTML：{@link JLabel} 的单行文本永远不会自动换行，而
+     * {@code <html>} 内容在标签内是**按宽度自动折行**的，正好就是想要的语义。
+     * 折行交给 Swing 而不是自己按像素切 —— 那样还得考虑词边界与中英混排。
+     *
+     * <p>只有换行还不够：标签高度固定（不能让文字撑开布局，否则窗口会跳），
+     * 所以超过可容纳行数的部分仍会被裁掉。因此这里**先用字体量一遍**，
+     * 超长时保留头部并明确写出「…（悬停看全文）」，让用户知道还有内容可看，
+     * 而不是看到一个没说清的省略号。
      */
-    private String fittingText(String text) {
-        java.awt.FontMetrics fm = problemLabel.getFontMetrics(problemLabel.getFont());
-        if (fm == null) {
-            return text;
+    private void setStatusText(String text) {
+        String one = text == null ? "" : text.trim();
+        if (one.isEmpty()) {
+            problemLabel.setText(" ");
+            return;
         }
-        // 留 8px 余量：标签有内边距，且不同 DPI 下取整会再吃掉一点。
-        int limit = Math.max(40, problemLabel.getPreferredSize().width
-                - problemLabel.getInsets().left - problemLabel.getInsets().right - 8);
-        if (fm.stringWidth(text) <= limit) {
-            return text;
+        String wrapped = wrapToFit(one, statusWidth(), statusMaxLines(),
+                problemLabel.getFontMetrics(problemLabel.getFont()));
+        problemLabel.setText("<html>" + escapeHtml(wrapped) + "</html>");
+    }
+
+    /** 状态标签可用像素宽度（减去内边距，留 6px 余量给取整误差）。 */
+    private int statusWidth() {
+        Insets in = problemLabel.getInsets();
+        return Math.max(80, problemLabel.getPreferredSize().width - in.left - in.right - 6);
+    }
+
+    /** 状态标签按 11pt 行高能放下几行（用真实字体度量，不用常量猜）。 */
+    private int statusMaxLines() {
+        java.awt.FontMetrics fm = problemLabel.getFontMetrics(problemLabel.getFont());
+        int line = fm == null ? 15 : fm.getHeight();
+        int usable = problemLabel.getPreferredSize().height - problemLabel.getInsets().top
+                - problemLabel.getInsets().bottom;
+        return Math.max(1, usable / line);
+    }
+
+    /** 放不下时追加的提示语。**必须整体放得下**，不允许自己也被切掉一半。 */
+    public static final String ELISION_MARK = "…（悬停看全文）";
+
+    /**
+     * 状态标签宽度。
+     *
+     * <p>360 而不是 300：300px 时那条结束词警告（40 字）两行装不下，
+     * 会丢掉「长句会被从中间截断」这半句 —— 而那是提醒的全部意义。
+     * 宽度从哪来：字段列本身就有约 366px，标签只是把它用满，
+     * **不会撑大窗口**（实测 pack 后窗口宽度不变，见自检 F2 报的窗口尺寸）。
+     */
+    static final int STATUS_LABEL_WIDTH = 360;
+
+    /** 状态标签显示几行。 */
+    static final int STATUS_LABEL_LINES = 2;
+
+    /**
+     * 状态标签高度。
+     *
+     * <p><b>必须按真实字体的行高算，不能写死像素数。</b>实测同一个 11pt 字号：
+     * 无头环境量到行高 15px，而应用运行时是 **22px**（字体解析结果不同，
+     * 中文字体的 leading 也更大）。我先前写死 34px（按 15px 推算），
+     * 结果 34÷22 = **1 行**，长提示照样被省略 —— 是自检 F4 把这个假装修好的地方
+     * 抓出来的：它打印出「行高=22、可用行=1」，而肉眼看日志只会觉得"改了高度就该好了"。
+     */
+    static int statusLabelHeight(java.awt.FontMetrics fm) {
+        int line = fm == null ? 22 : Math.max(1, fm.getHeight());
+        return line * STATUS_LABEL_LINES + 2; // +2 给 JLabel 顶部那点空隙
+    }
+
+    /**
+     * 按像素宽度折行，最多 {@code maxLines} 行；放不下时在末尾追加 {@link #ELISION_MARK}。
+     *
+     * <p><b>关键约束（实测抓出来的 bug）</b>：早先的实现把后缀直接追加在**已经排满**的
+     * 最后一行尾部，于是那一行变成 376px —— 又一次超出宽度，又一次被 Swing 切掉，
+     * 用户看到的还是省略号。所以这里的规则是：后缀作为一个**整体**（约 86px）
+     * 也要算进宽度；放不下就继续从最后一行收字符，直到后缀能完整放下。
+     * 收字符时按**码点**收，不会把代理对切成半个字。
+     *
+     * <p>**公开**（而不是包私有）是因为 {@code com.talkinglive.SelfTest} 在另一个包里
+     * 也要用它做断言 —— 自检是"无头环境下最接近真人"的那道验证，不该因为可见性
+     * 而放弃这条检查。参数与返回值都是纯数据，公开不泄露任何内部状态。
+     */
+    public static String wrapToFit(String text, int maxWidth, int maxLines,
+            java.awt.FontMetrics fm) {
+        if (text == null || text.isEmpty() || fm == null || maxWidth <= 0 || maxLines <= 0) {
+            return text == null ? "" : text;
         }
         int[] cps = text.codePoints().toArray();
+        StringBuilder out = new StringBuilder();
+        int pos = 0; // 下一个要排的码点下标
+        for (int line = 1; pos < cps.length; line++) {
+            if (line > 1) {
+                out.append('\n');
+            }
+            // 本行能塞下多少（硬上限）
+            int width = 0;
+            int fit = pos;
+            while (fit < cps.length) {
+                int w = fm.stringWidth(new String(Character.toChars(cps[fit])));
+                if (width + w > maxWidth) {
+                    break;
+                }
+                width += w;
+                fit++;
+            }
+            if (fit == pos) {
+                // 一个字都放不下（宽度设置异常）：放一个字避免死循环
+                fit = pos + 1;
+            }
+            // 在硬上限之前找一个**可断点**，避免把「60 秒」这类词组或标点拆开。
+            // 只在断点足够靠后（吃掉本行一半以上）时才用它 —— 否则行会短得难看。
+            int breakAt = -1;
+            if (fit < cps.length) {
+                int half = pos + (fit - pos) / 2;
+                for (int i = fit; i >= half; i--) {
+                    if (i > pos && isBreakPoint(cps[i - 1])) {
+                        breakAt = i;
+                        break;
+                    }
+                }
+            }
+            // 禁则：不在**数字/字母与汉字之间**断开（会把「60 秒」「AI 输入」拆散），
+            // 也不在汉字与数字/字母之间断开。此时宁可硬断在别处。
+            int end = breakAt > pos ? breakAt : fit;
+            if (end < cps.length && badSplit(cps, end)) {
+                // 往回退到最近的不违反禁则的位置
+                int back = end;
+                while (back > pos && badSplit(cps, back)) {
+                    back--;
+                }
+                if (back > pos) {
+                    end = back;
+                }
+            }
+            if (end >= cps.length) {
+                out.append(codepointsToString(cps, pos, end));
+                pos = end;
+                continue;
+            }
+            if (line >= maxLines) {
+                // 没有下一行了：把剩余内容收短到能让省略标记完整放下
+                return withElision(out.toString(), cps, pos, end, maxWidth, fm);
+            }
+            out.append(codepointsToString(cps, pos, end));
+            pos = end;
+        }
+        return out.toString();
+    }
+
+    /** 可断行处：空白，或中英文标点。 */
+    private static boolean isBreakPoint(int cp) {
+        if (Character.isWhitespace(cp)) {
+            return true;
+        }
+        return "，。；：、！？—…（）「」《》,.;:!?)]}".indexOf(cp) >= 0;
+    }
+
+    /**
+     * 在 {@code at} 处断开是否**不该**发生（禁则处理）。
+     *
+     * <p>两类不自然的断法：
+     * <ul>
+     *   <li>数字/字母 ｜ 汉字：把「60 秒」拆成「60」+「秒」—— 量词被甩到下一行读起来像换了个数；</li>
+     *   <li>汉字 ｜ 数字/字母：把「识别 AI」拆成「识别」+「 AI」，同样别扭。</li>
+     * </ul>
+     * 两条都只在**紧邻**时才算违规，中间有空格就不管（空格本身就是断点）。
+     */
+    private static boolean badSplit(int[] cps, int at) {
+        if (at <= 0 || at >= cps.length) {
+            return false;
+        }
+        int prev = cps[at - 1];
+        int next = cps[at];
+        boolean prevAlnum = isAlnum(prev);
+        boolean nextAlnum = isAlnum(next);
+        boolean prevHan = isHan(prev);
+        boolean nextHan = isHan(next);
+        return (prevAlnum && nextHan) || (prevHan && nextAlnum);
+    }
+
+    private static boolean isAlnum(int cp) {
+        return (cp >= '0' && cp <= '9') || (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z');
+    }
+
+    private static boolean isHan(int cp) {
+        return Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN;
+    }
+
+    private static String codepointsToString(int[] cps, int from, int to) {
         StringBuilder sb = new StringBuilder();
-        for (int cp : cps) {
-            String next = sb.toString() + new String(Character.toChars(cp)) + "…";
-            if (fm.stringWidth(next) > limit) {
+        for (int i = from; i < to; i++) {
+            sb.appendCodePoint(cps[i]);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 把「已排到行数上限」的内容收短到能让 {@link #ELISION_MARK} 完整放下为止。
+     *
+     * @param placed 已经排好的内容（可能含换行）
+     * @param cps    原文码点
+     * @param pos    本行起点（原文下标）
+     * @param end    本行硬上限终点（原文下标）
+     */
+    private static String withElision(String placed, int[] cps, int pos, int end,
+            int maxWidth, java.awt.FontMetrics fm) {
+        int markWidth = fm.stringWidth(ELISION_MARK);
+        int budget = maxWidth - markWidth;
+        // 最后一行能保留多少字符（含标点优先的断点考虑）
+        int keep = pos;
+        int width = 0;
+        while (keep < end) {
+            int w = fm.stringWidth(new String(Character.toChars(cps[keep])));
+            if (width + w > budget) {
                 break;
             }
-            sb.appendCodePoint(cp);
+            width += w;
+            keep++;
         }
-        return sb.length() == 0 ? text : sb + "…";
+        String prefix = placed.isEmpty() ? "" : placed;
+        String tail = codepointsToString(cps, pos, keep);
+        if (tail.isEmpty()) {
+            // 连一个字符都放不下时，只保留省略标记 —— 告诉用户"还有内容"最重要
+            int nl = prefix.lastIndexOf('\n');
+            return (nl < 0 ? "" : prefix.substring(0, nl + 1)) + ELISION_MARK;
+        }
+        return prefix + stripTrailingSpace(tail) + ELISION_MARK;
+    }
+
+    private static String stripTrailingSpace(String s) {
+        int end = s.length();
+        while (end > 0 && Character.isWhitespace(s.charAt(end - 1)) && s.charAt(end - 1) != '\n') {
+            end--;
+        }
+        return s.substring(0, end);
+    }
+
+    /** 单测友好的重载：自己造一个 FontMetrics。 */
+    static String wrapToFit(String text, int maxWidth, int maxLines, java.awt.Font font) {
+        java.awt.image.BufferedImage img =
+                new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+        java.awt.Graphics2D g = img.createGraphics();
+        try {
+            return wrapToFit(text, maxWidth, maxLines, g.getFontMetrics(font));
+        } finally {
+            g.dispose();
+        }
+    }
+
+    /** HTML 里只转义这三个字符就够（状态文字不含标签）。 */
+    private static String escapeHtml(String s) {
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     /**
      * 显示失败原因（面向用户，保留到下一次改动）。
      *
-     * <p>同样要过 {@link #fittingText}：拒绝原因常常是词表校验那种长句
-     * （实测「本段结束」那条在雅黑下 344px，超出标签宽度），不截的话用户看到的
-     * 是省略号而不是问题本身。完整文本始终挂在 tooltip 上。
+     * <p>同样走 {@link #setStatusText}：拒绝原因常常是词表校验那种长句
+     * （实测首行就有约 380px），不换行的话用户看到的是省略号而不是问题本身。
+     * 完整文本始终挂在 tooltip 上。
      */
     private void showProblem(String err) {
         savedTimer.stop();
         problemLabel.setIcon(Icons.of(Icons.Kind.CROSS, Icons.SMALL));
-        problemLabel.setText(fittingText(err.replace("\n", "  ")));
+        setStatusText(err);
         problemLabel.setForeground(Theme.ERR);
         problemLabel.setToolTipText(err);
     }
 
+    /** 清空状态文字时也要走同一套（保持 HTML 与非 HTML 状态一致）。 */
+    private void clearStatusText() {
+        problemLabel.setText(" ");
+    }
+
     private void reloadFromConfig() {
         AppConfig cfg = host.config();
-        // 值没变就不动控件：否则会把用户正在输入的光标位置顶掉
-        setIfIdle(wakeField, cfg.wakeWord());
-        setIfIdle(endField, cfg.endWord());
-        selectSilence(cfg.silenceSeconds());
-        autoSendBox.setSelected(cfg.autoSend());
-        sendKeyBox.setEnabled(cfg.autoSend());
-        sendKeyBox.setSelectedItem(cfg.sendKey().display());
+        // 回填期间屏蔽监听器：否则「控件被赋值」会被当成「用户改了值」，
+        // 走到 commit → 保存配置 + 重跑词表校验 + 重算提醒。用户什么都没做，
+        // 程序却做了两遍（实测日志里就是两遍）。
+        loading = true;
+        try {
+            // 值没变就不动控件：否则会把用户正在输入的光标位置顶掉
+            setIfIdle(wakeField, cfg.wakeWord());
+            setIfIdle(endField, cfg.endWord());
+            selectSilence(cfg.silenceSeconds());
+            autoSendBox.setSelected(cfg.autoSend());
+            sendKeyBox.setEnabled(cfg.autoSend());
+            sendKeyBox.setSelectedItem(cfg.sendKey().display());
+        } finally {
+            loading = false;
+        }
         refreshMarks();
     }
 
@@ -521,6 +829,9 @@ public class SettingsWindow extends JFrame {
         host.onVisibilityChanged(visible);
         if (visible) {
             reloadFromConfig();
+            // 每次打开都按**当前配置**重算提醒：用户可能刚在别处改过配置
+            // （手改 config.json 后重启），也可能上次的改动把提醒消掉了。
+            showConfigWarnings();
         }
     }
 

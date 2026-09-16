@@ -310,9 +310,11 @@ public final class AppConfig {
     public List<String> warnings() {
         List<String> out = new ArrayList<>();
         if (endWord.isBlank() && silenceSeconds == 0) {
-            out.add("结束词留空、静音超时也关着 —— 此时只能由「单段最长时长」（"
-                    + maxSegmentSeconds + " 秒）收尾，超过就会被从中间截断并落字。"
-                    + "建议至少保留一种收尾方式。");
+            // 刻意写得**短**：状态标签只有两行（约 560px），而这条曾经写到 694px ——
+            // 结果被省略号吃掉"60 秒上限"和"截断落字"这两个真正的后果，
+            // 等于提醒了却没说清。能用一句说清就不要用三句。
+            out.add("结束词留空、静音也关着 —— 只剩 " + maxSegmentSeconds
+                    + " 秒上限收尾，长句会被从中间截断。");
         }
         return out;
     }

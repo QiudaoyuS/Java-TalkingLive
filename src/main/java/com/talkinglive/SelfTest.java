@@ -796,6 +796,65 @@ public final class SelfTest {
             add("UI", "F3. 诊断窗口独立（状态/日志/自检 3 页）", diagOk[0],
                     "页签=" + diagTabs[0]);
 
+            // F4) 状态提示**放不下时换行、而不是打省略号**。
+            //
+            // 用户两次发来截图，看到的都是「唤醒词「飞瑞」已拆成单字「飞」…」——
+            // 省略号恰好落在"拆成了哪几个字"上。第一次我改短文案、第二次我加宽标签，
+            // 都没解决，因为错的是**"截断"这个做法本身**。现在换成换行，并用这一条
+            // 断言把它焊死：状态文字在可见部分里丢掉任何内容就算失败。
+            //
+            // 用**真实配置生成的真实警告**（而不是写死一段样例）：文案改了、标签尺寸改了，
+            // 这条断言都会跟着变。曾经写死样例，结果真警告被改短后断言还在检查旧文本。
+            com.talkinglive.core.AppConfig warnCfg = new com.talkinglive.core.AppConfig();
+            warnCfg.setEndWord("");
+            warnCfg.setSilenceSeconds(0);
+            String warnText = String.join(" ", warnCfg.warnings());
+            if (warnText.isEmpty()) {
+                add("UI", "F4. 状态提示换行不截断（省略号会丢掉关键词）", false,
+                        "触发警告的配置没有产生警告 —— 先修 warnings()");
+                warnText = "（无）";
+            }
+            final String statusSample = warnText;
+            final boolean[] fits = {false};
+            final String[] detail = {""};
+            onEdt(() -> {
+                SettingsWindow w = new SettingsWindow(new StubHost());
+                javax.swing.JLabel label = findStatusLabel(w);
+                if (label == null) {
+                    detail[0] = "找不到状态标签";
+                } else {
+                    java.awt.FontMetrics fm = label.getFontMetrics(label.getFont());
+                    java.awt.Insets in = label.getInsets();
+                    int width = label.getPreferredSize().width - in.left - in.right - 6;
+                    int lines = Math.max(1, (label.getPreferredSize().height - in.top - in.bottom)
+                            / fm.getHeight());
+                    String wrapped = com.talkinglive.ui.SettingsWindow
+                            .wrapToFit(statusSample, width, lines, fm);
+                    boolean allFit = true;
+                    int widest = 0;
+                    for (String line : wrapped.split("\n")) {
+                        int lw = fm.stringWidth(line);
+                        widest = Math.max(widest, lw);
+                        if (lw > width) {
+                            allFit = false;
+                        }
+                    }
+                    fits[0] = allFit && !wrapped.contains(
+                            com.talkinglive.ui.SettingsWindow.ELISION_MARK);
+                    detail[0] = "标签 " + label.getPreferredSize().width + "×"
+                            + label.getPreferredSize().height + "px、行高=" + fm.getHeight()
+                            + "、可用行=" + lines + "、宽=" + width + "px、最宽一行 " + widest + "px"
+                            + "｜allFit=" + allFit
+                            + "、含省略标记=" + wrapped.contains(
+                                    com.talkinglive.ui.SettingsWindow.ELISION_MARK)
+                            + "｜折成 " + wrapped.split("\n").length + " 行"
+                            + "｜实际=" + wrapped.replace("\n", "⏎");
+                }
+                w.dispose();
+            });
+            robot.delay(200);
+            add("UI", "F4. 状态提示换行不截断（省略号会丢掉关键词）", fits[0], detail[0]);
+
             // G) 多显示器虚拟屏幕（§4.4 夹在屏幕范围内 / 边缘翻转都依赖它）
             Rectangle vb = com.talkinglive.system.DpiScale.virtualBounds();
             add("UI", "G. 虚拟屏幕范围可得（多显示器）", vb.width > 0 && vb.height > 0,
@@ -1036,6 +1095,28 @@ public final class SelfTest {
             }
         }
         return n;
+    }
+
+    /**
+     * 找出设置窗口的状态提示标签（见 F4）。
+     *
+     * <p>按"文本是单个空格"定位：那是 {@code clearStatus()} 设的空占位，
+     * 这个文本在整个窗口里唯一。找不到就返回 null（调用方会报"找不到状态标签"，
+     * 而不是悄悄通过 —— 静默通过的断言等于没有断言）。
+     */
+    private static javax.swing.JLabel findStatusLabel(java.awt.Container c) {
+        for (java.awt.Component comp : c.getComponents()) {
+            if (comp instanceof javax.swing.JLabel l && " ".equals(l.getText())) {
+                return l;
+            }
+            if (comp instanceof java.awt.Container inner) {
+                javax.swing.JLabel found = findStatusLabel(inner);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
     }
 
     /** 设置窗口自检用的最小 Host。 */
