@@ -106,6 +106,13 @@
         <version>3.2.0</version>
       </plugin>
 
+      <!--
+        打包成「可直接 java -jar 运行」的形态：
+        - 运行时依赖复制到 target/lib（dependency-plugin 负责）
+        - 清单里写上 Class-Path: lib/xxx.jar …，这样 java -jar 不用手写 -cp
+          （否则 README 里写的 `java -jar` 会以 NoClassDefFoundError 失败）
+        - jpackage 以 target/lib 为 input，因此两者用的是同一份依赖集合
+      -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -114,6 +121,8 @@
           <archive>
             <manifest>
               <mainClass>${main.class}</mainClass>
+              <addClasspath>true</addClasspath>
+              <classpathPrefix>lib/</classpathPrefix>
             </manifest>
           </archive>
         </configuration>

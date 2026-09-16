@@ -198,9 +198,24 @@ class ArchitectureTest {
                 "不应引入这些依赖（DESIGN.md §1.3 全离线、§4.5 纯逻辑）：" + violations);
     }
 
+    /**
+     * 诊断入口的**白名单**（{@code DESIGN.md} §4.5：App 是唯一有 main 的类）。
+     *
+     * <p>白名单必须显式列出而不是「凡是不叫 App 的都放过」：那等于没有约束。
+     * 这里三个都是**只在开发/验证时手动运行**的诊断入口，不在产品运行路径上：
+     * <ul>
+     *   <li>{@code EngineSmoke} —— 验证 Vosk 原生库加载、词表查询、受限语法。这三件事
+     *       都依赖真实模型与原生库，单测覆盖不到，但它们恰恰是最容易出问题的一环。</li>
+     *   <li>{@code EngineBench} —— 实测并回填 {@code DESIGN.md} §6 的性能预算。</li>
+     *   <li>{@code SampleInjector} —— 注入链路的手工验证入口（见 §9.3 清单第 4 条）。</li>
+     * </ul>
+     */
+    private static final java.util.Set<String> DIAGNOSTIC_ENTRY_POINTS =
+            java.util.Set.of("EngineSmoke.java", "EngineBench.java", "SampleInjector.java");
+
     @Test
-    @DisplayName("只有一个 main 方法（§4.5：App 是唯一有 main 的类）")
-    void singleMainMethod() throws IOException {
+    @DisplayName("产品路径上只有一个 main：App（§4.5）")
+    void singleProductMainMethod() throws IOException {
         List<String> withMain = new ArrayList<>();
         try (Stream<Path> all = Files.walk(SRC)) {
             for (Path f : all.filter(p -> p.toString().endsWith(".java")).toList()) {
@@ -210,12 +225,13 @@ class ArchitectureTest {
                 }
             }
         }
-        // EngineSmoke / UiProbe 是显式的诊断入口，不在产品路径上
         List<String> product = withMain.stream()
-                .filter(n -> !n.equals("EngineSmoke.java") && !n.equals("UiProbe.java"))
+                .filter(n -> !DIAGNOSTIC_ENTRY_POINTS.contains(n))
                 .toList();
         assertTrue(product.size() == 1 && product.contains("App.java"),
-                "产品路径上只应有 App 有 main，实际：" + withMain);
+                "产品路径上只应有 App 有 main。实际有 main 的文件：" + withMain
+                        + "；其中非白名单的：" + product
+                        + "。若是新增的诊断入口，请加进 DIAGNOSTIC_ENTRY_POINTS 并说明理由。");
     }
 
     @Test

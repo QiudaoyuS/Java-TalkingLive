@@ -720,9 +720,9 @@ public final class SelfTest {
             pt.y = p.y;
             com.sun.jna.platform.win32.WinDef.HWND h =
                     com.talkinglive.system.Win32.User32.INSTANCE.WindowFromPoint(pt);
-            long hwnd = h == null ? 0 : com.sun.jna.Pointer.nativeValue(h.getPointer());
+            long hwnd = com.talkinglive.system.Win32.hwndValue(h);
             return "pointUnder=0x" + Long.toHexString(hwnd)
-                    + "('" + com.talkinglive.system.ForegroundWatcher.title(h) + "')";
+                    + "('" + com.talkinglive.system.ForegroundWatcher.title(hwnd) + "')";
         } catch (RuntimeException | UnsatisfiedLinkError e) {
             return "pointUnder=（查询失败 " + e + "）";
         }

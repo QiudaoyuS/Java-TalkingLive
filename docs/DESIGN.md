@@ -109,11 +109,11 @@
 | 4 | 状态机 | IDLE / LISTENING / COMMITTING，显式建模，非法事件忽略并记录 |
 | 5 | 语音唤醒 | 小 Vosk 受限语法检测唤醒词；词不在模型词表内则启动失败并提示 |
 | 6 | 实时预览 | 小 Vosk 流式识别，文字实时出现在浮窗（不抢焦点）；Esc 整段取消 |
-| 7 | **转写精化** | 段落结束时用 whisper.cpp 重跑该段音频，取得更准且**带标点**的最终文本 |
+| 7 | **转写精化** | 段落结束时用 **SenseVoice** 重跑该段音频，取得更准且**带标点**的最终文本（原定 whisper.cpp；当前实现为 Vosk 离线重跑，见 `ENGINE-EXPERIMENT.md`） |
 | 8 | 结束检测 | 结束词 / 静音超时（默认 5 秒后结束录制，可调可关）/ 切窗口 |
 | 9 | 文本注入 | `SendInput` + `KEYEVENTF_UNICODE`；**注入前校验前台窗口**；失败须明确提示 |
 | 10 | 自动发送 | 触发时机与按键可配，默认**关闭** |
-| 11 | 标点 | whisper 原生标点为主力；预览阶段辅以停顿启发式 |
+| 11 | 标点 | **SenseVoice 原生标点为主力**（`use_itn=1`）；预览阶段辅以停顿启发式。`PunctuationProcessor` 职责下调为「数字规整与清理」，不再是标点主力（TECH-PLAN §5.3） |
 | 12 | 日志 | 状态流转 + 错误，滚动 5MB×3，**不记转写内容** |
 | 13 | 打包 | jpackage 产出 exe |
 
@@ -135,9 +135,9 @@
 
 | 接口 | MVP 实现 | 后续扩展 |
 |---|---|---|
-| `TextRefiner` | `WhisperRefiner`（whisper.cpp） | 更大模型 / 云端引擎 |
+| `TextRefiner` | `TextRefiners.SenseVoice`（sherpa-onnx）——**当前因原生产物不可得而降级为 `TextRefiners.VoskOffline`**，见 `ENGINE-EXPERIMENT.md` | 更大模型 / 云端引擎 |
 | `CommitPolicy` | `WholeSegmentPolicy`（整段注入） | `StablePrefixPolicy`（稳定前缀增量注入） |
-| `TextPostProcessor` | `PunctuationProcessor` | `HotwordCorrector`（热词纠错） |
+| `TextPostProcessor` | `PunctuationProcessor`（职责下调：数字规整与清理，**不是标点主力**） | `HotwordCorrector`（热词纠错） |
 | `HotwordSource` | 暂不实现 | 本地文件 / 插件目录 / 远端服务 |
 
 此外，热词表 JSON 格式中预留 `version` 字段，供阶段三的增量同步使用。
@@ -172,7 +172,7 @@
    └────────────┬─────────────┘
                 ▼
    ┌──────────────────────────┐
-   │ whisper.cpp 转写          │  更准 + 原生标点
+   │ SenseVoice 精化           │  更准 + 原生标点
    └────────────┬─────────────┘
                 ▼
    ┌──────────────────────────┐
@@ -188,9 +188,27 @@
 |---|---|---|
 | 唤醒词 / 结束词检测 | **小 Vosk**（42MB，受限语法） | 它是**唯一支持运行时动态词表**的；且只需检测少数几个词，准确率劣势不影响 |
 | 实时预览 | **小 Vosk**（流式） | 只有它提供流式输出，能让字边说边长 |
-| 实际转写 | **whisper.cpp** | 准确率显著更高，且**原生带标点**；因段落结束才跑，非流式不构成问题 |
+| 实际转写 | **SenseVoice**（原定 whisper.cpp） | 纯 CPU 快一个数量级，且原生带标点；因段落结束才跑，非流式不构成问题 |
 
-该分工由 Step 0 实测数据确定，依据见附录 B。
+> ⚠️ **实现现状（见 `ENGINE-EXPERIMENT.md`）**：`TECH-PLAN` §1.1 定的方案 C
+> 是精化引擎换成 SenseVoice（sherpa-onnx），但**sherpa-onnx 没有 Maven Central 的
+> Java 绑定、也没有 Windows x64 预编译产物**，因此 MVP 的精化位当前装的是
+> `TextRefiners.VoskOffline`（Vosk 整段离线重跑），并**如实标注为「非 SenseVoice」**。
+> `TextRefiner` 接口、状态机、UI、注入路径一行未改——这就是 §3.4 留这个接口的价值。
+>
+> **时机**：`TextRefiner` 在 §3.4 被列为「MVP 内即实现」的接缝，它的**位置**确实实现了；
+> 但**实现体**（SenseVoice）被原生产物卡住，属已知缺口，不是设计变更。
+
+**为什么转写引擎的选型标准里必须有「纯 CPU 速度」这一维**：
+Step 0（附录 B.2）只在**准确率**这一个维度上比较过 Vosk 与 whisper，
+得出「whisper 更准且带标点」的结论。但 Step 0 **没有测 whisper 在纯 CPU 上多慢**——
+实测数据（`TECH-PLAN` §4.2）显示 whisper-small 处理 5 秒音频需 12–15 秒，
+与 §6 的「提交延迟 < 2.5s」差一个数量级。本次实现又实测到：
+即便是小得多的 **Vosk 小模型，纯 CPU 也要 1.21 秒/5 秒音频**（RTF 0.241）。
+这从侧面印证了 whisper-small 的推算量级是合理的，也说明
+**转写引擎的选型必须同时看准确率与纯 CPU 速度**，只看准确率会得出不可用的结论。
+
+该分工由 Step 0 的准确率数据 + `TECH-PLAN` §4 的速度数据共同确定，依据见附录 B 与 B.4。
 
 ### 4.3 关键设计约束
 
@@ -275,7 +293,7 @@ talkinglive/
 │   ├── TextRefiner.java           接口
 │   ├── VoskKeywordDetector.java   实现（唤醒词 / 结束词）
 │   ├── VoskRecognizer.java        实现（流式预览）
-│   └── WhisperRefiner.java        实现（段落精化）
+│   ├── TextRefiners.java          实现（段落精化：SenseVoice / VoskOffline / Unavailable）
 ├── text/
 │   ├── CommitPolicy.java          接口 + WholeSegmentPolicy
 │   ├── TextPostProcessor.java     接口 + PunctuationProcessor
@@ -302,31 +320,34 @@ talkinglive/
 |---|---|---|---|
 | 交付形态 | 单机 Windows 桌面软件 | 自用优先，无需服务端 | Electron 外壳 |
 | 出字策略 | 浮窗预览 + 整段注入 | 避免文字闪烁、撤销栈污染与中间态副作用；支持 Esc 取消 | 直接注入；稳定前缀注入 |
-| 识别引擎 | 小 Vosk（关键词检测）+ whisper（转写） | 见 §4.2 | 纯 Vosk；纯 whisper |
+| 识别引擎 | 小 Vosk（关键词检测 + 预览）+ SenseVoice（精化） | 见 §4.2 | whisper.cpp；纯 Vosk；纯 whisper |
 | 文本注入 | `SendInput` + `KEYEVENTF_UNICODE` | 不污染用户剪贴板，兼容性最好 | 剪贴板 + Ctrl+V |
 | 触发条件 | 结束词 / 静音 / 切窗口 | 覆盖提前结束、忘记说结束词、中途离开三种情况 | 仅结束词 |
 | 存储 | 仅 JSON 配置文件 | 明确不要历史记录 | SQLite |
 | UI 工具包 | Swing / AWT | 见 §4.4 | JavaFX；WebView |
 | 打包 | jpackage | JDK 自带，产出带运行时的 exe | launch4j |
-| 工具链 | JDK 21 + Maven | 虚拟线程契合音频与识别管线；构建与测试标准化 | 现有 JDK 8 |
+| 工具链 | JDK 21 + Maven | 两个引擎均有成熟的 Java 绑定；`jpackage` 免背 Chromium；构建与测试标准化。**注**：原写「虚拟线程契合音频与识别管线」——该理由不成立，全程序长期只有 3 根左右线程（TECH-PLAN §9 #7） | 现有 JDK 8 |
 
 ---
 
 ## 6. 性能与资源预算
 
-> 下表中**只有已实测的项标了具体数字来源**，其余是目标值，需在 M1–M3 阶段实测后回填。
+> 下表中标「实测」的项来自本机真实测量（`java -cp ... com.talkinglive.engine.EngineBench`，
+> 完整报告见 `%LOCALAPPDATA%\TalkingLive\engine-bench.txt` 与 `docs/ENGINE-EXPERIMENT.md` §3）；
+> 标「未测」的项需要**麦克风与真人说话**，属 §9.3 的手工集成验证。
 
-| 指标 | 目标 | 说明 |
-|---|---|---|
-| 唤醒响应 | < 300ms | 说完唤醒词到悬浮球变色 |
-| 首字延迟 | < 800ms | 开始说话到浮窗出现第一个字 |
-| 提交延迟 | < 2.5s | 说完结束词到文字注入完成，含 whisper 推理 |
-| 空闲 CPU | < 2% | 仅跑唤醒词检测 |
-| 空闲内存 | < 500MB | 小 Vosk 模型常驻 |
-| 听写中内存 | < 1.5GB | 加上 whisper 模型与段落音频缓存 |
-| 磁盘占用 | 小 Vosk 42MB + whisper 模型（待定）+ 日志 ≤15MB | 见附录 D |
-| 冷启动 | < 3s | 含模型加载 |
-| 单段最长时长 | 待定（见 §12） | 防止长录音导致内存增长 |
+| 指标 | 目标 | 实测 | 说明 |
+|---|---|---|---|
+| 唤醒响应 | < 300ms | **未测** | 说完唤醒词到悬浮球变色；需真人 |
+| 首字延迟 | < 800ms | **未测** | 开始说话到浮窗出现第一个字；需真人 |
+| 提交延迟 | < 2.5s | **实测：离线重跑 5s 音频约 1.2s**（RTF 0.241）；15s 段落约 7.3s ⚠️ | 说完结束词到文字注入完成。原说明含「whisper 推理」已不成立；现为精化 + 注入 |
+| **转写中 CPU 占用** | **新增行：目标「单核饱和但不超过 4 核」** | **未测** | 推理必然短时占满多核；SenseVoice 接入后再按 `TECH-PLAN` §6.3 的 1/4/默认三档线程数实测回填 |
+| 空闲 CPU | < 2% | **未测** | 仅跑唤醒词检测（150ms 轮询 + Vosk 流式解码） |
+| 空闲内存 | < 500MB | **实测：堆内 3 MB** | 实测远低于预算：Vosk 模型是**原生内存**，不在 Java 堆里。整进程 RSS 待补测 |
+| 听写中内存 | < 1.5GB | **实测：堆内 3 MB**（跑完全部基准测量后） | 段落 PCM 上限已定为 60s（`AppConfig.maxSegmentSeconds`），16kHz 单声道约 1.9 MB |
+| 磁盘占用 | 小 Vosk 42MB + 精化模型（待定）+ 日志 ≤15MB | **实测：Vosk 解压 65MB + libvosk.dll 25MB**；SenseVoice int8 为 239MB（未下载） | 见附录 D |
+| 冷启动 | < 3s | **实测：模型加载 1253ms** | 含模型加载；再加 JVM 启动与 UI 构建，冷启动达标有把握但未端到端测量 |
+| 单段最长时长 | **默认 60 秒**（`AppConfig.maxSegmentSeconds`，可配 5–600） | — | 见 §12 #5：防止长录音导致内存增长。60s 上限对「静音 5s 结束」的正常段落无影响 |
 
 ---
 
@@ -343,7 +364,7 @@ talkinglive/
 | 唤醒词 / 结束词不在词表 | 配置校验失败 | 拒绝该配置并提示，见附录 C |
 | 目标程序以管理员运行 | 注入被 UIPI 静默丢弃 | 检测注入失败 → 提示需以管理员运行本程序 |
 | 提交时前台窗口已变 | 注入会被误发到别的程序 | **放弃注入** + 明确提示；不自动发送 |
-| whisper 推理失败 / 超时 | 段落未精化 | 退回用 Vosk 预览文本注入，并记日志 |
+| 精化（SenseVoice）推理失败 / 超时 | 段落未精化 | 退回用 Vosk 预览文本注入，并记日志。已有实现与单测：`TextRefiner.Result.fallback` |
 | 光标位置取不到 | 浮窗无法贴光标 | 降级链：目标窗口矩形 → 跟随鼠标 |
 | 用户把球拖出屏幕 | 找不到球 | 位置夹在屏幕范围内 |
 | 悬浮球被全屏程序遮挡 | 点不到球 | 托盘图标为二级入口（注意 Windows 11 会折叠它） |
@@ -356,12 +377,12 @@ talkinglive/
 | 风险 | 说明 | 应对 |
 |---|---|---|
 | **自定义词不在词表内** | Vosk 对词表外词**静默忽略**（仅打 WARNING，不抛异常），配置会无声失效 | 启动时用 `vosk_model_find_word` 显式校验，失败则拒绝并提示 |
-| **whisper 推理延迟** | 段落结束后需等待一次推理（CPU 上约 1–3 秒） | 浮窗显示「处理中」；必要时换更小模型或启用 GPU |
+| **精化推理延迟**（原：whisper 推理延迟，风险已大幅下降） | 段落结束后需等待一次推理。原风险为 whisper-small 纯 CPU 约 12–15s（`TECH-PLAN` §4）；换 SenseVoice 后目标约 0.5s | 浮窗显示「处理中」；当前实现（Vosk 离线重跑）实测 RTF 0.241 守住 2.5s；**长段（>15s）会超预算**，靠单段上限 60s 与静音结束兜底 |
 | **预览与最终文本不一致** | 预览来自小 Vosk（快但糙），最终来自 whisper（准） | 预览以弱化样式呈现，提交时整体替换 |
 | **UIPI 权限隔离** | 目标程序若以管理员运行，注入会被静默丢弃 | 检测失败并提示；必要时以管理员运行本程序 |
 | **光标定位不可得** | `GetCaretPos` 在 Chrome / Electron 中常取不到 | 降级路径：跟随目标窗口 / 跟随鼠标 |
 | **误触发唤醒** | 看视频、开会时被误唤醒 | 选低误触发词；实测验证；提供一键暂停 |
-| **坐标空间混淆** | Win32 用物理像素、Java 用逻辑像素，混用会打到完全错误的位置 | 全部换算集中在一处工具方法；已在原型里踩过一次（§4.4） |
+| **ITN 会改字**（新） | SenseVoice 的 `use_itn=1` 不只是加标点，还会**规整数字**。官方英文样例中 `fifty pieces of gold` 被规整成 `50 pieces of code` | `AppConfig.itn` 开关已预留；接入后按 `TECH-PLAN` §6.3 实测中文场景是否可接受，再决定开/关/按场景 | Win32 用物理像素、Java 用逻辑像素，混用会打到完全错误的位置 | 全部换算集中在一处工具方法；已在原型里踩过一次（§4.4） |
 | **引擎集成深度** | 识别引擎是第三方黑盒，不是自研代码 | 价值集中在集成层：低延迟、双引擎协同、流式修正处理 |
 
 ---
@@ -416,8 +437,9 @@ talkinglive/
 | Python | 3.13.2（仅用于 Step 0 的一次性验证脚本，非运行时依赖） |
 | 原型 | `demo/` 用纯 `javac`/`java` 构建，零依赖 |
 
-> ⚠️ 本机 `JAVA_HOME` 仍指向 `jdk1.8.0_111`，而 PATH 里的 `javapath` shim 指向 21。
-> 两者不一致，建议把 `JAVA_HOME` 也改到 JDK 21，避免构建工具挑错版本。
+> ✅ **已修正**（TECH-PLAN §7 第 1 项）：机器级 `JAVA_HOME` 现为 `D:\Code\Java\jdk-21.0.12.1`。
+> 注意：**已经打开的终端**里 `JAVA_HOME` 仍是旧值（进程环境变量在启动时确定），
+> 需重开终端或显式设置后才能用 `mvnw` 构建——本仓库的 `README.md` 里写明了这一点。
 
 ### 10.2 构建
 
@@ -428,7 +450,7 @@ mvnw -Pdist jpackage             # 产出带运行时的 exe（M5）
 
 ### 10.3 模型文件
 
-Vosk 小模型与 whisper 模型均**不进版本库**，放置于 `%LOCALAPPDATA%\TalkingLive\models\`。
+Vosk 小模型与精化模型（SenseVoice）均**不进版本库**，放置于 `%LOCALAPPDATA%\TalkingLive\models\`。
 获取方式见附录 D。
 
 ---
@@ -442,7 +464,7 @@ Vosk 小模型与 whisper 模型均**不进版本库**，放置于 `%LOCALAPPDAT
 | **M0** | Maven 骨架 + 日志 + 配置 + 词表校验 + 首批单测 | 工程可构建、可测试 | 待开始 |
 | **M1** | 音频采集落成 wav 文件 | 麦克风链路可用 | |
 | **M2** | 小 Vosk 接入：唤醒词 + 结束词检测（命令行版） | 关键词能否稳定命中，误触发率可接受 | |
-| **M3** | whisper 接入 + 浮窗预览 | **转写质量与延迟，项目 go/no-go 关卡** | |
+| **M3** | SenseVoice 精化接入 + 浮窗预览 | **转写质量与延迟，项目 go/no-go 关卡**。⚠️ 当前精化位由 Vosk 离线重跑顶替（原生产物不可得），SenseVoice 接入待办，见 `ENGINE-EXPERIMENT.md` | |
 | **M4** | 状态机 + 注入 + 切窗口 + 自动发送 | 核心难点集中于此 | |
 | **M5** | 标点 + jpackage 打包 | 可交付自用 | |
 
@@ -459,7 +481,7 @@ Vosk 小模型与 whisper 模型均**不进版本库**，放置于 `%LOCALAPPDAT
 | 3 | **模型分发方式**：打进 exe（体积大）还是首次运行时下载（需要引导与网络）？ | M5 前 |
 | 4 | **悬浮球位置与贴边状态**存到配置文件的哪个字段、是否随多显示器变化重算 | M4 前 |
 | 5 | **单段录音时长上限**定多少（防止长录音内存增长） | M4 前 |
-| 6 | **whisper 具体选哪个模型**（base / small / medium），取决于 M3 的实测质量与延迟 | M3 中 |
+| 6 | ~~whisper 选哪个模型~~ → **已关闭**：架构已定为 SenseVoice（TECH-PLAN §1.1）。剩余问题是 **SenseVoice 的具体量化版本**（int8 / fp32）与落地路径（onnxruntime 自写前处理 vs 自编译 sherpa-onnx JNI），见 `ENGINE-EXPERIMENT.md` §4 | M3 |
 | 7 | 是否提供**开机自启动**（目前列为不做） | 可延后 |
 
 ---
@@ -512,7 +534,14 @@ Vosk 小模型与 whisper 模型均**不进版本库**，放置于 `%LOCALAPPDAT
 
 **关键取舍**：官方文档明确「大模型词表静态，运行时不可修改」，而唤醒词检测依赖动态词表，**只有小模型能胜任**；同时小模型 CER 17% 不足以直接转写。这正是 §4.2 双引擎分工的由来。
 
-另注：官方标点恢复模型仅覆盖 en / ru / de，**中文无标点模型**，进一步印证转写须交给 whisper。
+另注：官方标点恢复模型仅覆盖 en / ru / de，**中文无标点模型**，进一步印证转写须交给另一个引擎。
+
+> ⚠️ **补充（TECH-PLAN §9 #13）**：Step 0 **只比较了准确率这一维**，
+> **没有比较纯 CPU 速度**。而速度这一维后来成了架构决策的关键：
+> whisper-small 纯 CPU 处理 5 秒音频约 12–15 秒（`TECH-PLAN` §4.2），
+> 与 §6 的「提交延迟 < 2.5s」差一个数量级，于是才有了方案 C（精化引擎换 SenseVoice）。
+> 本次实现又实测到：**即便小得多的 Vosk 小模型，纯 CPU 也要 1.21 秒/5 秒音频**（RTF 0.241），
+> 侧面印证了那个推算的量级。教训：**引擎选型必须同时看准确率与纯 CPU 速度**。
 
 ### B.3 原型阶段的 UI 验证结论
 
@@ -584,10 +613,26 @@ vosk-model-small-cn-0.22/
 > 注意：`graph/` 下**没有 `words.txt`**，词表被编译进 FST 二进制。所以查词必须用
 > `vosk_model_find_word()` API，不能指望读文本词表。这是 Step 0 踩过的坑。
 
-### D.2 whisper 模型
+### D.2 精化模型（SenseVoice）
 
-**待定。** 具体选 base / small / medium 取决于 M3 阶段的质量与延迟实测
-（见 §12 未决问题 #6）。确定后在此补上模型名与下载地址。
+模型名已定：**`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17`**，int8 量化。
+
+```
+# 模型（239 MB）与词表（316 KB）——hf-mirror 实测可下载
+https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx
+https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt
+```
+
+放置位置：`%LOCALAPPDATA%\TalkingLive\models\sense-voice\`（`AppPaths.refinerModelDir()`）。
+
+> ⚠️ **为什么现在还装不起来**：模型能下载，但 **sherpa-onnx 没有 Maven Central 的
+> Java 绑定，也没有 Windows x64 预编译原生产物**。上游只发 Android/iOS/Python/C++ 产物，
+> JVM 侧要使用者自己用 MSVC + CMake 构建 JNI 动态库——这与 `TECH-PLAN` §3.1
+> 「零环境依赖」的红线冲突。
+>
+> 因此当前精化位由 **Vosk 整段离线重跑**顶替（实测 RTF 0.241，守住 §6 的 2.5s 预算）。
+> 两条落地路径（onnxruntime 自写前处理 / 自编译 JNI）与取舍见
+> `docs/ENGINE-EXPERIMENT.md` §4。
 
 ---
 
@@ -599,5 +644,15 @@ vosk-model-small-cn-0.22/
 | 0.2 | 2026-09-15 | `b35e36d` | 回填 Step 0 验证结论：唤醒词保留、结束词更换、双引擎分工成立 |
 | 1.0 | 2026-09-16 | `55589a9` | 确认 whisper 进 MVP，重写整理；补处理管线图与双引擎分工 |
 | 1.1 | 2026-09-16 | — | 补齐缺章：交互清单、代码组织、性能预算、异常降级、测试策略、开发环境、未决问题；UI 章节改为悬浮球方案（含托盘图标与贴边收起）；新增附录 D 模型获取 |
+| 1.2 | 本次（实现阶段） | — | **按 `TECH-PLAN` §9 的修订清单逐条落实 16 项**：① 精化引擎 whisper.cpp → SenseVoice（§4.2 分工表、§4.1 管线图、§3.1 第 7 项、§3.4 接口伏笔、§5 决策表、§11 M3、§12 #6）；② 标点主力改为 SenseVoice 原生标点（§3.1 第 11 项，`PunctuationProcessor` 职责下调）；③ 修正 §5 工具链行里**不成立的「虚拟线程」理由**；④ §6 性能预算**回填实测**（模型加载 1253ms、堆内存 3MB、离线 RTF 0.241）并**新增「转写中 CPU 占用」一行**；⑤ §7/§8 精化失败与延迟风险改写，**新增 ITN 改字风险**；⑥ §10.1 标注 `JAVA_HOME` 已修正；⑦ 附录 B.2 补「Step 0 未比较纯 CPU 速度」这一教训；⑧ 附录 D.2 由 whisper 改为 SenseVoice（含下载地址与不可用原因）；⑨ §12 #5 单段上限定为 **60 秒** |
 
 > 日期取自 git 提交时间；后续修订请在提交信息里注明版本号，并在此表追加一行。
+
+## 相关文档
+
+| 文档 | 作用 |
+|---|---|
+| `docs/TECH-PLAN.md` | 技术方案（与本文冲突时**以技术方案为准**） |
+| `docs/ENGINE-EXPERIMENT.md` | 精化引擎落地报告：实测数据、SenseVoice 不可直接依赖的确认、未测项清单 |
+| `docs/IMPLEMENTATION-STATUS.md` | **现在能干什么、不能干什么**：里程碑对照、逐项能力清单、实现期发现的真实缺陷 |
+| `demo/README.md` | P0 交互原型（纯模拟数据）的说明 |
