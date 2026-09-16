@@ -9,21 +9,14 @@ import javax.swing.Timer;
 import javax.swing.UIManager;
 import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.FontUIResource;
-import java.awt.BasicStroke;
 import java.awt.Color;
 import java.awt.Cursor;
 import java.awt.Font;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
-import java.awt.Image;
-import java.awt.MenuItem;
-import java.awt.PopupMenu;
 import java.awt.RenderingHints;
-import java.awt.SystemTray;
-import java.awt.TrayIcon;
 import java.awt.event.ActionListener;
 import java.awt.geom.RoundRectangle2D;
-import java.awt.image.BufferedImage;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Enumeration;
@@ -134,8 +127,6 @@ public class Demo implements FloatingBall.Listener {
     private FloatingBall ball;
     private PreviewBar bar;
     private SettingsWindow settings;
-    private TrayIcon trayIcon;
-    private MenuItem pauseItem;
     private JTextArea targetArea;
 
     private boolean paused = false;
@@ -158,7 +149,6 @@ public class Demo implements FloatingBall.Listener {
         bar = new PreviewBar(null);
         settings = new SettingsWindow(this);
         ball = new FloatingBall(null, this);
-        buildTray();
         wireStateMachine();
 
         ball.setVisible(true);
@@ -345,9 +335,6 @@ public class Demo implements FloatingBall.Listener {
     @Override
     public void onTogglePause() {
         paused = !paused;
-        if (pauseItem != null) {
-            pauseItem.setLabel(paused ? "恢复监听" : "暂停监听");
-        }
         log("INFO", paused ? "监听已暂停（不再响应唤醒词与结束词）" : "监听已恢复");
         setStateVisual(sm.state());
     }
@@ -365,9 +352,6 @@ public class Demo implements FloatingBall.Listener {
     @Override
     public void onQuit() {
         log("INFO", "退出");
-        if (trayIcon != null) {
-            SystemTray.getSystemTray().remove(trayIcon);
-        }
         System.exit(0);
     }
 
@@ -393,7 +377,6 @@ public class Demo implements FloatingBall.Listener {
             ball.setPaused(paused);
             ball.setState(s);
         }
-        updateTray(s);
     }
 
     // ==================== 模拟事件 ====================
@@ -586,9 +569,6 @@ public class Demo implements FloatingBall.Listener {
     }
 
     private void notifyUser(String title, String body) {
-        if (trayIcon != null) {
-            trayIcon.displayMessage(title, body, TrayIcon.MessageType.WARNING);
-        }
         JOptionPane.showMessageDialog(null, body, title, JOptionPane.WARNING_MESSAGE);
     }
 
@@ -605,77 +585,6 @@ public class Demo implements FloatingBall.Listener {
             return targetArea;
         }
         return (JComponent) ball.getContentPane();
-    }
-
-    // ==================== 托盘（悬浮球之外的兜底入口） ====================
-
-    private void buildTray() {
-        if (!SystemTray.isSupported()) {
-            return;
-        }
-        PopupMenu menu = new PopupMenu();
-        pauseItem = new MenuItem("暂停监听");
-        pauseItem.addActionListener(e -> onTogglePause());
-        menu.add(pauseItem);
-        menu.addSeparator();
-
-        MenuItem s = new MenuItem("设置...");
-        s.addActionListener(e -> onOpenSettings());
-        menu.add(s);
-
-        MenuItem l = new MenuItem("查看日志");
-        l.addActionListener(e -> onOpenLog());
-        menu.add(l);
-        menu.addSeparator();
-
-        MenuItem q = new MenuItem("退出");
-        q.addActionListener(e -> onQuit());
-        menu.add(q);
-
-        trayIcon = new TrayIcon(stateIcon(Theme.DIM), "TalkingLive · 待唤醒", menu);
-        trayIcon.setImageAutoSize(true);
-        try {
-            SystemTray.getSystemTray().add(trayIcon);
-        } catch (Exception ex) {
-            log("WARN", "托盘图标添加失败: " + ex.getMessage());
-        }
-    }
-
-    private void updateTray(StateMachine.State s) {
-        if (trayIcon == null) {
-            return;
-        }
-        if (paused) {
-            trayIcon.setImage(stateIcon(Theme.WARN));
-            trayIcon.setToolTip("TalkingLive · 已暂停");
-            return;
-        }
-        switch (s) {
-            case LISTENING:
-                trayIcon.setImage(stateIcon(Theme.ERR));
-                trayIcon.setToolTip("TalkingLive · 听写中");
-                break;
-            case COMMITTING:
-                trayIcon.setImage(stateIcon(Theme.WARN));
-                trayIcon.setToolTip("TalkingLive · 提交中");
-                break;
-            default:
-                trayIcon.setImage(stateIcon(Theme.DIM));
-                trayIcon.setToolTip("TalkingLive · 待唤醒");
-                break;
-        }
-    }
-
-    private static Image stateIcon(Color color) {
-        int s = 16;
-        BufferedImage img = new BufferedImage(s, s, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = img.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        g.setColor(color);
-        g.setStroke(new BasicStroke(2.2f));
-        g.drawOval(3, 3, s - 7, s - 7);
-        g.dispose();
-        return img;
     }
 
     // ==================== 自动演示 ====================

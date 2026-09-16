@@ -167,9 +167,23 @@ class FloatingBall extends JWindow {
                 }
                 dragged = true;
                 Point p = e.getLocationOnScreen();
-                setLocation(p.x - pressPoint.x, p.y - pressPoint.y);
+                setLocationClamped(p.x - pressPoint.x, p.y - pressPoint.y);
             }
         });
+    }
+
+    /**
+     * 把悬浮球夹在屏幕范围内。
+     *
+     * <p>没有托盘图标之后，悬浮球是**退出程序的唯一入口** ——
+     * 一旦被拖到屏幕外就再也点不到了，只能去任务管理器。所以必须夹住位置。
+     */
+    private void setLocationClamped(int x, int y) {
+        Rectangle screen = getGraphicsConfiguration().getBounds();
+        int maxX = screen.x + screen.width - WINDOW_SIZE;
+        int maxY = screen.y + screen.height - WINDOW_SIZE;
+        setLocation(Math.max(screen.x, Math.min(x, maxX)),
+                Math.max(screen.y, Math.min(y, maxY)));
     }
 
     private void showMenu(MouseEvent e) {
