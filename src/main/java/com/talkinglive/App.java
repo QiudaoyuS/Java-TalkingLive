@@ -19,6 +19,7 @@ import com.talkinglive.engine.WakePhrase;
 import com.talkinglive.engine.WakeWordDetector;
 import com.talkinglive.system.CaretTracker;
 import com.talkinglive.system.DpiScale;
+import com.talkinglive.system.EscapeWatcher;
 import com.talkinglive.system.ForegroundWatcher;
 import com.talkinglive.system.MicValidator;
 import com.talkinglive.system.Win32WindowStyles;
@@ -37,6 +38,7 @@ import com.talkinglive.ui.LoadingWindow;
 import com.talkinglive.ui.PreviewBar;
 import com.talkinglive.ui.SettingsWindow;
 import com.talkinglive.ui.Theme;
+import com.talkinglive.ui.Toast;
 import java.awt.EventQueue;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -109,6 +111,14 @@ public final class App {
     private final WindowsTextInjector injector = new WindowsTextInjector();
     private AudioCapture capture;
     private ForegroundWatcher foreground;
+    /**
+     * 全局 Esc 监听（§2.2/§2.3 的「任何时刻按 Esc 可取消整段」）。
+     *
+     * <p>没有它的话，{@code StateMachine.Event.CANCEL} 在生产代码里**没有生产者** ——
+     * 悬浮球与浮窗都不抢焦点、收不到键盘事件，也没有任何全局热键。
+     * 见 {@link EscapeWatcher} 的类注释。
+     */
+    private EscapeWatcher escapeWatcher;
     private final SilenceDetector silence =
             new SilenceDetector(AppConfig.DEFAULT_SILENCE_SECONDS);
 
@@ -118,6 +128,13 @@ public final class App {
     private SettingsWindow settings;
     /** 诊断窗口（状态 / 日志 / 自检）。与设置分开：一个只读、一个只写。 */
     private DiagnosticsWindow diagnostics;
+    /**
+     * 不抢焦点的提示条（替代原来的 {@code JOptionPane} 对话框）。
+     *
+     * <p>对话框会抢焦点 → 触发「前台窗口已变」→ 用户刚说的一整段被丢弃，
+     * 所以这里必须是 NOACTIVATE 的窗口。见 {@link Toast} 的类注释。
+     */
+    private volatile Toast toast;
 
     // ---- 运行时状态 ----
     private final AtomicReference<DictationSession> session = new AtomicReference<>();
@@ -375,6 +392,13 @@ public final class App {
 
         // ⑥ UI
         startUi(opts);
+
+        // ⑦ 全局 Esc → 取消本段。
+        //    §2.2/§2.3 承诺「任何时刻按 Esc 可取消整段」，而在此之前
+        //    Event.CANCEL 在生产代码里根本没有生产者（见 EscapeWatcher 类注释）。
+        //    放在 startUi 之后：这个模式（含 --self-check）才会跑 UI，
+        //    而 --doctor / --mic-test 不该去碰键盘状态。
+        startEscapeWatcher();
 
         if (opts.selfCheck) {
             runSelfCheckAndExit();
@@ -949,16 +973,22 @@ public final class App {
                 return;
             }
 
-            if (!ctx.inject() || !sm.shouldInject()) {
-                // §7：提交时前台窗口已变 → 放弃注入 + 明确提示，且不自动发送
-                String msg = "本段已放弃注入：提交时前台窗口已变，为避免把文字误发到别的程序，宁可丢弃。\n"
-                        + "（识别到的内容是：" + abbreviate(text) + "）";
-                lastInjectionError = msg;
-                log.warn("放弃注入：前台窗口已变");
-                showNotice("本段未注入", msg);
-                finishCommit(s);
-                return;
-            }
+            // ★ 这里**曾经**是 `if (!ctx.inject() || !sm.shouldInject()) { 放弃注入 }`。
+            //
+            //   实测判定这条规则太狠：它把用户刚说的一整段话直接丢掉
+            //   （日志里真实出现过「说了 3.32 秒，因为前台变了被丢弃」），
+            //   而切窗口往往只是想看一眼别的东西，或者干脆是被通知/输入法候选的
+            //   抖动带偏的。状态机那边早就注释成"改为照常提交"了
+            //   （StateMachine.onForegroundChanged），但 App 这条分支一直没跟着改 ——
+            //   于是"不再丢整段"这个修复只存在于注释和自检里，产品行为仍是丢弃。
+            //
+            //   现在照常注入：注入器会先尝试把焦点还原回目标窗口
+            //   （WindowsTextInjector.restoreForeground），还原不了就注入到当前焦点
+            //   并在下面 r.message() 那一段**明确提示** ——
+            //   文字最坏是"落在了别的地方、可以剪走"，而不是凭空消失。
+            //
+            //   唯一仍然要拦住的是**自动发送**：前台已经变了还去按回车，
+            //   等于把没写完的消息发给另一个程序。见 doInject 里的 autoSendAllowed。
 
             // 注入放到独立线程：SendInput 与阻塞式提示都不该占着 EDT
             Thread worker = new Thread(() -> doInject(s, text, ctx), "inject-worker");
@@ -1021,12 +1051,17 @@ public final class App {
                         + "\n（识别到的内容是：" + abbreviate(text) + "）");
             }
 
-            if (config.autoSend() && shouldAutoSend(ctx.reason())) {
+            // 自动发送的条件收敛成一条纯规则（含"前台已变就不发"），见 StateMachine.autoSendAllowed
+            if (config.autoSend() && StateMachine.autoSendAllowed(ctx, config.sendOnSilenceTimeout())) {
                 TextInjector.Result pr = injector.press(TextInjector.KeyCombo.fromConfig(config.sendKey()));
                 if (!pr.ok()) {
                     log.warn("自动发送失败：{}", pr.message());
                     showNotice("自动发送失败", pr.message());
                 }
+            } else if (config.autoSend() && !ctx.inject()) {
+                // 前台在提交时变了：文字照注入（可能落在别处，已在上方提示），
+                // 但**绝不**按发送键 —— 一个回车落在聊天工具里就是"把没写完的消息发出去"。
+                log.info("提交时前台窗口已变，已跳过自动发送（避免把发送键打到别的程序）");
             } else if (config.autoSend()) {
                 log.info("静音超时结束且未开启「静音超时后发送」，只注入不发送");
             }
@@ -1044,18 +1079,12 @@ public final class App {
     }
 
     /**
-     * 静音超时是否也要自动发送。
-     *
-     * <p>附录 A 单列了「静音超时后发送」这一项，默认关闭：静音兜底本来就是
-     * 「用户忘了说结束词」的场景，此时再自动敲一次 Enter 风险更大。
+     * 自动发送的两条规则（静音超时开关、提交时前台已变则不发送）已移到
+     * {@link StateMachine#autoSendAllowed(StateMachine.CommitContext, boolean)} ——
+     * 后者需要 {@code CommitContext} 里"前台是否还是目标"那一维，而在 App 里看不见它，
+     * 于是"前台变了还按回车"这个真正的风险没有任何地方拦得住。移过去之后它是纯函数，
+     * 由 {@code StateMachineTest} 直接钉住。
      */
-    private boolean shouldAutoSend(StateMachine.EndReason reason) {
-        if (reason == StateMachine.EndReason.SILENCE_TIMEOUT) {
-            return config.sendOnSilenceTimeout();
-        }
-        return true;
-    }
-
     private void finishCommit(DictationSession s) {
         session.compareAndSet(s, null);
         preview.reset();
@@ -1173,6 +1202,23 @@ public final class App {
         });
     }
 
+    /**
+     * 接线全局 Esc → {@code StateMachine.Event.CANCEL}。
+     *
+     * <p>接线失败（非 Windows / 原生库不可用）不算致命：产品其余部分照常工作，
+     * 只是回到"没有 Esc 取消"的状态 —— 但**必须记进日志**，否则用户会以为
+     * 按了没反应是别的原因。
+     */
+    private void startEscapeWatcher() {
+        try {
+            escapeWatcher = EscapeWatcher.system(() -> sm.handle(StateMachine.Event.CANCEL));
+            escapeWatcher.start();
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            escapeWatcher = null;
+            log.warn("Esc 取消无法接线（GetAsyncKeyState 不可用）：{}", e.toString());
+        }
+    }
+
     /** 悬浮球的鼠标交互与菜单动作（悬浮球是全应用唯一入口）。 */
     private final class BallActions implements FloatingBall.Listener {
 
@@ -1252,12 +1298,17 @@ public final class App {
     }
 
     /**
-     * 提示气泡：注入失败等**静默失败必须可见**（§7）。
+     * 提示条：注入失败等**静默失败必须可见**（§7）。
      *
      * <p><b>必须去重。</b>同一类失败常常是持续的（麦克风被拔掉就会每几秒失败一次），
-     * 若每次都弹一个对话框，屏幕上会堆满窗口——实测症状是**对话框盖住了悬浮球，
+     * 若每次都弹一个窗口，屏幕上会堆满窗口——实测症状是**窗口盖住了悬浮球，
      * 用户连点都点不到**，等于把唯一入口也弄丢了。因此同一个标题在
      * {@link #NOTICE_THROTTLE_MILLIS} 内只提示一次，其余只进日志。
+     *
+     * <p><b>必须不抢焦点。</b>这里原先是 {@code JOptionPane} 对话框，它会成为前台窗口，
+     * 于是"提示"本身触发了「前台窗口已变」——用户刚说的一整段话因此被丢弃。
+     * 现在换成 {@link Toast}（同样不抢焦点、不遮挡悬浮球、自动消失），
+     * 并且登记进 {@code ForegroundWatcher} 的忽略名单兜底。见 {@code ui.Toast} 的类注释。
      */
     private void showNotice(String title, String detail) {
         log.info("提示：{} —— {}", title, detail == null ? "" : detail.replace("\n", " / "));
@@ -1271,17 +1322,29 @@ public final class App {
         lastNoticeAt.put(title, now);
 
         onUi(() -> {
-            // 托盘气泡已随托盘入口一起去掉（2026-09-16，见 removeTray 的说明）。
-            // 现在只剩对话框这一条通路，它本来就是最可靠的那条。
-            // 对话框是**非模态**的：模态对话框会阻塞调用线程并可能盖住悬浮球。
-            javax.swing.JOptionPane pane = new javax.swing.JOptionPane(detail, javax.swing.JOptionPane.INFORMATION_MESSAGE);
-            javax.swing.JDialog dialog = pane.createDialog(settings, title);
-            dialog.setModal(false);
-            dialog.setAlwaysOnTop(true);
-            dialog.setVisible(true);
+            // 托盘气泡已随托盘入口一起去掉（2026-09-16）。现在的通路是不抢焦点的提示条：
+            // 它没有对话框那两个致命副作用（抢焦点、盖住悬浮球）。
+            if (toast == null) {
+                toast = new Toast();
+                // 不抢焦点必须在窗口**第一次显示之前**设好（§4.4），否则会先闪一下焦点
+                toast.addNotify();
+                Win32WindowStyles.applyNoActivateToolWindow(toast);
+                if (foreground != null) {
+                    foreground.ignore(Win32WindowStyles.hwndOf(toast));
+                }
+            }
+            toast.show(title, detail);
         });
     }
 
+    /**
+     * 致命错误的对话框（启动期失败、"已经在运行"）。
+     *
+     * <p>这里**刻意保留真对话框**，与 {@link #showNotice} 的提示条区分开：
+     * 它出现的场合是"程序根本起不来"，此时没有悬浮球、没有提示条可用，
+     * 而启动器是 {@code javaw}（没有控制台）—— 一个必须被看见、且必须拦住用户的
+     * 模态错误框是唯一通路。运行期的提示才需要不抢焦点。
+     */
     private void showFatal(String title, String detail) {
         try {
             javax.swing.JOptionPane.showMessageDialog(null, detail, title,
@@ -1392,8 +1455,17 @@ public final class App {
             }
         }
         // 热更新：静音秒数、词表（需要重建识别器）
-        boolean wordsChanged = !candidate.wakeWord().equals(config.wakeWord())
-                || !candidate.endWord().equals(config.endWord());
+        //
+        // ★ 先把**旧值**取出来再比。原来写的是 `!candidate.wakeWord().equals(config.wakeWord())`，
+        //   而设置窗口那时传进来的正是 config 自己（活配置对象），于是这句成了
+        //   "同一个对象和自己比" —— 恒为 false，rebuildKeywordDetector() 永远不会被调用。
+        //   症状：改完唤醒词，界面说「已保存并立即生效」，实际还在听旧词，必须重启。
+        //   现在设置窗口传的是副本（AppConfig.copy()），这里再用旧值快照兜一层：
+        //   无论调用方传的是不是同一个对象，判断都成立。
+        String oldWakeWord = config.wakeWord();
+        String oldEndWord = config.endWord();
+        boolean wordsChanged = !candidate.wakeWord().equals(oldWakeWord)
+                || !candidate.endWord().equals(oldEndWord);
         this.config = candidate;
         silence.setTimeoutSeconds(candidate.silenceSeconds());
         injector.setCharGapMillis(candidate.charGapMillis());
@@ -1826,7 +1898,7 @@ public final class App {
                     line.ok() ? "[ok]  " : "[FAIL]",
                     line.detail() == null ? "" : line.detail().replace("\n", " | ")));
         }
-        sb.append('\n').append(SelfTest.run().report());
+        sb.append('\n').append(SelfTest.run(new SelfTestEnv()).report());
         sb.append("\n注：--doctor 不启动 UI，因此上面没有「悬浮球不抢焦点 / 右键菜单」那几项。\n")
                 .append("    那几项需要真实桌面与真实鼠标，请用 --self-check 单独跑。\n");
         String text = sb.toString();
@@ -1842,7 +1914,9 @@ public final class App {
 
     /** 跑自检并退出（{@code --self-check}）。 */
     private void runSelfCheckAndExit() {
-        SelfTest.Result r = SelfTest.run();
+        // 带探针跑：真实路径那几条断言（改配置是否真生效、Esc 是否真接线、
+        // 提示条是否真的不抢焦点）只有拿到 App 才能验。
+        SelfTest.Result r = SelfTest.run(new SelfTestEnv());
         String ascii = toAscii(r.report());
         System.out.println(ascii);
         try {
@@ -1874,6 +1948,12 @@ public final class App {
 
     private void shutdown() {
         log.info("正在退出…");
+        // Esc 监听要先停：它会在任意线程上回调状态机，退出过程中不该再有新事件进来
+        if (escapeWatcher != null) {
+            log.info("Esc 取消监听共触发 {} 次", escapeWatcher.fires());
+            escapeWatcher.close();
+            escapeWatcher = null;
+        }
         try {
             if (capture != null) {
                 capture.close();
@@ -1906,6 +1986,10 @@ public final class App {
             if (settings != null) {
                 settings.dispose();
             }
+            if (toast != null) {
+                toast.hideToast();
+                toast.dispose();
+            }
         });
         log.info("=== TalkingLive 退出 ===");
         if (System.getProperty("talkinglive.noExit", "false").equals("true")) {
@@ -1926,6 +2010,70 @@ public final class App {
     }
 
     // ------------------------------------------------------------ 测试支撑
+
+    /**
+     * 自检用的 App 探针（见 {@code SelfTest.Env} 的注释）。
+     *
+     * <p>存在的理由是三条真实教训：自检里「Esc 取消」「切窗口照常提交」「配置改了生效」
+     * 这三条**都只测了替身**，于是真实路径坏了它们照样全绿。
+     * 这里把真实对象交出去，让自检直接对它们下断言。
+     */
+    private final class SelfTestEnv implements SelfTest.Env {
+
+        @Override
+        public AppConfig config() {
+            return config;
+        }
+
+        @Override
+        public String applyConfig(AppConfig candidate) {
+            return applyConfigForTest(candidate);
+        }
+
+        @Override
+        public String wakeDetectorDescription() {
+            return wakeDetector == null ? null : wakeDetector.describe();
+        }
+
+        @Override
+        public SilenceDetector silenceDetector() {
+            return silence;
+        }
+
+        @Override
+        public StateMachine stateMachine() {
+            return sm;
+        }
+
+        @Override
+        public boolean escapeWatcherRunning() {
+            EscapeWatcher w = escapeWatcher;
+            return w != null && w.running();
+        }
+
+        @Override
+        public boolean uiStarted() {
+            return ball != null;
+        }
+
+        @Override
+        public void showNotice(String title, String detail) {
+            App.this.showNotice(title, detail);
+        }
+
+        @Override
+        public java.awt.Window lastNoticeWindow() {
+            return toast;
+        }
+
+        @Override
+        public void hideNotice() {
+            Toast t = toast;
+            if (t != null) {
+                onUi(t::hideToast);
+            }
+        }
+    }
 
     AppConfig configForTest() {
         return config;

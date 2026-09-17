@@ -547,4 +547,70 @@ class StateMachineTest {
         }
         assertNotNull(s.state());
     }
+
+    // ============================================================ 自动发送规则
+
+    /**
+     * {@link StateMachine#autoSendAllowed} —— 这条规则原来散在 App 里，只判
+     * 「静音超时 + 开关」，**漏掉了最关键的一维**：提交时前台窗口还是不是目标。
+     *
+     * <p>后果不对称，所以必须钉死：文字注入到别的窗口顶多是位置不对（还能剪走），
+     * 而一个回车落在聊天工具里就是**把还没写完的消息发出去**，不可挽回。
+     */
+    @Nested
+    @DisplayName("自动发送规则（前台已变时绝不按回车）")
+    class AutoSend {
+
+        private StateMachine.CommitContext ctx(boolean inject, EndReason reason) {
+            return new StateMachine.CommitContext(1, inject, reason);
+        }
+
+        @Test
+        @DisplayName("正常提交（前台没变）应当发送")
+        void normalCommitSends() {
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.END_WORD), false));
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.MANUAL), false));
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.MAX_SEGMENT), false));
+        }
+
+        @Test
+        @DisplayName("提交时前台已变：无论什么结束原因都**不**发送")
+        void foregroundChangedNeverSends() {
+            for (EndReason reason : EndReason.values()) {
+                assertFalse(StateMachine.autoSendAllowed(ctx(false, reason), true),
+                        "前台已变却仍要发送：" + reason);
+            }
+        }
+
+        @Test
+        @DisplayName("静音超时结束要单独看「静音超时后发送」开关（附录 A，默认关）")
+        void silenceTimeoutFollowsItsOwnSwitch() {
+            assertFalse(StateMachine.autoSendAllowed(ctx(true, EndReason.SILENCE_TIMEOUT), false));
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.SILENCE_TIMEOUT), true));
+        }
+
+        @Test
+        @DisplayName("结束词/手动结束不看那个开关（它只管静音超时）")
+        void otherReasonsIgnoreSilenceSwitch() {
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.END_WORD), false));
+            assertTrue(StateMachine.autoSendAllowed(ctx(true, EndReason.MANUAL), false));
+        }
+
+        @Test
+        @DisplayName("切窗口后仍照常提交：ctx.inject() 为假但状态机确实放行了提交")
+        void foregroundChangeStillCommits() {
+            Recorder r = new Recorder();
+            StateMachine s = new StateMachine(r);
+            s.handle(Event.WAKE_WORD);
+            s.handle(Event.FOREGROUND_CHANGED);
+            assertEquals(State.COMMITTING, s.state(), "切窗口必须仍然结束本段（否则就是丢话）");
+            s.handle(Event.REFINE_DONE);
+            assertEquals(1, r.commits, "切窗口后必须仍然放行提交");
+            assertNotNull(r.lastCommit);
+            assertFalse(r.lastCommit.inject(), "前台已变 → inject 标志为假，供上层决定要不要自动发送");
+            // 而「注入与否」与「要不要发送」是两件事：文字照注入（由 App 做，走焦点还原），
+            // 发送则被上面那条规则拦住。
+            assertFalse(StateMachine.autoSendAllowed(r.lastCommit, true));
+        }
+    }
 }

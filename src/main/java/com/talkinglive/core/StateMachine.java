@@ -217,6 +217,29 @@ public final class StateMachine {
         return !foregroundChanged;
     }
 
+    /**
+     * 提交完成后**是否允许自动发送**。
+     *
+     * <p>这条规则原来散在 {@code App} 里，只判「静音超时 + 开关」，漏掉了最关键的一条：
+     * 提交时前台窗口已经变了就绝不能按发送键 —— 文字注入到别的窗口顶多是位置不对，
+     * 而一个回车落在聊天工具里就是**把还没写完的消息发出去**，不可挽回。
+     *
+     * <p>放在状态机里是因为它是纯规则：{@link CommitContext#inject()} 就是
+     * 「目标窗口还是当前前台吗」，与 {@link #shouldInject()} 同源。这样它可以被单测
+     * 直接钉住，而不是只能靠一个跑不起来的集成场景来"证明"。
+     *
+     * @param sendOnSilenceTimeout 静音超时结束时是否也发送（附录 A 的开关）
+     */
+    public static boolean autoSendAllowed(CommitContext ctx, boolean sendOnSilenceTimeout) {
+        if (!ctx.inject()) {
+            return false;
+        }
+        if (ctx.reason() == EndReason.SILENCE_TIMEOUT) {
+            return sendOnSilenceTimeout;
+        }
+        return true;
+    }
+
     /** 当前段落的代数；每次进入 LISTENING 递增。用于丢弃上一段的迟到回调（§2.1）。 */
     public synchronized long generation() {
         return generation;

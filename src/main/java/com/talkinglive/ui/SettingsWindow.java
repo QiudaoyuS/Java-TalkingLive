@@ -145,6 +145,15 @@ public class SettingsWindow extends JFrame {
      * 没有这个标志时，设置窗口一构造就会保存两次配置。
      */
     private boolean loading;
+    /**
+     * 设置窗口正在编辑的**配置副本**（见 {@link AppConfig#copy()}）。
+     *
+     * <p>监听器改的一律是它，而不是 {@code host.config()} 返回的活配置对象；
+     * {@link #reloadFromConfig()} 每次打开窗口都会把它重新同步成活配置的快照，
+     * 所以控件里显示的值与 {@code draft} 里的值永远一致 —— 不会出现
+     * 「屏幕上是对的、提交上去的是上次被拒绝的脏值」。
+     */
+    private AppConfig draft;
     /** 「已保存」提示的自动淡出计时器（见 showSaved）。 */
     private Timer savedTimer;
 
@@ -208,7 +217,16 @@ public class SettingsWindow extends JFrame {
     // ==================== 表单 ====================
 
     private JComponent buildForm() {
-        AppConfig cfg = host.config();
+        // ★ 必须是 host.config() 的**副本**，不能直接用那个活对象。
+        //
+        // 监听器是就地改配置对象的（draft.setWakeWord(...) 等），而 host.config() 给的
+        // 就是 App 正在生效的那份配置。用活对象的两个后果都实测过：
+        //   ① 被 validate() 拒绝的非法值其实已经写进了运行中的配置；
+        //   ② App.applyConfig 里「唤醒词/结束词变了吗」变成同一对象自比，恒为 false，
+        //      于是改唤醒词永远不会重建检测器，而界面写着「已保存并立即生效」。
+        // 详见 AppConfig.copy() 的注释。
+        draft = host.config().copy();
+        AppConfig cfg = draft;
 
         JPanel p = new JPanel(new GridBagLayout());
         p.setBackground(Theme.BG);
@@ -288,40 +306,42 @@ public class SettingsWindow extends JFrame {
         // （构造时 reloadFromConfig 回填 5 个控件、窗口首次显示时又回填一次），
         // 每次都重跑词表校验、重打日志、重算提醒。用户什么都没改，
         // 程序却做了两遍无用功，日志里也留下两遍同样的记录。
+        // 监听器一律改 draft（字段）而不是捕获局部 cfg：reloadFromConfig() 每次
+        // 打开窗口都会把 draft 换成新的快照，监听器必须跟着看到最新的那一个。
         bindText(wakeField, v -> {
             if (loading) {
                 return;
             }
-            cfg.setWakeWord(v);
-            commit(cfg);
+            draft.setWakeWord(v);
+            commit(draft);
         });
         bindText(endField, v -> {
             if (loading) {
                 return;
             }
-            cfg.setEndWord(v);
-            commit(cfg);
+            draft.setEndWord(v);
+            commit(draft);
         });
         silenceBox.addActionListener(e -> {
             if (!loading && silenceBox.getSelectedIndex() >= 0) {
-                cfg.setSilenceSeconds(SILENCE_CHOICES[silenceBox.getSelectedIndex()]);
-                commit(cfg);
+                draft.setSilenceSeconds(SILENCE_CHOICES[silenceBox.getSelectedIndex()]);
+                commit(draft);
             }
         });
         autoSendBox.addItemListener(e -> {
             if (loading) {
                 return;
             }
-            cfg.setAutoSend(autoSendBox.isSelected());
+            draft.setAutoSend(autoSendBox.isSelected());
             sendKeyBox.setEnabled(autoSendBox.isSelected());
-            commit(cfg);
+            commit(draft);
         });
         sendKeyBox.addActionListener(e -> {
             if (loading) {
                 return;
             }
-            cfg.setSendKey(AppConfig.SendKey.fromDisplay((String) sendKeyBox.getSelectedItem()));
-            commit(cfg);
+            draft.setSendKey(AppConfig.SendKey.fromDisplay((String) sendKeyBox.getSelectedItem()));
+            commit(draft);
         });
 
         return p;
@@ -730,7 +750,13 @@ public class SettingsWindow extends JFrame {
     }
 
     private void reloadFromConfig() {
-        AppConfig cfg = host.config();
+        // ★ 重新取一份快照。这一步不只是为了回填控件 —— 它同时把 draft 拉回
+        //   "与生效配置一致"的状态：上一次提交若被 validate() 拒绝，draft 里留着
+        //   那个非法值，而控件显示的是生效值；不同步的话，用户下次改任何一个字段，
+        //   提交上去的都是那份带脏值的 draft，于是**又一次**被拒绝 ——
+        //   表现为"屏幕上明明是对的，却一直说我改错了"。这正是"改了没反应"那一类。
+        draft = host.config().copy();
+        AppConfig cfg = draft;
         // 回填期间屏蔽监听器：否则「控件被赋值」会被当成「用户改了值」，
         // 走到 commit → 保存配置 + 重跑词表校验 + 重算提醒。用户什么都没做，
         // 程序却做了两遍（实测日志里就是两遍）。

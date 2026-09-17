@@ -447,6 +447,76 @@ class AudioTest {
             assertFalse(d.accept(0.0001, 0));
             assertFalse(d.accept(0.0001, -1));
         }
+
+        /**
+         * 运行期改静音秒数 —— 守的是一个**真实的"改了没反应"**。
+         *
+         * <p>{@code timeoutSeconds} 原先是 {@code final}，而 {@code setTimeoutSeconds}
+         * 只切了 {@code enabled} 开关。于是设置窗口里把 5 秒改成 8 秒，
+         * **只有"开/关"生效，秒数永远是构造时那个值** ——
+         * 而状态行是按配置渲染的（「静音 8 秒后自动结束」），显示与行为不一致。
+         */
+        @Test
+        @DisplayName("运行期改秒数真的生效（原来只切开关，秒数还是构造时的值）")
+        void timeoutFollowsRuntimeChange() {
+            SilenceDetector d = new SilenceDetector(5);
+            assertEquals(5.0, d.timeoutSeconds(), 1e-9);
+
+            d.setTimeoutSeconds(8);
+            assertEquals(8.0, d.timeoutSeconds(), 1e-9, "配置里的秒数必须真的改了");
+
+            // 说够话，然后静音 5 秒：按 8 秒的设定**不该**触发
+            d.accept(0.2, 0.5);
+            boolean firedEarly = false;
+            for (int i = 0; i < 25; i++) {      // 累计 5.0 秒静音
+                firedEarly |= d.accept(0.0001, 0.2);
+            }
+            assertFalse(firedEarly, "刚改成 8 秒却按 5 秒结束了 —— 说明秒数没生效");
+            assertTrue(d.silentSeconds() >= 5.0);
+
+            // 继续到 8 秒才触发
+            boolean fired = false;
+            for (int i = 0; i < 20 && !fired; i++) {
+                fired = d.accept(0.0001, 0.2);
+            }
+            assertTrue(fired, "到了 8 秒应当触发");
+        }
+
+        @Test
+        @DisplayName("运行期把秒数改成 0 = 关闭，改成非 0 = 重新启用")
+        void runtimeChangeAlsoTogglesEnabled() {
+            SilenceDetector d = new SilenceDetector(5);
+            assertTrue(d.enabled());
+
+            d.setTimeoutSeconds(0);
+            assertFalse(d.enabled(), "0 表示关闭");
+            d.accept(0.2, 1.0);
+            for (int i = 0; i < 50; i++) {
+                assertFalse(d.accept(0.0001, 1.0), "关闭后永远不该触发");
+            }
+
+            d.setTimeoutSeconds(3);
+            assertTrue(d.enabled(), "非 0 表示重新启用");
+            d.reset();
+            d.accept(0.2, 0.5);
+            boolean fired = false;
+            for (int i = 0; i < 30 && !fired; i++) {
+                fired = d.accept(0.0001, 0.2);
+            }
+            assertTrue(fired, "重新启用后应按 3 秒触发");
+        }
+
+        @Test
+        @DisplayName("调大秒数时不清空已累计的静音（改完就按新值算，而不是从头再等）")
+        void shrinkingTimeoutFiresOnNextFrame() {
+            SilenceDetector d = new SilenceDetector(10);
+            d.accept(0.2, 0.5);
+            for (int i = 0; i < 20; i++) {      // 累计 4 秒静音
+                d.accept(0.0001, 0.2);
+            }
+            d.setTimeoutSeconds(3);             // 调到比已累计的还短
+            assertTrue(d.accept(0.0001, 0.2), "已经静音 4 秒，改成 3 秒后应当立刻触发");
+        }
     }
 
     // ============================================================ WAV

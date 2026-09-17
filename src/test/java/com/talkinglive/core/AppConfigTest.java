@@ -555,4 +555,106 @@ class AppConfigTest {
             assertEquals(out.hotwordMap(), back.hotwordMap());
         }
     }
+
+    /**
+     * 副本（{@code copy()}）—— 这一组守的是一个**真实缺陷**，不是接口洁癖。
+     *
+     * <p>设置窗口原先直接持有 {@code host.config()} 返回的活配置对象，于是：
+     * ① {@code App.applyConfig} 里「唤醒词变了吗」变成同一对象自比，恒为 false，
+     * 改唤醒词永远不会重建检测器（界面却写着「已保存并立即生效」）；
+     * ② 被 {@code validate()} 拒绝的非法值其实已经写进了运行中的配置。
+     * 只要 {@code copy()} 不再独立，这两条就会重新出现。
+     */
+    @Nested
+    @DisplayName("副本 copy()（设置窗口只在副本上改）")
+    class Copy {
+
+        private AppConfig full() {
+            AppConfig c = new AppConfig();
+            c.setWakeWord("小助手");
+            c.setEndWord("完毕");
+            c.setSilenceSeconds(7);
+            c.setAutoSend(true);
+            c.setSendKey(SendKey.CTRL_ENTER);
+            c.setSendOnSilenceTimeout(true);
+            c.setMaxSegmentSeconds(90);
+            c.setCharGapMillis(35);
+            c.setHotwords("诶爱=AI");
+            c.ball().setPosition(1234, 567);
+            c.ball().setDock(DockSide.RIGHT);
+            c.ball().setDockEnabled(false);
+            return c;
+        }
+
+        @Test
+        @DisplayName("改副本不影响原对象（否则「改了没反应」与「非法值已生效」会一起回来）")
+        void mutatingCopyLeavesOriginalAlone() {
+            AppConfig live = full();
+            AppConfig draft = live.copy();
+
+            draft.setWakeWord("你好");
+            draft.setEndWord("");
+            draft.setSilenceSeconds(2);
+            draft.setAutoSend(false);
+            draft.setSendKey(SendKey.ENTER);
+            draft.setMaxSegmentSeconds(30);
+            draft.setCharGapMillis(0);
+            draft.setHotwords("");
+            draft.ball().setPosition(1, 2);
+            draft.ball().setDock(DockSide.LEFT);
+
+            assertEquals("小助手", live.wakeWord(), "原对象的唤醒词被副本改掉了");
+            assertEquals("完毕", live.endWord());
+            assertEquals(7, live.silenceSeconds());
+            assertTrue(live.autoSend());
+            assertEquals(SendKey.CTRL_ENTER, live.sendKey());
+            assertEquals(90, live.maxSegmentSeconds());
+            assertEquals(35, live.charGapMillis());
+            assertEquals("诶爱=AI", live.hotwords());
+            assertEquals(1234, live.ball().x());
+            assertEquals(567, live.ball().y());
+            assertEquals(DockSide.RIGHT, live.ball().dock());
+        }
+
+        @Test
+        @DisplayName("每个字段都真的被复制了（漏一个就是「改它没反应」）")
+        void copyCarriesEveryField() {
+            AppConfig live = full();
+            AppConfig draft = live.copy();
+
+            assertEquals("小助手", draft.wakeWord());
+            assertEquals("完毕", draft.endWord());
+            assertEquals(7, draft.silenceSeconds());
+            assertTrue(draft.autoSend());
+            assertEquals(SendKey.CTRL_ENTER, draft.sendKey());
+            assertTrue(draft.sendOnSilenceTimeout());
+            assertEquals(90, draft.maxSegmentSeconds());
+            assertEquals(35, draft.charGapMillis());
+            assertEquals("诶爱=AI", draft.hotwords());
+            assertEquals(1234, draft.ball().x());
+            assertEquals(567, draft.ball().y());
+            assertEquals(DockSide.RIGHT, draft.ball().dock());
+            assertFalse(draft.ball().dockEnabled());
+        }
+
+        @Test
+        @DisplayName("没保存过位置时副本也「没有位置」（x/y 是哨兵值，不能被当成有效坐标）")
+        void copyKeepsMissingPositionMissing() {
+            AppConfig live = new AppConfig();
+            assertFalse(live.ball().hasPosition());
+            AppConfig draft = live.copy();
+            assertFalse(draft.ball().hasPosition(),
+                    "副本凭空多出了位置，悬浮球会跑到 (MIN_VALUE, MIN_VALUE)");
+        }
+
+        @Test
+        @DisplayName("副本与原文各自独立校验：副本非法不影响原文")
+        void invalidCopyDoesNotPoisonOriginal() {
+            AppConfig live = full();
+            AppConfig draft = live.copy();
+            draft.setWakeWord("");          // 非法
+            assertThrows(ConfigException.class, draft::validate);
+            live.validate();                // 原文必须仍然合法（不抛）
+        }
+    }
 }

@@ -293,6 +293,45 @@ public final class AppConfig {
         return ball;
     }
 
+    // ------------------------------------------------------------ 拷贝
+
+    /**
+     * 深拷贝。
+     *
+     * <p><b>为什么必须有它：</b>设置窗口原先直接持有 {@code host.config()} 返回的
+     * <b>活配置对象</b>，用户每敲一个字都改在"正在生效的那份配置"上。由此产生两个
+     * 真实缺陷（都是静态审查抓出来的，见 §4.3 的「配置必须显式校验」）：
+     *
+     * <ol>
+     *   <li>被 {@link #validate()} 拒绝的非法值<b>其实已经写进运行中的配置</b>了 ——
+     *       界面却承诺「失败时不破坏当前生效值」；</li>
+     *   <li>{@code App.applyConfig} 里那句「唤醒词 / 结束词是否变了」变成了
+     *       <b>同一个对象和自己比</b>，恒为 {@code false} —— 于是改唤醒词
+     *       <b>永远不会重建检测器</b>，而界面还写着「修改已保存并立即生效」。</li>
+     * </ol>
+     *
+     * <p>所以设置窗口只在副本上改，改完整份交给 {@code applyConfig} 校验；
+     * 校验不过就整份丢弃，生效中的配置一个字都没被碰过。
+     */
+    public AppConfig copy() {
+        AppConfig c = new AppConfig();
+        c.wakeWord = wakeWord;
+        c.endWord = endWord;
+        c.silenceSeconds = silenceSeconds;
+        c.autoSend = autoSend;
+        c.sendKey = sendKey;
+        c.sendOnSilenceTimeout = sendOnSilenceTimeout;
+        c.maxSegmentSeconds = maxSegmentSeconds;
+        c.charGapMillis = charGapMillis;
+        c.hotwords = hotwords;
+        // 位置没保存过时 x/y 是 MIN_VALUE，这里必须原样带过去，
+        // 否则 hasPosition() 会从 false 变成 true，悬浮球位置凭空"有了"。
+        c.ball.setPosition(ball.x(), ball.y());
+        c.ball.setDock(ball.dock());
+        c.ball.setDockEnabled(ball.dockEnabled());
+        return c;
+    }
+
     // ------------------------------------------------------------ 校验
 
     /**

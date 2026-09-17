@@ -108,8 +108,90 @@ public final class SelfTest {
 
     private SelfTest() {}
 
+    /**
+     * App 侧的探针：让自检能走**真实路径**，而不是替身。
+     *
+     * <p>为什么要专门做这个接口：本项目最被信任的三条自检，恰好都覆盖不到它们
+     * 声称覆盖的真实路径 ——
+     * <ul>
+     *   <li>「Esc 取消后一个字都没注入」直接给状态机发事件，而**输入路径当时根本不存在**；</li>
+     *   <li>「切窗口后仍照常提交」用的是替身注入器，而真实 {@code App} 那条分支仍然丢话；</li>
+     *   <li>配置生效链路只有 {@code StubHost.applyConfig}（它恒返回 {@code null}），
+     *       于是"改唤醒词永远不重建检测器"完全没被拦住。</li>
+     * </ul>
+     * 共同点是：**断言测的是替身，不是产品**。所以这里让 {@code App} 把真实对象交出来，
+     * 由自检直接对它们下断言。没拿到探针就如实报告，不假装通过。
+     */
+    public interface Env {
+
+        /** App 当前生效的配置（自检只读它；要改就先 {@code copy()}）。 */
+        default AppConfig config() {
+            return null;
+        }
+
+        /** 走**真实的**配置热更新链路（校验 → 落盘 → 作用于运行中的组件）。返回错误消息或 null。 */
+        default String applyConfig(AppConfig candidate) {
+            return "App 未提供 applyConfig 探针";
+        }
+
+        /** 运行中的唤醒检测器描述（含它此刻在听的词）；不可用时 null。 */
+        default String wakeDetectorDescription() {
+            return null;
+        }
+
+        /** 运行中的静音计时器；不可用时 null。 */
+        default SilenceDetector silenceDetector() {
+            return null;
+        }
+
+        /** App 自己的状态机。 */
+        default StateMachine stateMachine() {
+            return null;
+        }
+
+        /** 全局 Esc 监听是否在跑。 */
+        default boolean escapeWatcherRunning() {
+            return false;
+        }
+
+        /** UI 是否已启动（{@code --doctor} 不启动 UI，那两项检查无从验证）。 */
+        default boolean uiStarted() {
+            return false;
+        }
+
+        /** 触发一次真实的提示条。 */
+        default void showNotice(String title, String detail) {
+        }
+
+        /** 最近一次提示条的窗口；没有则为 null。 */
+        default java.awt.Window lastNoticeWindow() {
+            return null;
+        }
+
+        /** 收起提示条。 */
+        default void hideNotice() {
+        }
+    }
+
     /** 跑全部自检。**必须在非 EDT 线程上调用**（见类注释）。 */
     public static Result run() {
+        return new Result(List.copyOf(collect().items));
+    }
+
+    /**
+     * 跑全部自检，外加「真实路径」一节（见 {@link Env}）。
+     *
+     * <p>只有拿到 {@code App} 探针时才跑那一节 —— 没有探针就不声称验证过。
+     */
+    public static Result run(Env env) {
+        SelfTest t = collect();
+        if (env != null) {
+            t.runRealPath(env);
+        }
+        return new Result(List.copyOf(t.items));
+    }
+
+    private static SelfTest collect() {
         SelfTest t = new SelfTest();
         t.runCoreLogic();
         t.runPipeline();
@@ -118,7 +200,7 @@ public final class SelfTest {
         } else {
             t.add("UI", "图形环境", false, "无可用显示（headless），UI 自检已跳过——这类检查必须在真实桌面上跑");
         }
-        return new Result(List.copyOf(t.items));
+        return t;
     }
 
     private static boolean canTouchUi() {
@@ -200,6 +282,181 @@ public final class SelfTest {
 
     private void add(String category, String name, boolean ok, String detail) {
         items.add(new Item(category, name, ok, detail));
+    }
+
+    // ============================================================ 真实路径
+
+    /**
+     * 通过 {@link Env} 走 App 的**真实**链路（而不是替身）。
+     *
+     * <p>这一节专门盯住"改了没反应"这一类缺陷 —— 它们的共同特征是
+     * **界面说生效了、状态机/替身测试也都过了，只有真实路径没接上**：
+     * <ul>
+     *   <li>改唤醒词/结束词：原来因为配置对象是同一个引用，判断恒为 false，
+     *       {@code rebuildKeywordDetector()} 永远不会被调用；</li>
+     *   <li>改静音秒数：原来 {@code timeoutSeconds} 是 final，只有开关生效；</li>
+     *   <li>按 Esc：{@code Event.CANCEL} 在产品里根本没有生产者；</li>
+     *   <li>提示：原来用 {@code JOptionPane}，会抢焦点并把本段判成"前台已变"而丢弃。</li>
+     * </ul>
+     */
+    private void runRealPath(Env env) {
+        AppConfig live = env.config();
+        if (live == null) {
+            add("真实路径", "App 探针可用", false,
+                    "没有拿到 App 探针，配置热更新与 Esc 的真实链路未被验证");
+            return;
+        }
+        // applyConfig 会落盘，这里把 home 临时指到临时目录 ——
+        // 自检不该动用户真实的 config.json（runCoreLogic 里也是同一套做法）。
+        String oldHome = System.getProperty(com.talkinglive.core.AppPaths.HOME_PROPERTY);
+        java.nio.file.Path tmp = null;
+        try {
+            tmp = java.nio.file.Files.createTempDirectory("tl-reality");
+            System.setProperty(com.talkinglive.core.AppPaths.HOME_PROPERTY, tmp.toString());
+            com.talkinglive.core.AppPaths.ensureDirectories();
+
+            checkConfigHotUpdate(env, live);
+            checkSilenceHotUpdate(env);
+            checkEscapeWiring(env);
+            checkNoticeDoesNotStealFocus(env);
+        } catch (Exception e) {
+            add("真实路径", "真实链路自检", false, e.toString());
+        } finally {
+            if (oldHome == null) {
+                System.clearProperty(com.talkinglive.core.AppPaths.HOME_PROPERTY);
+            } else {
+                System.setProperty(com.talkinglive.core.AppPaths.HOME_PROPERTY, oldHome);
+            }
+            deleteRecursively(tmp);
+        }
+    }
+
+    /** 改唤醒词 → 运行中的检测器必须真的换成新词（这条守的是"改了没反应"）。 */
+    private void checkConfigHotUpdate(Env env, AppConfig live) {
+        if (env.wakeDetectorDescription() == null) {
+            add("真实路径", "改唤醒词后检测器真的重建", false,
+                    "唤醒检测器不可用（模型未加载？），热更新链路无法验证");
+            return;
+        }
+        String originalWake = live.wakeWord();
+        String candidate = alternativeWakeWord(originalWake);
+
+        AppConfig draft = live.copy();
+        draft.setWakeWord(candidate);
+        String err = env.applyConfig(draft);
+        String after = env.wakeDetectorDescription();
+        add("真实路径", "改唤醒词：检测器真的换成了新词（不必重启）",
+                err == null && after != null && after.contains(candidate),
+                err != null ? ("被拒绝：" + err)
+                        : ("wake " + originalWake + " → " + candidate + "；detector=" + after));
+
+        // 必须走一次真正的 apply 才能复原：只改内存里的配置不会重建检测器，
+        // 那会把运行中的程序留在"在听测试词"的状态上。
+        AppConfig back = env.config().copy();
+        back.setWakeWord(originalWake);
+        String backErr = env.applyConfig(back);
+        String restored = env.wakeDetectorDescription();
+        add("真实路径", "唤醒词复原（自检不留后遗症）",
+                backErr == null && restored != null && restored.contains(originalWake),
+                backErr != null ? backErr : restored);
+    }
+
+    /** 改静音秒数 → 计时器必须真的按新值算（原来只有"开/关"生效）。 */
+    private void checkSilenceHotUpdate(Env env) {
+        SilenceDetector sd = env.silenceDetector();
+        if (sd == null) {
+            add("真实路径", "改静音秒数真的生效", false, "拿不到静音计时器探针");
+            return;
+        }
+        double before = sd.timeoutSeconds();
+        // 换一个与当前不同的合法值（范围 0–15，0 表示关闭，所以别选 0）
+        int target = Math.abs(before - 7) < 0.001 ? 4 : 7;
+
+        AppConfig draft = env.config().copy();
+        draft.setSilenceSeconds(target);
+        String err = env.applyConfig(draft);
+        double after = sd.timeoutSeconds();
+        add("真实路径", "改静音超时秒数：计时器真的按新值算（原来只切开关）",
+                err == null && Math.abs(after - target) < 1e-9,
+                err != null ? ("被拒绝：" + err)
+                        : String.format("timeout %.0f 秒 → %.0f 秒（期望 %d）", before, after, target));
+
+        AppConfig back = env.config().copy();
+        back.setSilenceSeconds((int) Math.round(before));
+        String backErr = env.applyConfig(back);
+        add("真实路径", "静音秒数复原",
+                backErr == null && Math.abs(sd.timeoutSeconds() - before) < 1e-9,
+                backErr != null ? backErr : String.format("timeout=%.0f 秒", sd.timeoutSeconds()));
+    }
+
+    /** Esc 必须真的接线：先断言轮询在跑，再**真的按一次 Esc** 看事件有没有到状态机。 */
+    private void checkEscapeWiring(Env env) {
+        if (!env.uiStarted()) {
+            return;   // --doctor 不启动 UI，这一项无从验证：不添加即不声称
+        }
+        boolean running = env.escapeWatcherRunning();
+        add("真实路径", "Esc 取消已接线（全局轮询在跑）", running,
+                running ? "escape-watcher 线程在跑" : "没接线！按 Esc 不会有任何反应");
+
+        StateMachine sm = env.stateMachine();
+        if (!running || sm == null || !sm.idle()) {
+            // 状态机不空闲时不按：真的按下去会把用户正在说的一段取消掉。
+            // 不添加断言 = 不声称验证过，而不是伪造一个"通过"。
+            return;
+        }
+        long before = sm.ignoredTotal();
+        try {
+            Robot robot = new Robot();
+            robot.keyPress(KeyEvent.VK_ESCAPE);
+            robot.keyRelease(KeyEvent.VK_ESCAPE);
+            // 轮询间隔 50ms，留足余量
+            robot.delay(600);
+        } catch (Exception e) {
+            add("真实路径", "按一次真实 Esc → CANCEL 送到状态机", false, e.toString());
+            return;
+        }
+        long after = sm.ignoredTotal();
+        add("真实路径", "按一次真实 Esc → CANCEL 真的送到了状态机", after > before,
+                "ignoredTotal " + before + " → " + after
+                        + "（待唤醒状态下 CANCEL 按设计被忽略并计数，所以计数增加就是送达的证据）");
+    }
+
+    /** 提示条必须不抢焦点 —— 否则"提示"本身会触发「前台已变」并把本段话弄丢。 */
+    private void checkNoticeDoesNotStealFocus(Env env) {
+        if (!env.uiStarted()) {
+            return;
+        }
+        env.showNotice("自检：提示条", "这条提示由自检触发，用来确认它不抢焦点、也不遮挡悬浮球。");
+        try {
+            Thread.sleep(500);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        java.awt.Window w = env.lastNoticeWindow();
+        if (w == null) {
+            add("真实路径", "提示条不抢焦点", false, "提示条没有出现（showNotice 没有生效）");
+            return;
+        }
+        boolean noActivate = Win32WindowStyles.isNoActivate(w);
+        long hwnd = Win32WindowStyles.hwndOf(w);
+        long foreground = com.talkinglive.system.Win32.hwndValue(
+                com.talkinglive.system.Win32.User32.INSTANCE.GetForegroundWindow());
+        add("真实路径", "提示条不抢焦点（WS_EX_NOACTIVATE，且没成为前台窗口）",
+                noActivate && hwnd != 0 && hwnd != foreground,
+                "hwnd=0x" + Long.toHexString(hwnd) + "、前台=0x" + Long.toHexString(foreground)
+                        + "、exStyle=0x" + Integer.toHexString(Win32WindowStyles.extendedStyles(w)));
+        env.hideNotice();
+    }
+
+    /** 挑一个与当前不同、且确认可用的唤醒词备选（来自附录 B.1 的实测列表）。 */
+    private static String alternativeWakeWord(String current) {
+        for (String w : com.talkinglive.core.WordSuggestions.forField(
+                com.talkinglive.core.WordSuggestions.FIELD_WAKE)) {
+            if (!w.equals(current)) {
+                return w;
+            }
+        }
+        return "子曰";
     }
 
     // ============================================================ 纯逻辑补充

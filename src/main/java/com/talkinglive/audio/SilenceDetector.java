@@ -20,7 +20,15 @@ public final class SilenceDetector {
     public static final double DEFAULT_THRESHOLD = 0.012;
 
     private final double threshold;
-    private final double timeoutSeconds;
+    /**
+     * 静音多久算一段结束（秒）。
+     *
+     * <p><b>不是 final：</b>设置窗口允许运行期改这一项。它原先被写成 final，
+     * 而 {@link #setTimeoutSeconds} 只切了 {@code enabled} 开关 —— 于是
+     * 「0 / 非 0」这种开关切换是生效的，但**具体秒数永远是构造时那个值**。
+     * 状态行却是按配置渲染的（"静音 8 秒后自动结束"），显示与行为不一致。
+     */
+    private volatile double timeoutSeconds;
     private final double minSpeechSeconds;
 
     private double silentSeconds;
@@ -78,10 +86,16 @@ public final class SilenceDetector {
         latched = false;
     }
 
-    /** 运行期改配置（设置窗口里改静音秒数）。 */
+    /**
+     * 运行期改配置（设置窗口里改静音秒数）。
+     *
+     * <p>只改超时值与启用状态，**不动已经累计的静音秒数**：用户把 5 秒调到 8 秒时，
+     * 当前这一段的静音计时继续累加，到 8 秒才触发 —— 这正是"改完就按新值算"的直觉。
+     * 反过来从 8 秒调到 3 秒、而已累计 4 秒，下一次 {@link #accept} 就会立刻触发，
+     * 同样符合直觉。
+     */
     public void setTimeoutSeconds(int seconds) {
-        // timeoutSeconds 是 final；改配置时由调用方重建实例。这里只调整启用状态，
-        // 保持「一个实例一个超时值」的简单不变量。
+        this.timeoutSeconds = seconds;
         this.enabled = seconds > 0;
     }
 

@@ -261,8 +261,26 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         return sb.append('"').toString();
     }
 
+    /**
+     * 喂一帧音频。
+     *
+     * <p><b>{@code synchronized} 是必需的，不是保守写法。</b>本方法跑在采集线程上，
+     * 而 {@link #close()} 由设置窗口改唤醒词时在 EDT 上调用（{@code App.rebuildKeywordDetector}）。
+     * 两者不加互斥时的真实后果是：{@code VoskModel.Recognizer.close()} 已经把原生
+     * 识别器 {@code free} 掉，采集线程却仍拿着同一个句柄调
+     * {@code vosk_recognizer_accept_waveform} —— Vosk 直接
+     * {@code Invalid memory access}，而这个程序平时是 javaw 启动的**没有控制台**，
+     * 用户看到的就是"它自己不见了"。
+     *
+     * <p>光加锁还不够，还要靠 {@code closed} 标志兜住"先关后用"的顺序：
+     * 采集线程可能已经取出旧实例的引用、还没来得及进来，此时 close() 先拿到锁并释放了
+     * 原生资源；等它进到锁里，开头那句 {@code closed} 检查会直接返回。二者缺一不可。
+     *
+     * <p>锁序：本对象的监视器 → 状态机 / 识别器（命中后回调 {@code onKeywordHit}）。
+     * 反向没有路径（没有任何持状态机锁的代码会回来调本类），所以不会死锁。
+     */
     @Override
-    public void accept(byte[] pcm, int offset, int length) {
+    public synchronized void accept(byte[] pcm, int offset, int length) {
         if (closed || pcm == null || length <= 0) {
             return;
         }
@@ -356,7 +374,7 @@ public final class VoskKeywordDetector implements WakeWordDetector {
     }
 
     @Override
-    public void reset() {
+    public synchronized void reset() {
         if (!closed) {
             recognizer.reset();
             secondsSinceReset = 0;
@@ -382,8 +400,15 @@ public final class VoskKeywordDetector implements WakeWordDetector {
         return sb.toString();
     }
 
+    /**
+     * 关闭并释放原生识别器。
+     *
+     * <p>{@code synchronized} 与 {@link #accept} 配对，理由见那里的注释：
+     * 不加互斥就会出现"采集线程正在用、EDT 已经 free"的 use-after-free。
+     * 先置 {@code closed} 再释放 —— 这样排队等在锁外的 {@code accept} 进来时会直接返回。
+     */
     @Override
-    public void close() {
+    public synchronized void close() {
         closed = true;
         try {
             recognizer.close();
