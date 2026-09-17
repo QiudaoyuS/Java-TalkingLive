@@ -23,6 +23,7 @@
 | 文档 | 作用 |
 |---|---|
 | `docs/IMPLEMENTATION-STATUS.md` | **现在能干什么、不能干什么**（先看这个） |
+| `docs/PENDING-ISSUES.md` | **已知但尚未修的问题**：按优先级降序，每条给位置 / 后果 / 修法 / 成本 |
 | `docs/DESIGN.md` | 产品设计（要做什么） |
 | `docs/TECH-PLAN.md` | 技术方案（用什么实现；与设计冲突时以它为准） |
 | `docs/ENGINE-EXPERIMENT.md` | 精化引擎落地报告：实测数据、未测项 |
