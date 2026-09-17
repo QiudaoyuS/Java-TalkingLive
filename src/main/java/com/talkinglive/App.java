@@ -197,6 +197,12 @@ public final class App {
     // ------------------------------------------------------------ main
 
     public static void main(String[] args) throws Exception {
+        // 全局兜底：本程序平时由 javaw 启动（桌面上不留控制台），未捕获异常的栈
+        // 会**直接消失**——用户看到的是"它自己不见了"，且日志里什么都没有。
+        // §7 的原则是"任何失败都必须可见"，所以至少把栈写进日志文件。
+        Thread.setDefaultUncaughtExceptionHandler((thread, error) ->
+                log.error("线程「{}」未捕获的异常：{}", thread.getName(), error.toString(), error));
+
         Options opts = Options.parse(args);
         if (opts.help) {
             Options.printHelp();
@@ -723,6 +729,14 @@ public final class App {
         public void onStreamError(String reason) {
             micError = reason;
             notices.add("采集中断：" + reason + "；正在尝试重连…");
+            // ★ 必须让状态机知道音频断了。
+            //
+            //   原先这里只做 UI（悬浮球变暗 + 提示），**不给状态机任何事件** ——
+            //   而所有收尾条件（静音超时、单段时长上限）都是在收到 PCM 时才投递的。
+            //   音频一断就再没有帧：静音计时冻结、时长上限也永远不到，状态机就停在
+            //   LISTENING 不动，悬浮球还显示"听写中 · 静音 N 秒后结束"（倒计时已经冻住）。
+            //   用户对着空气说话，且没有任何提示。见 Event.AUDIO_LOST。
+            sm.handle(StateMachine.Event.AUDIO_LOST);
             onUi(() -> {
                 if (ball != null) {
                     ball.setPaused(true);   // 悬浮球变暗（§7）
@@ -735,16 +749,18 @@ public final class App {
         public void onStreamRecovered() {
             micError = null;
             notices.add("麦克风已恢复");
-            if (paused) {
-                // 采集中断导致的临时暂停，恢复后解除
-                onUi(() -> {
-                    paused = false;
-                    sm.handle(StateMachine.Event.RESUME);
-                    if (ball != null) {
-                        ball.setPaused(false);
-                    }
-                });
-            }
+            // ★ 这里原来写的是 `if (paused) { paused = false; sm.handle(RESUME); }`，
+            //   注释说是"解除采集中断导致的临时暂停"。但采集中断**从来没有设过**
+            //   App.paused —— onStreamError 只调了 ball.setPaused(true)，那是个纯视觉标志。
+            //   于是这个分支实际命中的是**用户自己按下的暂停**：麦克风一恢复，
+            //   程序就替他把暂停解除了，还发了一个用户没要求的 RESUME。
+            //   现在把状态收敛成一个来源：视觉跟随用户真实的暂停状态，
+            //   也不代替用户做决定（用户暂停着，就该继续暂停）。
+            onUi(() -> {
+                if (ball != null) {
+                    ball.setPaused(paused);
+                }
+            });
             showNotice("麦克风已恢复", "音频链路已重连。");
         }
     }
@@ -892,6 +908,9 @@ public final class App {
             byte[] pcm = s.pcmSnapshot();
             long generation = s.generation();
 
+            // 进入 COMMITTING 的同时上闹钟：无论后面哪一环卡住，最坏也只是多等一次超时
+            startCommitWatchdog(generation);
+
             log.info("段落结束（{}）：时长 {}s 预览 {}", reason.display(),
                     String.format("%.2f", s.recordedSeconds()),
                     Logging.describeWithFingerprint(summary));
@@ -903,25 +922,44 @@ public final class App {
             });
 
             Thread worker = new Thread(() -> {
-                TextRefiner r = refiner;
+                // ★ 整个线程体必须兜住 Throwable。
+                //
+                //   这个线程是 Event.REFINE_DONE 的**唯一生产者**：它一旦异常退出，
+                //   状态机就永久停在 COMMITTING —— 此后唤醒词、悬浮球、结束词、静音
+                //   全被忽略，只能杀进程。而本程序平时由 javaw 启动（没有控制台），
+                //   异常连痕迹都留不下。
+                //   原来的写法只覆盖了"精化**返回**失败"（走 fallback），覆盖不了
+                //   "精化**抛异常**"—— 那条路径上没有任何人投递 REFINE_DONE。
                 TextRefiner.Result result;
-                boolean ending = TextUtils.endsWithSentencePunctuation(summary);
-                if (r == null || !r.available()) {
-                    result = TextRefiner.Result.fallback(summary,
-                            r == null ? "无" : r.engineName(),
-                            r == null ? "未装配精化引擎" : r.unavailableReason());
-                } else {
-                    result = r.refine(pcm, summary, ending);
+                try {
+                    TextRefiner r = refiner;
+                    boolean ending = TextUtils.endsWithSentencePunctuation(summary);
+                    if (r == null || !r.available()) {
+                        result = TextRefiner.Result.fallback(summary,
+                                r == null ? "无" : r.engineName(),
+                                r == null ? "未装配精化引擎" : r.unavailableReason());
+                    } else {
+                        result = r.refine(pcm, summary, ending);
+                    }
+                } catch (Throwable t) {
+                    // 走**既有**的降级路径：退回预览文本落字，而不是把整段话丢掉。
+                    log.error("精化过程抛出异常，退回预览文本：{}", t.toString(), t);
+                    result = TextRefiner.Result.fallback(summary, "精化异常", t.toString());
                 }
-                // 段落已被取消/替换时，迟到的精化结果直接丢弃（§2.1）
-                if (session.get() == null || session.get().generation() != generation
-                        || !sm.committing()) {
-                    log.info("精化结果迟到，已丢弃（段落已结束：gen={} 当前状态={}）",
-                            generation, sm.state());
-                    return;
+                try {
+                    // 段落已被取消/替换时，迟到的精化结果直接丢弃（§2.1）
+                    if (session.get() == null || session.get().generation() != generation
+                            || !sm.committing()) {
+                        log.info("精化结果迟到，已丢弃（段落已结束：gen={} 当前状态={}）",
+                                generation, sm.state());
+                        return;
+                    }
+                    pendingResult.set(result);
+                    sm.handle(StateMachine.Event.REFINE_DONE);
+                } catch (Throwable t) {
+                    // 真到了这里说明状态机那条路也断了；提交看门狗（COMMIT_TIMEOUT）是最后一层。
+                    log.error("投递精化结果时出错（提交看门狗会兜底）：{}", t.toString(), t);
                 }
-                pendingResult.set(result);
-                sm.handle(StateMachine.Event.REFINE_DONE);
             }, "refine-worker");
             worker.setDaemon(true);
             worker.start();
@@ -998,6 +1036,7 @@ public final class App {
 
         @Override
         public void onSegmentAbandoned(String why) {
+            cancelCommitWatchdog();     // 本段已经结束，闹钟撤掉
             DictationSession s = session.getAndSet(null);
             preview.reset();
             silence.reset();
@@ -1018,6 +1057,55 @@ public final class App {
 
     private final AtomicReference<TextRefiner.Result> pendingResult = new AtomicReference<>();
     private volatile TextPostProcessor postProcess = TextPostProcessor.identity();
+
+    /**
+     * 提交看门狗的超时时间。
+     *
+     * <p>取值依据（都按最坏情况算，宁长勿短）：单段上限 60 秒音频、离线精化 RTF
+     * 实测 0.48 上限 → 约 29 秒；注入 1000 字 × 20ms 字符间隔 → 约 20 秒。
+     * 合计约 50 秒，取 90 秒留足余量。它不是"快速失败"，而是**最后一道网**：
+     * 把"永久 COMMITTING、只能杀进程"变成"最坏多等 90 秒，然后明确告知并恢复"。
+     */
+    private static final int COMMIT_TIMEOUT_SECONDS = 90;
+
+    /** 提交看门狗线程（守护，单线程）。 */
+    private final java.util.concurrent.ScheduledExecutorService commitWatchdog =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "commit-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+    private volatile java.util.concurrent.ScheduledFuture<?> commitTimeoutFuture;
+
+    /**
+     * 启动提交看门狗（见 {@link StateMachine.Event#COMMIT_TIMEOUT}）。
+     *
+     * <p>为什么要绑 {@code generation}：看门狗是异步的，可能和"上一段的看门狗迟到"
+     * 或"本段已收尾、下一段又进了 COMMITTING"重叠。带上代数就能精确判断
+     * "超时的确实是**当前这一段**"，不会误伤新段落。
+     */
+    private void startCommitWatchdog(long generation) {
+        cancelCommitWatchdog();
+        try {
+            commitTimeoutFuture = commitWatchdog.schedule(() -> {
+                if (sm.committing() && sm.generation() == generation) {
+                    log.error("提交超时（{}s）：本段仍未收尾，由看门狗取消并回到待唤醒",
+                            COMMIT_TIMEOUT_SECONDS);
+                    sm.handle(StateMachine.Event.COMMIT_TIMEOUT);
+                }
+            }, COMMIT_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (RuntimeException e) {
+            log.warn("提交看门狗启动失败（不影响正常提交）：{}", e.toString());
+        }
+    }
+
+    private void cancelCommitWatchdog() {
+        java.util.concurrent.ScheduledFuture<?> f = commitTimeoutFuture;
+        commitTimeoutFuture = null;
+        if (f != null) {
+            f.cancel(false);
+        }
+    }
 
     /** 注入 + 自动发送 + 回到 IDLE。在独立线程上执行。 */
     private void doInject(DictationSession s, String text, StateMachine.CommitContext ctx) {
@@ -1071,7 +1159,10 @@ public final class App {
                 }
             });
             finishCommit(s);
-        } catch (RuntimeException e) {
+        } catch (Throwable e) {
+            // 兜 Throwable 而不只是 RuntimeException：注入线程一旦异常退出，
+            // 就没人再投递 Event.INJECTED，状态机同样会永久停在 COMMITTING。
+            // 无论是 Exception 还是 Error（原生崩溃/OOM），都必须让状态机收尾。
             log.error("注入过程中发生异常：{}", e.toString(), e);
             lastInjectionError = e.toString();
             finishCommit(s);
@@ -1086,6 +1177,7 @@ public final class App {
      * 由 {@code StateMachineTest} 直接钉住。
      */
     private void finishCommit(DictationSession s) {
+        cancelCommitWatchdog();     // 本段已收尾，闹钟撤掉（否则会误伤下一段）
         session.compareAndSet(s, null);
         preview.reset();
         silence.reset();
@@ -1256,13 +1348,25 @@ public final class App {
     }
 
     private void togglePause() {
-        paused = !paused;
-        sm.handle(paused ? StateMachine.Event.PAUSE : StateMachine.Event.RESUME);
+        boolean pausing = !paused;
+        // ★ 在"提交中"按暂停会有一个用户意料之外的结果：本段**仍会落字**。
+        //   这是刻意的（见 StateMachine.onRefineDone 的说明：暂停的语义是"别再听新的"，
+        //   而不是"把已经录完的段落掐死"—— 后者等于丢话，与切窗口那次修正同一个道理）。
+        //   但"我按了暂停，它还是把字打出来了"必须被解释，否则用户会以为按键没生效。
+        //   所以这里明确告知，并把真正的取消方式（Esc）告诉他。
+        boolean committing = pausing && sm.state() == StateMachine.State.COMMITTING;
+        paused = pausing;
+        sm.handle(pausing ? StateMachine.Event.PAUSE : StateMachine.Event.RESUME);
         onUi(() -> {
             if (ball != null) {
                 ball.setPaused(paused);
             }
         });
+        if (committing) {
+            showNotice("已暂停监听",
+                    "本段已经在提交中，仍会把文字落下来（暂停只影响下一段）。\n"
+                            + "如果不想让它落字，按 Esc 取消本段。");
+        }
         log.info("监听{}", paused ? "已暂停" : "已恢复");
     }
 
@@ -1954,6 +2058,8 @@ public final class App {
             escapeWatcher.close();
             escapeWatcher = null;
         }
+        cancelCommitWatchdog();
+        commitWatchdog.shutdownNow();
         try {
             if (capture != null) {
                 capture.close();

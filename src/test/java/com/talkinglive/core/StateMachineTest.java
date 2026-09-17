@@ -495,6 +495,145 @@ class StateMachineTest {
         }
     }
 
+    /**
+     * 「只能杀进程」的三种死法的防线。
+     *
+     * <p>共同点：都是**失败路径没有出口** —— 一旦踩到，唤醒词/悬浮球/结束词/静音
+     * 全部被忽略，用户只能结束进程。而且它们都不会抛异常、不会崩，
+     * 所以只靠"跑一遍正常流程"的测试永远发现不了。
+     *
+     * <p>这三条以前都是真的：① 提交中按暂停时 {@code onRefineDone} 里那句
+     * {@code if (paused) ignore} 会把放行吃掉，而精化线程已经跑完退出，
+     * 再也没人投递 REFINE_DONE；② 采集中断后没有任何事件，静音计时与时长上限
+     * 都失去了驱动力；③ 精化/注入线程是全流程唯一没有异常兜底的地方。
+     */
+    @Nested
+    @DisplayName("死局防线（提交中暂停 / 采集中断 / 提交超时）")
+    class DeadlockGuards {
+
+        /** 把状态机推进到 COMMITTING 且**精化尚未返回**。 */
+        private void reachCommitting() {
+            sm.handle(Event.WAKE_WORD);
+            sm.handle(Event.END_WORD);
+            assertEquals(State.COMMITTING, sm.state());
+        }
+
+        @Test
+        @DisplayName("提交中暂停：状态仍是 COMMITTING，段落没被掐死")
+        void pauseDuringCommittingKeepsSegment() {
+            reachCommitting();
+            sm.handle(Event.PAUSE);
+            assertTrue(sm.paused());
+            assertEquals(State.COMMITTING, sm.state(),
+                    "段落已经录完，暂停不该改变它的状态");
+            assertNull(rec.lastAbandon, "暂停不该把已经录完的段落丢掉");
+        }
+
+        @Test
+        @DisplayName("提交中暂停后精化完成：仍然放行落字（原来放行被吃掉 → 永久 COMMITTING）")
+        void refineDoneStillFiresWhilePaused() {
+            reachCommitting();
+            sm.handle(Event.PAUSE);
+            sm.handle(Event.REFINE_DONE);
+            assertEquals(1, rec.commits,
+                    "放行被吃掉的话，这一段永远回不到 IDLE，只能杀进程");
+            assertNotNull(rec.lastCommit);
+
+            sm.handle(Event.INJECTED);
+            assertEquals(State.IDLE, sm.state());
+            assertTrue(sm.paused(), "收尾之后必须仍然处于暂停 —— 不能顺手把用户的暂停解除");
+        }
+
+        @Test
+        @DisplayName("暂停期间仍然忽略新的唤醒（暂停的核心语义没被改动）")
+        void pausedStillRejectsNewWake() {
+            reachCommitting();
+            sm.handle(Event.PAUSE);
+            sm.handle(Event.REFINE_DONE);
+            sm.handle(Event.INJECTED);
+            int before = sm.ignoredTotal();
+            sm.handle(Event.WAKE_WORD);
+            assertEquals(State.IDLE, sm.state(), "暂停中不该被唤醒");
+            assertTrue(sm.ignoredTotal() > before);
+        }
+
+        @Test
+        @DisplayName("提交中暂停也不破坏「只放行一次」的幂等闸门（否则文字会注入两遍）")
+        void idempotenceSurvivesPause() {
+            reachCommitting();
+            sm.handle(Event.PAUSE);
+            sm.handle(Event.REFINE_DONE);
+            sm.handle(Event.REFINE_DONE);   // 迟到 / 重复的第二次
+            assertEquals(1, rec.commits);
+        }
+
+        @Test
+        @DisplayName("提交超时：本段取消并回到 IDLE（看门狗是最后一道网）")
+        void commitTimeoutAbandons() {
+            reachCommitting();
+            sm.handle(Event.COMMIT_TIMEOUT);
+            assertEquals(State.IDLE, sm.state());
+            assertNotNull(rec.lastAbandon);
+            assertTrue(rec.lastAbandon.contains("超时"), rec.lastAbandon);
+            assertEquals(0, rec.commits, "超时说明提交没能完成，不该有落字");
+        }
+
+        @Test
+        @DisplayName("迟到的提交超时不能误伤别的状态（尤其不能掐掉正在录的段落）")
+        void commitTimeoutIgnoredElsewhere() {
+            int before = sm.ignoredTotal();
+            sm.handle(Event.COMMIT_TIMEOUT);
+            assertEquals(State.IDLE, sm.state());
+            assertTrue(sm.ignoredTotal() > before);
+
+            sm.handle(Event.WAKE_WORD);
+            before = sm.ignoredTotal();
+            sm.handle(Event.COMMIT_TIMEOUT);
+            assertEquals(State.LISTENING, sm.state(),
+                    "上一段的看门狗迟到时，不能把这一正在录的段落取消掉");
+            assertTrue(sm.ignoredTotal() > before);
+        }
+
+        @Test
+        @DisplayName("听写中采集中断：本段收尾并回到 IDLE（原来会永远停在听写中）")
+        void audioLostAbandonsListening() {
+            sm.handle(Event.WAKE_WORD);
+            sm.handle(Event.AUDIO_LOST);
+            assertEquals(State.IDLE, sm.state(),
+                    "音频断了就再也没有 PCM，静音计时与时长上限都不会再触发");
+            assertNotNull(rec.lastAbandon);
+            assertTrue(rec.lastAbandon.contains("麦克风"), rec.lastAbandon);
+            assertEquals(0, rec.commits, "后半段音频根本不存在，不能落一句半截的话");
+
+            sm.handle(Event.WAKE_WORD);     // 设备恢复后还能重新开始
+            assertEquals(State.LISTENING, sm.state());
+        }
+
+        @Test
+        @DisplayName("提交中采集中断：忽略，本段照常收尾（音频已经录完了）")
+        void audioLostDuringCommittingIsIgnored() {
+            reachCommitting();
+            int before = sm.ignoredTotal();
+            sm.handle(Event.AUDIO_LOST);
+            assertEquals(State.COMMITTING, sm.state(),
+                    "本段音频已定稿，此时断流不影响它的收尾");
+            assertTrue(sm.ignoredTotal() > before);
+
+            sm.handle(Event.REFINE_DONE);
+            assertEquals(1, rec.commits);
+        }
+
+        @Test
+        @DisplayName("待唤醒时采集中断：忽略（设备恢复前本来就唤不醒）")
+        void audioLostWhileIdleIsIgnored() {
+            int before = sm.ignoredTotal();
+            sm.handle(Event.AUDIO_LOST);
+            assertEquals(State.IDLE, sm.state());
+            assertTrue(sm.ignoredTotal() > before);
+            assertNull(rec.lastAbandon);
+        }
+    }
+
     // ============================================================ 监听器健壮性
 
     @Test

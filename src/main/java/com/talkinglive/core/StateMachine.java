@@ -61,6 +61,27 @@ public final class StateMachine {
         FOREGROUND_CHANGED,
         /** 单段录音达到时长上限（§7：自动结束本段）。 */
         MAX_SEGMENT_REACHED,
+        /**
+         * 采集中断（设备被抢占 / 被拔掉）。
+         *
+         * <p><b>为什么必须有这个事件：</b>所有收尾条件（静音超时、单段时长上限）
+         * 都是在**收到 PCM 时**才投递的（{@code App.CaptureBridge.onPcm}）。
+         * 音频一断就再也没有帧，于是静音计时冻结、时长上限也永远不到 ——
+         * 状态机会停在 LISTENING 不动，而悬浮球还在显示"听写中 · 静音 N 秒后结束"
+         * （倒计时已经冻住）。用户对着空气说话，且没有任何提示。
+         *
+         * <p>这条路径原来只做 UI（悬浮球变暗 + 提示），**不给状态机任何事件**。
+         */
+        AUDIO_LOST,
+        /**
+         * 提交超时：进入 COMMITTING 后久等不到 {@link #INJECTED}。
+         *
+         * <p>由调用方的看门狗投递（状态机自己不依赖时钟，见类注释）。
+         * 存在的理由：{@code REFINE_DONE} 的**唯一生产者**是应用层的精化线程，
+         * 它一旦异常退出或卡住，状态机就永久停在 COMMITTING ——
+         * 此后唤醒词/悬浮球/结束词/静音全被忽略，只能重启进程。
+         */
+        COMMIT_TIMEOUT,
         /** Esc：整段取消，一个字都不注入。 */
         CANCEL,
         /** 悬浮球左键：IDLE→开始，LISTENING→结束。 */
@@ -279,6 +300,8 @@ public final class StateMachine {
                 case SILENCE_TIMEOUT -> onSilenceTimeout(event);
                 case MAX_SEGMENT_REACHED -> onMaxSegment(event);
                 case FOREGROUND_CHANGED -> onForegroundChanged(event);
+                case AUDIO_LOST -> onAudioLost(event);
+                case COMMIT_TIMEOUT -> onCommitTimeout(event);
                 case CANCEL -> onCancel(event);
                 case PAUSE -> onPause(event);
                 case RESUME -> onResume(event);
@@ -371,6 +394,53 @@ public final class StateMachine {
         }
     }
 
+    /**
+     * 采集中断（设备被抢占 / 被拔掉）。
+     *
+     * <p>LISTENING 下**必须收尾**而不是干等：音频断了就再也没有 PCM，
+     * 静音超时与单段上限都不会再被投递，段落会永远停在那里（见 {@link Event#AUDIO_LOST}）。
+     *
+     * <p>为什么是"取消本段"而不是"把已经录到的部分落字"：
+     * 采集中断意味着这一段的**后半部分根本不存在**，落字只会得到半句话 ——
+     * 而"少半句"比"少一段"更难被发现，用户不知道缺了什么。
+     * 取消 + 明确告知（{@code why} 直接面向用户）让他重说一遍，是可控的；
+     * 悄悄打进半句话不是。（§7：任何失败都必须可见）
+     *
+     * <p>COMMITTING 下忽略：那一段的音频**已经录完并定稿**，麦克风此时断开
+     * 不影响既有的 PCM 与精化，收尾应当照常走完。
+     */
+    private void onAudioLost(Event e) {
+        switch (state) {
+            case IDLE -> ignore(e, "待唤醒状态下采集中断，忽略（设备恢复前本来就唤不醒）");
+            case LISTENING -> {
+                transition(State.IDLE, e);
+                notifyAbandoned("麦克风中断，本段已取消（音频已断，继续等下去也不会有结果）。\n"
+                        + "设备恢复后可以重新说一遍。");
+            }
+            case COMMITTING -> ignore(e, "提交中采集中断，忽略：本段音频已经录完，收尾照常进行");
+        }
+    }
+
+    /**
+     * 提交超时：进入 COMMITTING 后久等不到 {@code INJECTED}。
+     *
+     * <p>由应用层的看门狗投递（状态机不依赖时钟，因此可以用单测直接喂这个事件）。
+     * 它把"永久 COMMITTING"从**结构上**变成不可能：无论精化线程是异常退出、
+     * 卡死、还是回调链断了，最坏情况都是"本段被取消并明确提示"，而不是
+     * "整程序从此不响应任何操作、只能杀进程"。
+     */
+    private void onCommitTimeout(Event e) {
+        switch (state) {
+            case IDLE -> ignore(e, "待唤醒状态下的提交超时，忽略（上一段早已收尾）");
+            case LISTENING -> ignore(e, "听写中收到提交超时，忽略（那是上一段的看门狗，迟到了）");
+            case COMMITTING -> {
+                transition(State.IDLE, e);
+                notifyAbandoned("本段提交超时，已取消并回到待唤醒。\n"
+                        + "识别引擎或注入链路可能卡住了，日志里有详细记录；可以重新说一遍。");
+            }
+        }
+    }
+
     private void onForegroundChanged(Event e) {
         switch (state) {
             case IDLE -> ignore(e, "待唤醒状态下切换窗口，忽略");
@@ -429,6 +499,10 @@ public final class StateMachine {
         } else {
             // 暂停本身不改变「状态」，只熄灭事件入口；但为了让 UI 有统一的状态来源，
             // 这里仍然广播一次（from==to 时 notify 会跳过，故显式通知监听者）。
+            //
+            // ★ COMMITTING 下走的就是这一支，**刻意不取消本段**：段落已经录完，
+            //   掐死它等于丢话。见 onRefineDone 里的详细说明 —— 要取消请用 Esc。
+            //   （这里曾经因为 onRefineDone 里那句 `if (paused) ignore` 而变成永久卡死。）
             notifyStateChanged(state, state, e);
         }
     }
@@ -447,10 +521,22 @@ public final class StateMachine {
             ignore(e, "不在提交中，忽略精化完成");
             return;
         }
-        if (paused) {
-            ignore(e, "已暂停，忽略精化完成");
-            return;
-        }
+        // ★ 这里**刻意不判 paused**。
+        //
+        //   原来有一句 `if (paused) { ignore(...); return; }`，后果是**永久卡死**：
+        //   用户在"提交中"按一下「暂停监听」，段落的放行就被吃掉，而 commitReadyFired
+        //   仍是 false、精化线程已经跑完退出 —— 再也不会有人投递 REFINE_DONE。
+        //   此后唤醒/悬浮球/结束词/静音全被 muted，只能杀进程。
+        //
+        //   为什么正确做法是"照常放行"而不是"暂停也取消本段"：
+        //   §2.3 给「暂停监听」的定义是**忽略唤醒词与结束词**（别再听新的），
+        //   而不是"把已经录完的段落掐死"。段落一旦结束（onSegmentEndRequested 已发出），
+        //   音频已定稿，此刻掐死它等于丢话 —— 与切窗口那次修正（§7，原为"放弃注入"）
+        //   是同一个道理：可挽回的错误优于不可挽回的丢失。
+        //   真要取消本段，产品里有专门的入口：Esc → CANCEL（§2.2/§2.3）。
+        //
+        //   兜底另有两层：App 的提交看门狗（COMMIT_TIMEOUT）保证不会永久 COMMITTING；
+        //   暂停期间仍会照常落字这件事由 App 明确提示给用户。
         if (commitReadyFired) {
             // 幂等闸门：第二次放行会让文字注入两遍。
             ignore(e, "本段已经放行过注入，忽略重复的精化完成");

@@ -230,6 +230,18 @@ public final class SelfTest {
         DictationSession session;
         TextRefiner.Result lastResult;
         volatile boolean committed;
+        /** 放行次数（{@link #committed} 只记"有没有过"，断言"这一次也放行了"需要计数）。 */
+        volatile int commits;
+        volatile int abandons;
+        volatile String lastAbandon;
+        /**
+         * 需要"停在 COMMITTING 里"的用例把它置真。
+         *
+         * <p>否则 {@link #onSegmentEndRequested} 会在同一次 {@code handle()} 里
+         * 立刻投递 REFINE_DONE —— 状态机一瞬间就走完 COMMITTING，
+         * 而"提交中按了暂停"这件事**必须发生在精化返回之前**才复现得出来。
+         */
+        volatile boolean deferRefine;
 
         PipelineHarness(FakeInjector injector, PreviewText preview, CommitPolicy policy,
                 TextRefiner refiner, PunctuationProcessor post) {
@@ -256,11 +268,21 @@ public final class SelfTest {
             //   状态机是同步回调的，onCommitReady 会在 handle() 内部立刻被调用。
             lastResult = refiner.refine(session.pcmSnapshot(), finalPreview, false);
             committed = true;
+            if (deferRefine) {
+                return;   // 精化"还在跑"：需要 COMMITTING 窗口的用例自己投递 REFINE_DONE
+            }
             sm.handle(StateMachine.Event.REFINE_DONE);
         }
 
         @Override
+        public void onSegmentAbandoned(String why) {
+            abandons++;
+            lastAbandon = why;
+        }
+
+        @Override
         public void onCommitReady(StateMachine.CommitContext ctx) {
+            commits++;
             // ctx.inject()==false 表示「目标不是当前前台」（切窗口路径）。
             // 真实实现（App + WindowsTextInjector）在这种情况下**仍然注入**：
             // 先尝试把焦点还原到目标，还原不了就注入到当前焦点并明确提示。
@@ -749,6 +771,60 @@ public final class SelfTest {
         sm.handle(StateMachine.Event.END_WORD);
         add("pipeline", "提交中迟到事件被吃掉（§2.1）", sm.ignoredTotal() > ignoredBefore,
                 "新增忽略 " + (sm.ignoredTotal() - ignoredBefore) + " 条");
+
+        // --- 采集中断：本段必须收尾（原来会永远停在"听写中"） ---
+        //
+        //     所有收尾条件（静音超时、单段时长上限）都由 PCM 驱动；音频一断就再没有帧，
+        //     而 App.onStreamError 原来只做 UI、**不给状态机任何事件**，于是段落永远
+        //     停在 LISTENING、倒计时冻住，用户对着空气说话。
+        int abandonsBefore = h.abandons;
+        sm.handle(StateMachine.Event.WAKE_WORD);
+        preview.setPartial("这段会因为麦克风中断而取消");
+        sm.handle(StateMachine.Event.AUDIO_LOST);
+        add("pipeline", "采集中断后本段被收尾（不再永远停在听写中）",
+                sm.idle() && h.abandons == abandonsBefore + 1,
+                "state=" + sm.state() + " abandons=" + h.abandons);
+
+        // --- 提交中暂停：本段仍要落字（原来放行被吃掉 → 永久 COMMITTING） ---
+        //
+        //     必须让暂停发生在**精化返回之前**才复现得出来，所以这里让替身把
+        //     REFINE_DONE 挂起（deferRefine），手动走完"暂停 → 精化回来"。
+        int commitsBefore = h.commits;
+        before = injector.injections();
+        h.deferRefine = true;
+        sm.handle(StateMachine.Event.WAKE_WORD);
+        preview.setPartial("提交中暂停也不该把这一段丢掉");
+        sm.handle(StateMachine.Event.END_WORD);
+        sm.handle(StateMachine.Event.PAUSE);
+        add("pipeline", "提交中暂停：状态仍是 COMMITTING（段落没被掐死）",
+                sm.committing() && sm.paused(),
+                "state=" + sm.state() + " paused=" + sm.paused());
+        h.deferRefine = false;
+        sm.handle(StateMachine.Event.REFINE_DONE);
+        add("pipeline", "提交中暂停后精化完成：仍照常落字",
+                sm.idle() && h.commits == commitsBefore + 1 && injector.injections() == before + 1,
+                "state=" + sm.state() + " commits=" + h.commits
+                        + " injections=" + injector.injections());
+        sm.handle(StateMachine.Event.RESUME);   // 复原，别影响后面的用例
+
+        // --- 提交超时：最后一道网（否则精化线程一卡住就永久 COMMITTING） ---
+        h.deferRefine = true;
+        sm.handle(StateMachine.Event.WAKE_WORD);
+        preview.setPartial("这一段会等到看门狗超时");
+        sm.handle(StateMachine.Event.END_WORD);
+        abandonsBefore = h.abandons;
+        sm.handle(StateMachine.Event.COMMIT_TIMEOUT);
+        h.deferRefine = false;
+        add("pipeline", "提交超时后本段被取消并回到待唤醒（不再永久卡住）",
+                sm.idle() && h.abandons == abandonsBefore + 1,
+                "state=" + sm.state() + " abandons=" + h.abandons);
+
+        // --- 全局兜底：未捕获异常不能无声消失（javaw 下没有控制台） ---
+        add("pipeline", "全局未捕获异常处理器已安装",
+                Thread.getDefaultUncaughtExceptionHandler() != null,
+                Thread.getDefaultUncaughtExceptionHandler() == null
+                        ? "没有安装：线程里的异常会连日志都不留"
+                        : "异常栈会写进日志文件");
 
         // --- 暂停 ---
         sm.handle(StateMachine.Event.PAUSE);
