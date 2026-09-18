@@ -82,18 +82,22 @@ public final class Win32 {
      * 鼠标输入事件。
      *
      * <p><b>它在本类里的唯一作用是「把 union 撑到正确大小」</b>——产品本身不用鼠标注入。
-     * 这不是多余的：Windows 的 {@code INPUT} 里 union 的最大成员是 {@code MOUSEINPUT}
-     * （24 字节，因为 {@code dwExtraInfo} 在 x64 下要对齐到 8 字节边界），
-     * 于是 {@code KEYBDINPUT} 实际落在**偏移 32**。
+     * 这不是多余的：{@code INPUT} 的 union 宽度由**最大成员**决定，而 {@code MOUSEINPUT}
+     * 比 {@code KEYBDINPUT} 宽（它的 {@code dwExtraInfo} 在 x64 下要对齐到指针宽度）。
+     * 取错成员，JNA 就会把整个结构算小一截。
      *
-     * <p>如果 union 里只声明 {@code KEYBDINPUT}（16 字节），JNA 算出的 {@code INPUT}
-     * 只有 32 字节、并把字符写到偏移 24 —— 实测症状极隐蔽：
-     * <b>{@code SendInput} 报告事件全部写入成功，但字符全部丢失，
-     * 目标程序把同一个字重复 N 遍</b>（用户看到「今今今今今今今」）。
+     * <p>算小的后果极隐蔽：{@code SendInput} 报告事件**全部写入成功**，
+     * 但字符写到错误偏移、全部丢失，目标程序把同一个字重复 N 遍
+     * （用户看到「今今今今今今今」）。
      *
-     * <p>所以这里把 {@code MOUSEINPUT} 也声明出来，并且用
-     * {@code Win32WindowStyles} 里那条「Java 计算的大小必须等于传给 SendInput 的
-     * dwSize」的自检守着它。
+     * <p><b>具体大小与偏移一律不写在这段注释里。</b>这里原本写着「KEYBDINPUT 落在偏移 32」，
+     * 而实现与测试用的是另一个值 —— 那句注释于是成了下一次事故的引信：照它改代码，
+     * 就会重新引入「字符全部丢失」。正确值由三处守护，而且都比叙述离代码更近：
+     * <ul>
+     *   <li>{@code TextInjectorLayoutTest.Layout} —— 断言结构大小、union 起点、字符字段偏移；</li>
+     *   <li>{@code WindowsTextInjector.logInputLayoutOnce()} —— 每次注入前复验并把结果打进日志；</li>
+     *   <li>{@link #INPUT_SIZE} 这个常量本身（代码，不是叙述）。</li>
+     * </ul>
      */
     @Structure.FieldOrder({"dx", "dy", "mouseData", "dwFlags", "time", "dwExtraInfo"})
     public static class MOUSEINPUT extends Structure {
@@ -117,12 +121,9 @@ public final class Win32 {
     /**
      * {@code SendInput} 的输入事件。
      *
-     * <p>布局（x64，共 40 字节）：
-     * <pre>
-     *   +0   DWORD type
-     *   +8   union { MOUSEINPUT(24) | KEYBDINPUT(16) | HARDWAREINPUT(8) }  ← 按最大成员算
-     *   +32    KEYBDINPUT 的字段起点
-     * </pre>
+     * <p>布局是「{@code DWORD type} + 按 8 字节对齐的 union」，字段顺序见类上的
+     * {@code FieldOrder}。**具体偏移不要写在这里** —— 理由见 {@link MOUSEINPUT}：
+     * 手写在叙述里的偏移已经错过一次，而照错的注释改代码会直接复现「字符全部丢失」。
      */
     @Structure.FieldOrder({"type", "u"})
     public static class INPUT extends Structure {
@@ -130,9 +131,9 @@ public final class Win32 {
         /**
          * union 的占位成员。
          *
-         * <p><b>必须是 {@link MOUSEINPUT}（24 字节），不能是 {@link KEYBDINPUT}（16 字节）</b>：
-         * 取 union 里最大的那个才能让 {@code KEYBDINPUT} 落在偏移 32。
-         * 用小的会让整个结构少 8 字节、字符写到错误偏移、目标程序重复上一个字符。
+         * <p><b>必须是 {@link MOUSEINPUT}，不能是 {@link KEYBDINPUT}</b>：union 的宽度
+         * 取最大成员，用小的会让 JNA 把整个结构算小、字符写到错误偏移，
+         * 目标程序就会重复上一个字符。为什么不在这里写具体大小，见 {@link MOUSEINPUT}。
          */
         public MOUSEINPUT u = new MOUSEINPUT();
 
@@ -167,12 +168,15 @@ public final class Win32 {
     /**
      * {@code KEYBDINPUT} 字段在 {@link INPUT} 里的偏移。
      *
-     * <p>由 JNA 的 {@code fieldOffset} 实测得出（x64 下为 32），**不靠手算**——
-     * 手算已经把这块算错过一次（少算了 8 字节，导致字符全部丢失、
-     * 目标程序把同一个字重复 N 遍）。
+     * <p>由 JNA 的 {@code fieldOffset} 算出，**不靠手算**——手算已经把这块算错过一次
+     * （少算了 8 字节，导致字符全部丢失、目标程序把同一个字重复 N 遍）。
      *
-     * <p>注意这个偏移是**结构体内**偏移，而 {@code KEYBDINPUT} 本身又在 union 内，
-     * 因此不能拿它当 union 大小用；union 大小由 {@link MOUSEINPUT} 决定。
+     * <p><b>这个值不写在这段注释里。</b>它曾经被写成一个与实现相反的数字，
+     * 而照那段注释改代码就会复现上面那个缺陷 —— 现在它由
+     * {@code TextInjectorLayoutTest} 断言、由注入器在每次注入前复验。
+     *
+     * <p>另注意它是**结构体内**偏移，而 {@code KEYBDINPUT} 本身又在 union 内，
+     * 因此不能拿它当 union 大小用；union 宽度由 {@link MOUSEINPUT} 决定。
      */
     public static int keyboardFieldOffset() {
         return new INPUT().keyboardFieldOffset();

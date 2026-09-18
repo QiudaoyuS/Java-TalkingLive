@@ -60,6 +60,9 @@ public class SettingsWindow extends JFrame {
 
     private static final Logger log = LoggerFactory.getLogger(SettingsWindow.class);
 
+    /** 窗口标题。**唯一来源** —— 字形覆盖测试引用它，不再手抄一份。 */
+    public static final String TITLE = "TalkingLive 设置";
+
     /** 标签列宽度。固定值让所有行的控件左边缘对齐。 */
     private static final int LABEL_COLUMN = 76;
 
@@ -158,7 +161,7 @@ public class SettingsWindow extends JFrame {
     private Timer savedTimer;
 
     public SettingsWindow(Host host) {
-        super("TalkingLive 设置");
+        super(TITLE);
         this.host = host;
 
         setDefaultCloseOperation(WindowConstants.HIDE_ON_CLOSE);   // 关窗 != 退出

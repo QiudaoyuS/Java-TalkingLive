@@ -1984,8 +1984,15 @@ public final class App {
     /**
      * 环境自检（{@code --doctor} / {@code --headless}）。
      *
-     * <p>不启动 UI，因此不含「悬浮球不抢焦点 / 右键菜单能否弹出 / 贴边收起」这几项——
-     * 那些需要真实桌面与真实鼠标，跑在 {@code --self-check} 里。
+     * <p><b>它并不是「不碰 UI」。</b>这里调的是完整的 {@code SelfTest.run(SelfTest.Env)}，
+     * 而 {@code SelfTest} 只要检测到桌面可用就会跑 UI 段 —— 也就是会**短暂造一颗悬浮球、
+     * 并用 {@code Robot} 真的移动鼠标**（实测确认：报告里会打印 B 项与
+     * {@code ballVisible=true}）。此前本方法的注释与 README 都写着「不启动 UI」，
+     * 与真实行为相反。无桌面时该段自动跳过，并在报告里如实标注。
+     *
+     * <p>因此它与 {@code --self-check} 的差别只剩输出：本命令多打一份组件状态行、
+     * 并把报告写到 {@code doctor-report.txt}。若希望 {@code --doctor} 彻底不碰 UI，
+     * 需要给 {@code SelfTest} 加一个开关 —— 已记为 {@code docs/PENDING-ISSUES.md} 的 5.16。
      */
     private void doctor(Options opts) {
         StringBuilder sb = new StringBuilder();
@@ -2003,8 +2010,9 @@ public final class App {
                     line.detail() == null ? "" : line.detail().replace("\n", " | ")));
         }
         sb.append('\n').append(SelfTest.run(new SelfTestEnv()).report());
-        sb.append("\n注：--doctor 不启动 UI，因此上面没有「悬浮球不抢焦点 / 右键菜单」那几项。\n")
-                .append("    那几项需要真实桌面与真实鼠标，请用 --self-check 单独跑。\n");
+        sb.append("\n注：--doctor 与 --self-check 跑的是同一套自检（含 UI 段）——"
+                        + "有桌面时会短暂造一颗悬浮球，并用 Robot 真的移动鼠标。\n")
+                .append("    两者的差别只在输出：本命令多打组件状态行，并写入 doctor-report.txt。\n");
         String text = sb.toString();
         System.out.println(toAscii(text));
         try {

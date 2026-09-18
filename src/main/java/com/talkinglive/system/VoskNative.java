@@ -65,7 +65,17 @@ public interface VoskNative extends Library {
     /**
      * 受限语法识别器（用于唤醒词 / 结束词检测）。
      *
-     * @param grammar JSON，形如 {@code {"phrase_list":["子曰","到此为止","[unk]"]}}
+     * <p><b>{@code grammar} 是纯 JSON 字符串数组</b>，形如 {@code ["子曰","到此为止","[unk]"]}。
+     * **不是** {@code {"phrase_list":[...]}} —— 后者是 Vosk **Python 绑定**的壳，它自己会把
+     * 列表拆出来再交给 C API。传对象进去的实测症状是原生层直接崩：
+     * <pre>
+     * WARNING (VoskAPI:UpdateGrammarFst():recognizer.cc:283)
+     *   Expecting array of strings, got: '{"phrase_list":[...]}'
+     * java.lang.Error: Invalid memory access
+     * </pre>
+     * 语法的构造与形状断言在 {@code engine.VoskKeywordDetector.buildGrammar}（公开为静态方法就是为了可单测）。
+     *
+     * @param grammar 纯 JSON 数组字符串，如 {@code ["子曰","到此为止","[unk]"]}
      */
     Pointer vosk_recognizer_new_grm(Pointer model, float sampleRate, String grammar);
 

@@ -1,6 +1,6 @@
 # 待处理问题（PENDING-ISSUES）
 
-> 版本 0.1 ｜ 状态：**活跃清单**（修一条删一条）
+> 版本 0.3 ｜ 状态：**活跃清单**（修一条删一条）
 >
 > 本文汇总**已知但尚未修**的问题，按优先级降序。产品设计见 `docs/DESIGN.md`，
 > 技术方案见 `docs/TECH-PLAN.md`，**已经做了什么**见 `docs/IMPLEMENTATION-STATUS.md`，
@@ -15,6 +15,62 @@
   （见文末「附：已明确不做」的写法），否则隔几个月会被拿出来重新讨论一遍。
 - 行号会随代码漂移。**以符号名 / 方法名为准**，行号只作快速定位的参考。
 - 这里的每一条都来自**代码审查与实测**，不是推测。凡未实测的都会写明"未验证"。
+
+---
+
+## P0｜核心交互：**实时预览从未生效**（"边说边出字"没有实现过）
+
+> 放在 P1 之前，是因为它推翻的不是一个细节，而是**产品的主交互**与一整套已经建好的机制
+> （两级文字样式、浮窗渲染、预览文本模型）。证据来自**原生层实测 + 现场日志 + 代码**，不是推测。
+
+### 0.1 流式 partial 结果一直被解析成空串（JSON 键名用错）
+
+- **位置**：`VoskModel.Recognizer.partialResult()` 复用了 `textOf()`，而 `textOf()` 只读
+  `"text"` 键 —— 但 `vosk_recognizer_partial_result()` 返回的 JSON 用的键是 **`"partial"`**。
+  于是 `partialResult()` **恒返回空串**，与引擎到底有没有吐 partial 无关。
+- **原生层实测**（用 `VoskNative` 直连 C API，喂静音与调制正弦；**两个键确实不同**，而代码对两者用了同一个解析函数）：
+
+  ```
+  SILENCE_PARTIAL=[{\n  "partial" : ""\n}]      ← partial 用 "partial" 键
+  SILENCE_RESULT =[{\n  "text" : ""\n}]         ← result / final_result 用 "text" 键
+  TONE_PARTIAL   =[{\n  "partial" : ""\n}]
+  FINAL          =[{\n  "text" : ""\n}]
+  ```
+- **后果**：整段说话期间预览浮窗**一个字都不出**，只在端点命中（或段末 `finish()` 里
+  `finalResult()` 兜底）时**一次性出现全文** —— 用户看到的就是"**最后几秒才整体出现**"。
+  连带失效的东西：
+  - `PreviewText` 的两级样式（已稳定实色 / 仍在变弱化）**永远只有一级** —— `setPartial()` 从没拿到过非空文本；
+  - `PreviewText.revisionCount`（引擎回头改字的可观测性）恒为 0；
+  - `DESIGN.md` §2.2 第 4 步「文字**实时**出现在浮窗里」这个主交互，**从未成立过**。
+- **现场证据**（`%LOCALAPPDATA%\TalkingLive\logs\`，`VoskSpeechRecognizer.finish()` 的收尾行）：
+
+  ```
+  喂入 331520 字节（≈10.36s），端点命中 1 次，非空输出 1 次
+  喂入 458240 字节（≈14.32s），端点命中 1 次，非空输出 1 次
+  喂入 276480 字节（≈ 8.64s），端点命中 1 次，非空输出 1 次
+  ```
+
+  10 秒音频、**非空输出只有 1 次**，且与"端点命中 1 次"重合 → partial 全程为空。
+- **为什么一直没被发现**（两条，第二条更关键）：
+  1. `VoskSpeechRecognizer.finish()` 里那句注释「实测存在这种情况（用户说了一整句、
+     accept 全程返回 false、partial 也空）……若不接住这一段就白录了」—— 症状被当成了
+     "引擎的脾气"，于是**又加了一层兜底把症状盖住**，而不是去问"partial 为什么总是空"。
+  2. **`textOf` 本身没错**，`VoskGrammarTest.ResultParsing.missingTextField()` 断言
+     `textOf("{\"partial\" : \"abc\"}") == ""` 也是**对的**（它确实只读 `text`）。
+     问题在于那条例外被当作"缺少 text 字段"的例子用掉了 —— 于是没人再问：
+     "那 `partial` 这个键该由谁解析？"
+     **这是一个正确的测试 + 一个正确的函数，掩盖了一个用错它们的调用点。**
+- **修法**（小）：
+  1. 给 partial 单独的解析（读 `"partial"`），或把 `textOf(json, key)` 参数化。
+     **`textOf` 保持"只读 text"**，不要让它去兼容两个键 —— 兼容会把"调用点用错"重新变成静默行为；
+  2. 补测试把这个区分钉住：`partialOf("{\"partial\":\"abc\"}") == "abc"` 且
+     `partialOf("{\"text\":\"abc\"}") == ""`（反向同理）；现有那条 `textOf` 断言保留不动；
+  3. 把 `VoskSpeechRecognizer` 里"实测 partial 也空"的注释改成真实根因。
+- **成本**：小（一处解析 + 几条测试）。**但它是一个产品决策的前提**：在修好之前，
+  任何"预览没用、可以删掉"的判断，实际都只是"预览从来没跑起来过"。
+- **待核（未逐行核）**：`--mic-test` 与自检里显示的"预览文字"走同一条链路，**八成同样**
+  只在收尾时出现 —— 若是，则 README 建议"第一次先跑 `--mic-test`"要补一句说明：
+  它现在**不能**用来判断"识别是否实时"，只能判断"能否出字"。
 
 ---
 
@@ -89,8 +145,9 @@
 
 - **位置**：`AppConfig.MIN_CHAR_GAP_MILLIS = 0`；而
   `TextInjectorLayoutTest` 的断言消息里自己写着"默认为 0 会让微信这类自绘输入框丢字"。
-- **后果**：用户把间隔拖到 0 就复现"只出现第一个字"，而且没有任何提示。
-- **修法**：下限提到 5–10ms，或在界面上把 0 标注为"可能丢字"。
+- **后果**：任何把 `charGapMillis` 设成 0 的改动（手改配置、或将来把它放回界面）就复现"只出现第一个字"，而且没有任何提示。
+- **修法**：下限提到 5–10ms（一行）。**注意：不要再写"在界面上标注"** —— `charGapMillis` 自 1.5 起已经**没有界面入口**（只在 `config.json` 里），
+  所以提示只能落在配置文件页脚或 README；真正的修法是把已知故障值从可行域里去掉。
 - **成本**：一行。
 
 ### 1.7 控制字符没有过滤
@@ -123,8 +180,9 @@
 
 ### 2.2 边界计算用的是**单屏**矩形，而项目自己写好的虚拟屏幕实现没人用
 
-- **位置**：`FloatingBall` 里七处 `getGraphicsConfiguration().getBounds()`
-  （夹紧 / 默认位置 / 贴边判定 / hiddenX / revealedX）与 `PreviewBar.reposition()`；
+- **位置**：产品代码里共 **9 处** `getGraphicsConfiguration().getBounds()` —— `FloatingBall` 7 处
+  （夹紧 / 默认位置 / 贴边判定 / hiddenX / revealedX）、`PreviewBar.reposition()`、以及
+  **`Toast`（提示条，容易被漏掉）**；
   而 `DpiScale.virtualBounds()` / `clampToScreen()` **只被 `SelfTest` 与 `DpiProbe` 引用**。
 - **后果**（都在多显示器下）：
   - 保存过位置的球在重启时会被"夹回"主屏（窗口尚未定位时取到的是默认屏的 GC）；
@@ -208,8 +266,10 @@
 ### 3.3 没有 CI，也没有"一条命令验证"
 
 - **位置**：无 `.github/`；`AGENTS.md` 要求"交付前确保所有测试和验证全部通过"，
-  但目前要人工记得跑 6 条命令（`mvnw test` / `--doctor` / `--self-check` /
-  `EngineBench` / `EngineSmoke` / `SampleInjector`）。
+  但目前要人工记得跑这些命令（`mvnw test` / `--doctor` / `EngineBench` /
+  `EngineSmoke` / `SampleInjector`）。
+  **不要再把 `--self-check` 算成独立的一条**：它与 `--doctor` 跑的是**同一套** `SelfTest`
+  （都含 UI 段），差别只在输出（`--doctor` 多打组件状态行并写 `doctor-report.txt`）—— 见 5.16。
 - **修法**：加一个 `verify.cmd`：`mvnw -q test` → `--doctor` → 断言报告里 0 失败 →
   退出码非 0 就拦。自用工具不需要 GitHub Actions，一条脚本收益最大。
 - **成本**：小。
@@ -289,7 +349,7 @@
 | # | 问题 | 位置 | 成本 |
 |---|---|---|---|
 | 5.1 | **上帝类**：`App.java` 约 2200 行 / 45+ 方法，一个类里同时有音频线程热路径、EDT UI、CLI 三种模式、装配与诊断 | 建议新建 `com.talkinglive.app` 包承载编排层（受 `ArchitectureTest` 约束，**不能塞回 `core`**）：`DictationPipeline` / `EngineBootstrap` / `ConfigController` / `AppLifecycle` / `StatusReporter`；`SelfTest`（约 1480 行）按 关注点 三分；`SettingsWindow`（约 947 行）里的 CJK 折行算法（约 180 行纯函数）最值得先抽出来 | 中 |
-| 5.2 | **诊断窗口的「重新自检」在 EDT 上跑整套 `SelfTest`** | 违反 `SelfTest` 自己写的前提（"绝不能在 EDT 上跑"）：会冻结窗口数秒，并在真实桌面上**再造一颗悬浮球、用 Robot 移动鼠标**，结论本身也失真。改为后台线程 + `onUi` 回填 | 小 |
+| 5.2 | **诊断窗口的「重新自检」在 EDT 上跑整套 `SelfTest`** | 违反 `SelfTest` 自己写的前提（"绝不能在 EDT 上跑"）：会冻结窗口数秒，并在真实桌面上**再造一颗悬浮球、用 Robot 移动鼠标**，结论本身也失真。改为后台线程 + `onUi` 回填。**已在真实使用中复现**：日志里 `2026-09-19 00:09:59` 有一条 `[AWT-EventQueue-0] WindowsTextInjector - 文本注入器就绪` —— 启动路径只会是 `[main]`，所以这条只能来自诊断窗口里点的那次"重新自检" | 小 |
 | 5.3 | **资源泄漏** | `diagnostics` 窗口从不 dispose、日志订阅无人 close；`FloatingBall` 没有 `dispose()` 覆写，构造函数里启动的 33ms `levelTimer` 永不停（每跑一次自检多一个 30fps 计时器）；`singleInstanceLock` 从不 close；`notices` 无界增长；`ForegroundWatcher.ignored` 只增不减 | 小 |
 | 5.4 | **`paused` 仍是三份状态** | `App.paused` / `ball.setPaused(...)`（视觉）/ `StateMachine.paused` 各自漂移；0.9.4 只修掉了"麦克风恢复时静默解除用户暂停"这一处症状。建议收敛成一个来源 | 小 |
 | 5.5 | **`AudioCapture.close()` 与 `loop()` 竞态** | 可能在 `closing` 置真之后仍打开设备，而那个设备再也没人关；且 `closing` 不复位 → 对象是一次性的 | 小 |
@@ -299,10 +359,9 @@
 | 5.9 | **非法配置 = 起不来，且没有自愈** | 已存在的坏配置直接抛异常，`--settings` 也救不了（配置在 UI 启动之前就读了）；不坏文件、不备份、无版本号字段可用于迁移。升级时一旦收紧取值范围，用户就只能手改 JSON | 小 |
 | 5.10 | **静音下拉框条目会累积** | 对手改的列表外取值（例如 `silenceSeconds = 7`），每次 `setVisible(true)` 都 `addItem` 一次 → 每打开一次设置窗口多一条 | 小 |
 | 5.11 | **`dockEnabled` 是半死开关** | 只有一处读它，界面无入口，而 `maybeDock()` 完全不看它 → 手改成 `false` 后贴边照常发生。正是本文档反对的"改了没反应的开关" | 小 |
-| 5.12 | **`IMPLEMENTATION-STATUS.md` 里的测试数字会再次过期** | 它写死了"246 项单测 + 44 项自检"，而 0.9.4 时已是 415 / 71。建议改成"见 `mvnw test` 输出"，不写常量 —— 与自检 F4"断言直接数组件、不写死常量"是同一个道理 | 一行 |
 | 5.13 | **`.gitignore` 的注释与自身规则矛盾** | 注释说"Maven wrapper 本体随仓库提交"，下一行却排除了 `.mvn/wrapper/*.jar`（实际未提交）→ 首次构建必须联网 | 一行 |
-| 5.14 | **`Win32.java` 的注释与实现矛盾** | 注释写"KEYBDINPUT 实际落在偏移 32"，而实现与测试用的是 8 / 10。**照注释改代码就会重新引入"INPUT 结构体少 8 字节、字符全写丢"那个已经修过的缺陷** —— 这条注释必须改掉 | 一行 |
 | 5.15 | **`--allow-multiple` 下两个实例会并发写同一份 `config.json`** | 临时文件名固定且无写锁 | 小 |
+| 5.16 | **`--doctor` 实际会跑 UI 段**（造悬浮球 + `Robot` 真动鼠标），而代码注释与 README 一直写着"不启动 UI、不碰鼠标" —— **文档与真实行为相反** | `App.doctor()` 调的是完整的 `SelfTest.run(env)`，而 `SelfTest.collect()` 只要桌面可用就 `runUi()`；实测 `--doctor` 的输出里确实有 B 项与 `ballVisible=true`。后果：用户在专用鼠标操作中跑 `--doctor` 会被抢一下鼠标，屏幕上闪一颗球；而 `--doctor` 与 `--self-check` 的真实差别只剩输出（前者多打状态行 + 写 `doctor-report.txt`）。**文档侧已按事实改正**（README / `IMPLEMENTATION-STATUS` / `App.doctor` 注释）。**要不要改代码是个决策**：给 `SelfTest` 加"是否跑 UI 段"的开关（`Env` 里加一个布尔即可，`--doctor` 传 false 并在报告里如实写"UI 段已按参数跳过"），或者承认两个命令等价、合并成一个 | 小 |
 
 ---
 
@@ -324,3 +383,5 @@
 | 版本 | 日期 | 变更 |
 |---|---|---|
 | 0.1 | 本次 | 首版：汇总 0.9.2 / 0.9.4 两批修复之后仍未处理的问题，分五档（注入可靠性 / 悬浮球可用性 / 转写质量与验收 / 产品体验决策 / 工程卫生），并附"已明确不做"清单。全部条目来自静态审查与实测记录，未实测的都已标注 |
+| 0.2 | 本次（文档层搬家） | **修完即删两条**（本文档的规矩是"修一条删一条"，本次没有 git 提交，所以把删了哪两条记在这里）：**5.12**（`IMPLEMENTATION-STATUS.md` 写死测试数量）→ 已改为"见 `mvnw test` 输出 / 见 `TextUtilsTest.LogSafe`"；**5.14**（`Win32.java` 注释与实现矛盾，照它改代码会复现已修缺陷）→ 注释里的具体偏移已全部删除，改为指向 `TextInjectorLayoutTest` 与 `logInputLayoutOnce()`；顺带合并了 `WindowsTextInjector.send()` 上叠加的**三段互相矛盾**的 javadoc。另：本次给两条原本**只写在散文里**的约束补了源码扫描断言（「麦克风只开一路」「跨边界坐标只经 `DpiScale`」，见 `ArchitectureTest`），并在 `DESIGN.md` §4.3 建立「约束 / 由什么强制 / 谁来喊」对照表 —— 那张表里**空着的格子将来会长出新的欠债**（P1.1「出口必须诚实」现在就是空的），本文档对应条目修完时记得回去填上 |
+| 0.3 | 本次（数据复盘 + 纠错） | ① **新增 P0 一节**：确认「**实时预览从未生效**」—— `partialResult()` 复用了只读 `"text"` 的 `textOf()`，而 partial JSON 的键是 `"partial"`（**已用 `VoskNative` 直连原生层实测两个键的原始 JSON**），现场日志里"10 秒音频、非空输出仅 1 次"与之吻合；`DESIGN.md` §2.2 第 4 步的主交互因此从未成立。注意：**`textOf` 与那条 `VoskGrammarTest` 断言本身都是对的** —— 被掩盖的是一个用错它们的调用点。② **纠错三处**：P1.6 的"在界面上标注 0 可能丢字"（`charGapMillis` 自 1.5 起就没有界面入口）；P2.2 漏了 `Toast`（实际 9 处，不是 8 处）；P3.3 把 `--self-check` 当成独立命令（它与 `--doctor` 是同一套自检）。③ **给 5.2 补上复现证据**（日志里 `[AWT-EventQueue-0]` 那条注入器就绪 = 诊断窗口触发的自检）。④ 头部版本号此前一直停在 0.1，本次改为与修订记录一致。⑤ 另修一处代码注释：`VoskNative.vosk_recognizer_new_grm` 的 `@param` 写成 `{"phrase_list":[...]}`，与实现相反（C API 只收纯 JSON 数组，传对象会崩在原生层） |

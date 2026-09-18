@@ -9,7 +9,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -99,24 +101,35 @@ class FontGlyphCoverageTest {
     @Test
     @DisplayName("菜单字体覆盖中文（托盘 AWT 菜单曾一个字体都没设，汉字全是方块）")
     void menuFontCoversChinese() {
-        assertCovers("Theme.menuFont(12)", Theme.menuFont(12), MENU_LABELS);
+        assertCovers("Theme.menuFont(12)", Theme.menuFont(12), menuAndTitleText());
         // JPopupMenu 自己的字体来自 UIManager（实测是 Dialog 逻辑字体，会正确回退到
         // 覆盖中文的物理字体）。若它存在也要覆盖，否则菜单文字会成方块。
         Object uf = javax.swing.UIManager.get("MenuItem.font");
         if (uf instanceof Font u) {
-            assertCovers("UIManager MenuItem.font", u, MENU_LABELS);
+            assertCovers("UIManager MenuItem.font", u, menuAndTitleText());
         }
     }
 
-    /** 菜单与窗口标题里真正会显示的文案。 */
-    private static final String MENU_LABELS =
-            "手动开始 / 结束听写暂停监听设置查看日志退出状态与诊断TalkingLive 设置";
+    /**
+     * 菜单与窗口标题里真正会显示的文案 —— **从单一来源取，不手抄**。
+     *
+     * <p>这里原先是一串手写字符串，而它已经抄错过一次、谁也没发现：
+     * 菜单项实际叫 {@code MenuAction.LOGS}，那串样本里却留着旧名字「状态与诊断」。
+     * 现在直接从 {@link FloatingBall.MenuAction} 与两个窗口的 {@code TITLE} 取，
+     * 文案改了这里自动跟着改 —— 字形覆盖测试本来就不该有自己的文案副本。
+     */
+    private static String menuAndTitleText() {
+        StringBuilder sb = new StringBuilder();
+        for (FloatingBall.MenuAction a : FloatingBall.MenuAction.values()) {
+            sb.append(a.label()).append(a.label(true));
+        }
+        return sb.append(SettingsWindow.TITLE).append(DiagnosticsWindow.TITLE).toString();
+    }
 
     @Test
     @DisplayName("菜单与窗口标题的文案都画得出来")
     void menuAndTitleStringsAreRenderable() {
-        assertCovers("Theme.font(12) 画菜单文案", Theme.font(12), MENU_LABELS);
-        assertCovers("Theme.font(12) 画窗口标题", Theme.font(12), "TalkingLive 状态与诊断");
+        assertCovers("Theme.font(12) 画菜单文案", Theme.font(12), menuAndTitleText());
     }
 
     @Test
@@ -142,5 +155,114 @@ class FontGlyphCoverageTest {
         try (Stream<Path> s = Files.walk(src)) {
             return s.filter(p -> p.toString().endsWith(".java")).toList();
         }
+    }
+
+    /** 产品源码 + 测试源码。副本既可能出现在产品代码里，也可能出现在测试里（实测两者都发生过）。 */
+    private static List<Path> allSourceFiles() throws IOException {
+        List<Path> all = new ArrayList<>(sourceFiles());
+        Path test = Path.of("src", "test", "java", "com", "talkinglive");
+        try (Stream<Path> s = Files.walk(test)) {
+            all.addAll(s.filter(p -> p.toString().endsWith(".java")).toList());
+        }
+        return all;
+    }
+
+    @Test
+    @DisplayName("菜单与窗口标题的文案只有一处定义（防「再抄一份」后静默漂移）")
+    void labelsHaveASingleSource() throws IOException {
+        // 文案 → 允许定义它的文件。
+        //
+        // 为什么值得变成测试：这些文案此前有**四份副本**（菜单里、两个窗口标题、
+        // 本测试的样本串），而其中一份抄错了名字（「状态与诊断」）却几个月没人发现 ——
+        // 因为没有一条断言把它按住。判据是"谁定义了它"，而不是"谁提到过它"：
+        // 注释里引用文案名是合法的（例如 DiagnosticsWindow 的类注释就在解释那次抄错），
+        // 所以下面只扫**字符串字面量**。
+        Map<String, String> owners = new LinkedHashMap<>();
+        for (FloatingBall.MenuAction a : FloatingBall.MenuAction.values()) {
+            owners.put(a.label(), "FloatingBall.java");
+            owners.put(a.label(true), "FloatingBall.java");
+        }
+        owners.put(SettingsWindow.TITLE, "SettingsWindow.java");
+        owners.put(DiagnosticsWindow.TITLE, "DiagnosticsWindow.java");
+
+        List<String> violations = new ArrayList<>();
+        Map<String, List<String>> seenIn = new LinkedHashMap<>();
+        for (Path f : allSourceFiles()) {
+            String name = f.getFileName().toString();
+            for (String literal : stringLiterals(f)) {
+                seenIn.computeIfAbsent(literal, k -> new ArrayList<>()).add(name);
+                String owner = owners.get(literal);
+                if (owner != null && !owner.equals(name)) {
+                    violations.add(name + " 里又写了一份「" + literal + "」");
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                "界面文案必须只有一处定义，否则改一处、别处还留着旧名字 —— 实测就是这么"
+                        + "漂移的（菜单实际叫 MenuAction.LOGS，文档与测试样本里却是「状态与诊断」）。"
+                        + "请改成引用定义处的枚举/常量：MenuAction、SettingsWindow.TITLE、"
+                        + "DiagnosticsWindow.TITLE。重复的副本：" + violations);
+
+        // 扫描本身不能是空转：每条文案都必须在它自己的定义文件里被找到。
+        // 否则上面那条断言会因为「一个字符串也没扫到」而永远通过 ——
+        // 这个项目已经吃过一次「最被信任的自检恰好只测了替身」的亏（README §架构分层末段）。
+        List<String> notFound = new ArrayList<>();
+        for (Map.Entry<String, String> e : owners.entrySet()) {
+            List<String> where = seenIn.getOrDefault(e.getKey(), List.of());
+            if (!where.contains(e.getValue())) {
+                notFound.add("「" + e.getKey() + "」未在 " + e.getValue()
+                        + " 中找到（实际出现在 " + where + "）");
+            }
+        }
+        assertTrue(notFound.isEmpty(),
+                "扫描没能在定义处找到文案，说明这个守卫已经失效（它现在拦不住任何东西）：" + notFound);
+    }
+
+    /**
+     * 取出源文件里的**字符串字面量**（注释里提到的不算）。
+     *
+     * <p>顺序很重要：先去掉注释再找字面量。注释里完全可以合法地写出这些文案
+     * （本仓库就有好几处用它们解释历史），那不是"第二份副本"；
+     * 反过来，注释里出现落单的引号会把朴素的正则带偏。
+     *
+     * <p>已知局限：文本块（{@code """}）里的内容识别不到。这里只当"防手抄"的守卫用，
+     * 漏报比误报可接受 —— 它守的是有人**故意**再抄一份的场景。
+     */
+    private static List<String> stringLiterals(Path f) throws IOException {
+        String src = Files.readString(f, StandardCharsets.UTF_8);
+        List<String> out = new ArrayList<>();
+        int i = 0;
+        int n = src.length();
+        while (i < n) {
+            char c = src.charAt(i);
+            if (c == '/' && i + 1 < n && src.charAt(i + 1) == '/') {
+                while (i < n && src.charAt(i) != '\n') {
+                    i++;
+                }
+            } else if (c == '/' && i + 1 < n && src.charAt(i + 1) == '*') {
+                i += 2;
+                while (i + 1 < n && !(src.charAt(i) == '*' && src.charAt(i + 1) == '/')) {
+                    i++;
+                }
+                i = Math.min(n, i + 2);
+            } else if (c == '"') {
+                StringBuilder lit = new StringBuilder();
+                i++;
+                while (i < n && src.charAt(i) != '"') {
+                    if (src.charAt(i) == '\\') {
+                        i++;
+                    }
+                    if (i < n) {
+                        lit.append(src.charAt(i));
+                        i++;
+                    }
+                }
+                i++;
+                out.add(lit.toString());
+            } else {
+                i++;
+            }
+        }
+        return out;
     }
 }

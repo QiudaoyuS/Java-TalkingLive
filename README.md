@@ -196,10 +196,11 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 所以下面的命令直接 `java -jar` 即可。
 
 ```powershell
-# ① 环境自检：模型 / 词表校验 / 麦克风 / 注入器 / 配置往返 / 端到端管线（不开 UI，不碰鼠标）
+# ① 环境自检：模型 / 词表校验 / 麦克风 / 注入器 / 配置往返 / 端到端管线 + 全部自检项
+#    ⚠️ 它**不是**「不碰鼠标」：有桌面时会跑 UI 段（短暂造一颗悬浮球 + Robot 移动鼠标）
 java -jar target\talkinglive.jar --doctor
 
-# ② 完整自检：会开 UI 并真的移动鼠标右键悬浮球（需要真实桌面，会短暂占用鼠标）
+# ② 完整自检：与 ① 跑的是同一套检查，差别只在输出（① 多打组件状态行并写 doctor-report.txt）
 java -jar target\talkinglive.jar --self-check
 
 # ③ 引擎基准：回填 DESIGN.md §6 的性能预算（模型加载、内存、离线 RTF）
@@ -267,15 +268,25 @@ com.talkinglive
                             / DiagnosticsWindow / Theme / Icons
 ```
 
-### 三条必须遵守的工程约束
+### 工程约束：每条都必须有一个「谁会喊」
 
-1. **麦克风只开一路**（`DESIGN.md` §4.3）：唤醒检测与预览识别共用同一个
-   `TargetDataLine`，由 `AudioCapture` 分发。禁止各自开设备 —— Windows 上会互相抢设备。
-2. **所有跨边界坐标换算只经 `system.DpiScale`**（`TECH-PLAN` §7 第 3 项）：
-   Win32 用**物理像素**、Java 用**逻辑像素**，禁止在任何地方混用
-   `Robot.mouseMove` 与 `SetCursorPos`。
-3. **日志不记转写内容**（`DESIGN.md` §3.1 第 12 项）：任何面向日志的文本都必须过
-   `Logging.describe*`（只记长度 + 指纹）。
+约束写在文档里只是记录 —— 它被人违反时得**有人出声**，否则迟早漂移。
+所以本项目要求每条约束都有一个机制，完整对照表在 `DESIGN.md` §4.3
+（**唯一对照处**：增删约束先改那里，别在这里再抄一份）。下面这几条是读到这里
+最可能动手改的，附上**现在谁在守它们**：
+
+| 约束 | 谁来喊 |
+|---|---|
+| `core` / `text` 不得依赖 AWT / JNA / 引擎原生库 | `ArchitectureTest` 扫源码 → **构建失败** |
+| **麦克风只开一路**（唤醒检测与预览识别共用同一个 `TargetDataLine`，由 `AudioCapture` 分发） | `ArchitectureTest.microphoneIsAcquiredInOnePlaceOnly` → **构建失败** |
+| **跨边界坐标只经 `system.DpiScale`**（Win32 物理像素 / Java 逻辑像素） | `ArchitectureTest.coordinatesGoThroughDpiScale` → **构建失败** |
+| 日志不记转写内容 | `Logging.describe*` + `TextUtilsTest.LogSafe` —— **只覆盖 `Logging` 本身**：「所有日志都过了它」没有机制，靠 review |
+
+> 同样的道理也适用于**界面文案**：菜单与窗口标题只在
+> `FloatingBall.MenuAction` / `SettingsWindow.TITLE` / `DiagnosticsWindow.TITLE`
+> 定义一次，文档与自检一律引用符号 —— 因为手抄过的那一份已经漂移过一次
+> （菜单实际叫「查看日志」，而两份文档里写着「状态与诊断…」）。
+> `FontGlyphCoverageTest` 会扫源码禁止出现第二份副本。
 
 ### 三条踩过坑的路基（改之前请先看）
 

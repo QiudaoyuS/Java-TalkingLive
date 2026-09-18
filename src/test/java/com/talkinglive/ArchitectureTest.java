@@ -8,7 +8,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.DisplayName;
@@ -24,6 +26,13 @@ import org.junit.jupiter.api.Test;
  * <p>§9.1 又把这条重复了一遍。既然它是整个测试策略的前提，就不能只靠约定——
  * 一旦有人在 {@code core} 里 import 一个 AWT 类，测试策略会在他不知道的情况下失效。
  * 所以这里用源码扫描把它变成会失败的测试。
+ *
+ * <p><b>同样的道理适用于 §4.3 的另外两条约束</b>（「麦克风只开一路」「跨边界坐标只经
+ * {@code DpiScale}」）。它们此前只活在 README / DESIGN 的**散文**里：写得很清楚，
+ * 但没有任何东西拦得住违反。而这两条的后果都不是崩溃，而是**症状与别的原因无法区分**——
+ * 各开一路麦克风表现为「识别不准」（与麦克风坏了分不出来，缺陷 #13 就被骗过一次），
+ * 混用物理/逻辑像素表现为「点到了完全无关的地方」（§4.4 承认这是本项目最容易反复踩的坑）。
+ * 所以它们现在也在这里被扫描强制；{@code DESIGN.md} §4.3 的对照表逐条列出「谁来喊」。
  */
 class ArchitectureTest {
 
@@ -196,6 +205,96 @@ class ArchitectureTest {
         }
         assertTrue(violations.isEmpty(),
                 "不应引入这些依赖（DESIGN.md §1.3 全离线、§4.5 纯逻辑）：" + violations);
+    }
+
+    // ------------------------------------------------------------ §4.3 另外两条工程约束
+
+    /**
+     * 唯一允许取麦克风的文件（{@code DESIGN.md} §4.3「麦克风只开一路」）。
+     *
+     * <p>诊断工具（{@code tools/*.java}）不在 {@code src} 下，因此不受这条约束 ——
+     * 它们本来就是用来单独试设备的（{@code ListMics} / {@code ProbeMixer}）。
+     */
+    private static final String MIC_OWNER = "AudioCapture.java";
+
+    /** 「打开一路采集」会碰到的 Java Sound API。 */
+    private static final List<Pattern> MIC_APIS = List.of(
+            Pattern.compile("\\bTargetDataLine\\b"),
+            Pattern.compile("\\bAudioSystem\\b"),
+            Pattern.compile("\\bDataLine\\b"),
+            Pattern.compile("\\bgetMixerInfo\\b"),
+            Pattern.compile("\\bgetTargetLineInfo\\b"));
+
+    @Test
+    @DisplayName("麦克风只在 AudioCapture 里取一次（§4.3「麦克风只开一路」）")
+    void microphoneIsAcquiredInOnePlaceOnly() throws IOException {
+        List<String> violations = new ArrayList<>();
+        try (Stream<Path> all = Files.walk(SRC)) {
+            for (Path f : all.filter(p -> p.toString().endsWith(".java")).toList()) {
+                if (MIC_OWNER.equals(f.getFileName().toString())) {
+                    continue;
+                }
+                String code = codeOnly(f);
+                for (Pattern p : MIC_APIS) {
+                    if (p.matcher(code).find()) {
+                        violations.add(f.getFileName() + " 里出现了 " + p.pattern());
+                    }
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                "麦克风必须只开一路（DESIGN.md §4.3）：唤醒检测与实时预览共用同一个"
+                        + " TargetDataLine，由 AudioCapture 分发。各自开设备会在 Windows 上互相"
+                        + " 抢设备、时序对不齐，而症状是「识别不准」—— 与「麦克风坏了」分不出来"
+                        + "（缺陷 #13 就是这么被骗过一次的）。越界使用：" + violations);
+    }
+
+    /**
+     * 允许碰这些坐标 API 的文件（每条都带理由）。
+     *
+     * <p>读法：正则 → 允许出现的文件。名单之外出现即失败，失败消息里会带上这条约束的理由，
+     * 因此新增一处合法用法时，改动是「进名单 + 写一句理由」，而不是悄悄绕过。
+     */
+    private static final Map<String, List<String>> COORDINATE_APIS = coordinateApis();
+
+    private static Map<String, List<String>> coordinateApis() {
+        Map<String, List<String>> m = new LinkedHashMap<>();
+        // 物理像素的唯一出口。目前产品代码里没有任何一处调用它 —— 这条规则是为将来准备的：
+        // 一旦要用（例如把球移回屏幕中央），它必须与 Win32 侧的换算成对出现，所以只能在这里。
+        m.put("\\bSetCursorPos\\b", List.of("DpiScale.java"));
+        // 逻辑像素的驱动者：只有自检按设计要真的移动鼠标（§9.2 与它的两条前提）。
+        m.put("\\bRobot\\b", List.of("SelfTest.java"));
+        // 读鼠标位置的三处，各自有理由：
+        //   FloatingBall —— 贴边收起后要判断鼠标是否还停在露出的那一条上（轮询，§4.4）
+        //   SelfTest     —— 核对 Robot 真的把鼠标移到了目标点
+        //   DpiProbe     —— 它的职责本来就是对照 Win32 物理像素与 AWT 逻辑像素
+        m.put("\\bMouseInfo\\b", List.of("FloatingBall.java", "SelfTest.java", "DpiProbe.java"));
+        return m;
+    }
+
+    @Test
+    @DisplayName("跨边界坐标只经 DpiScale（§4.3 第 2 条 / §4.4「最容易反复踩的坑」）")
+    void coordinatesGoThroughDpiScale() throws IOException {
+        List<String> violations = new ArrayList<>();
+        try (Stream<Path> all = Files.walk(SRC)) {
+            for (Path f : all.filter(p -> p.toString().endsWith(".java")).toList()) {
+                String name = f.getFileName().toString();
+                String code = codeOnly(f);
+                for (Map.Entry<String, List<String>> e : COORDINATE_APIS.entrySet()) {
+                    if (e.getValue().contains(name)) {
+                        continue;
+                    }
+                    if (Pattern.compile(e.getKey()).matcher(code).find()) {
+                        violations.add(name + " 里出现了 " + e.getKey()
+                                + "（只允许出现在 " + e.getValue() + "）");
+                    }
+                }
+            }
+        }
+        assertTrue(violations.isEmpty(),
+                "Win32 用物理像素、Java 用逻辑像素，混用会把坐标推到屏幕外或点到完全无关的"
+                        + "地方（§4.4 承认这是本项目最容易反复踩的坑）。所有跨边界换算必须只经"
+                        + " system.DpiScale。越界使用：" + violations);
     }
 
     /**

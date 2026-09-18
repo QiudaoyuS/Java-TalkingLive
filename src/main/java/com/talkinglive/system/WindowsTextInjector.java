@@ -459,50 +459,6 @@ public final class WindowsTextInjector implements TextInjector {
         }
     }
 
-    /** @return 实际写入的事件数；-1 表示一个都没写进去 */
-    /**
-     * 把一组按键事件写进**显式分配的原生内存**并交给 {@code SendInput}。
-     *
-     * <p><b>为什么不用 JNA 的 {@code Structure.toArray()}：</b>实测出现过一个极隐蔽的故障——
-     * 用户说「今天天气不错啊」（7 字），微信里出现的是「**今今今今今今今**」：
-     * 事件数完全正确（14 = 7×2，{@code SendInput} 报告全部写入成功），
-     * 但每个 {@code INPUT} 里的字符字段都被写成了**同一个值**，
-     * 于是同一个字被发了 7 遍。
-     *
-     * <p>{@code new INPUT().toArray(n)} 这种写法依赖 JNA 内部的数组元素分配与
-     * {@code write()} 语义，在含 union 的 {@code INPUT} 上踩了坑。
-     * 现在改为**自己算偏移、自己写字节**：布局是
-     * <pre>
-     *   INPUT (40 字节, 8 字节对齐)
-     *     +0  DWORD type
-     *     +8  KEYBDINPUT（union 的最大成员 MOUSEINPUT 是 24 字节）
-     *           +0  WORD  wVk
-     *           +2  WORD  wScan      ← KEYEVENTF_UNICODE 时字符放这里
-     *           +4  DWORD dwFlags
-     *           +8  DWORD time
-     *           +16 ULONG_PTR dwExtraInfo   （32 位平台是 +12；本产品只支持 x64）
-     * </pre>
-     * 完全不依赖 JNA 的结构体写回机制，并且**写完立刻回读校验**——
-     * 与其相信它写对了，不如读出来看一眼。
-     */
-    /**
-     * 把一组按键事件交给 {@code SendInput}。
-     *
-     * <p><b>不手算偏移。</b>偏移和结构大小都交给 JNA 算（{@link Win32#keyboardFieldOffset()}、
-     * {@code new INPUT().size()}），并且**写完立刻回读校验**。
-     *
-     * <p>为什么这么谨慎——这块已经错过两次，而且两次的故障都极其隐蔽：
-     * <ol>
-     *   <li>第一次：用 {@code new INPUT().toArray(n)} 分配数组，字符没有被逐个写入。</li>
-     *   <li>第二次（更根本）：{@link Win32.INPUT} 的 union 里只声明了 16 字节的
-     *       {@code KEYBDINPUT}，但 Windows 的 union 最大成员是 24 字节的 {@code MOUSEINPUT}，
-     *       于是 JNA 把整个 {@code INPUT} 算成 32 字节、把字符写到了偏移 24。
-     *       症状是：{@code SendInput} 报告事件**全部写入成功**，
-     *       但字符全丢，目标程序把**同一个字重复 N 遍**（用户看到「今今今今今今今」）。</li>
-     * </ol>
-     * 所以现在：把 {@code MOUSEINPUT} 也声明进 union 撑到正确大小，
-     * 并且启动时打印一次「Java 计算的大小 == 传给 SendInput 的 dwSize」的校验结果。
-     */
     /**
      * 把一组按键事件交给 {@code SendInput}。
      *
@@ -510,17 +466,25 @@ public final class WindowsTextInjector implements TextInjector {
      * 每次都表现成「事件数看起来对，但文字不对」：
      * <ol>
      *   <li>{@code new INPUT().toArray(n)} 分配数组 → 字符没有被逐个写入；</li>
-     *   <li>{@code Win32.INPUT} 的 union 只声明 16 字节的 {@code KEYBDINPUT}，
-     *       而 Windows 的 union 最大成员是 24 字节的 {@code MOUSEINPUT} →
-     *       结构被算成 32 字节、字符写到偏移 24 → <b>同一个字被重复 N 遍</b>；</li>
+     *   <li>union 里只声明了 {@code KEYBDINPUT}（它不是最大成员）→ JNA 把结构算小、
+     *       字符写到错误偏移 → <b>同一个字被重复 N 遍</b>（用户看到「今今今今今今今」）；</li>
      *   <li>改对布局后用 {@code INPUT[]} 传参 → {@code SendInput} 直接返回 0。</li>
      * </ol>
-     * 所以现在：结构体布局由 JNA 从字段定义算出（{@code MOUSEINPUT} 撑大 union），
-     * 但**缓冲区自己分配、偏移自己按字段写入**，最后传 {@code Pointer} 进去。
-     * 这样既拿到正确的 40 字节布局，又绕开 JNA 对结构体数组的编组。
+     *
+     * <p>现在的做法：<b>结构体布局由 JNA 从字段定义算出</b>（union 里声明 {@code MOUSEINPUT}
+     * 把它撑到正确宽度，起点用 {@link Win32#keyboardFieldOffset()} 问 JNA，不手算），
+     * 而**缓冲区自己分配、字段按偏移写入**，最后传 {@code Pointer} 进去 ——
+     * 既拿到正确布局，又绕开 JNA 对结构体数组的编组。
      *
      * <p>写入后再**回读校验**：确认每个事件的字符确实是它自己那个字。
      * 与其相信写对了，不如读出来看一眼——前面三次故障都发生在「以为写对了」的时刻。
+     *
+     * <p><b>具体偏移与结构大小不写在这里</b>（这里原本并排躺着三段注释，其中一段的
+     * 数字与实现相反、另一段说"不手算偏移"而旁边那段说"自己算偏移"）。
+     * 正确值由 {@code TextInjectorLayoutTest} 断言，并由 {@code logInputLayoutOnce()}
+     * 在第一次调用时打进日志。
+     *
+     * @return 实际写入的事件数；{@code -1} 表示一个都没写进去
      */
     private int send(List<Win32.KeyEvent> events) {
         if (events.isEmpty()) {
@@ -530,7 +494,8 @@ public final class WindowsTextInjector implements TextInjector {
 
         int n = events.size();
         int size = Win32.INPUT_SIZE;
-        // 每个 INPUT：+0 type(DWORD)，union 起点在 +8；KEYBDINPUT 内 wVk@0 / wScan@2 / dwFlags@4
+        // 每个 INPUT：+0 type(DWORD)，之后是 union（起点问 JNA，不手算）；
+        // KEYBDINPUT 内 wVk@0 / wScan@2 / dwFlags@4 —— 这些偏移由 TextInjectorLayoutTest 断言
         int unionAt = Win32.keyboardFieldOffset();
         int wScanAt = unionAt + 2;
         int flagsAt = unionAt + 4;

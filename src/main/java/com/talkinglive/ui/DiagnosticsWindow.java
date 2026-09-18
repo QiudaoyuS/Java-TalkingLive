@@ -39,15 +39,27 @@ import org.slf4j.LoggerFactory;
  *
  * <p>现在两者的入口分开，各自只有一个目的：
  * <ul>
- *   <li>悬浮球右键 →「设置…」→ {@link SettingsWindow}（五行，日常会改的东西）</li>
- *   <li>悬浮球右键 →「状态与诊断…」→ 本窗口（系统到底好不好、最近发生了什么）</li>
+ *   <li>悬浮球右键 → {@link FloatingBall.MenuAction#SETTINGS} → {@link SettingsWindow}
+ *       （五行，日常会改的东西）</li>
+ *   <li>悬浮球右键 → {@link FloatingBall.MenuAction#LOGS} → 本窗口
+ *       （系统到底好不好、最近发生了什么）</li>
  * </ul>
+ *
+ * <p>⚠️ 上面写的是**枚举名而不是中文字符串**，这是刻意的：这里曾经把菜单名抄成
+ * 「状态与诊断…」，而实际菜单项是 {@link FloatingBall.MenuAction#LOGS}，
+ * 于是文档与实现对不上（同名漂移在 {@code docs/} 里也各留了一份）。
+ * 文案的唯一来源是 {@code FloatingBall.MenuAction}，引用它就不会再抄错。
+ * 本窗口打开时落在**日志页**（{@code App.openDiagnostics(DiagnosticsWindow.TAB_LOG)}），
+ * 状态与自检在另外两个页签。
  *
  * <p>本窗口**不改任何配置**，因此不需要「保存」的概念，也没有失败路径要提示。
  */
 public class DiagnosticsWindow extends JFrame {
 
     private static final Logger log = LoggerFactory.getLogger(DiagnosticsWindow.class);
+
+    /** 窗口标题。**唯一来源** —— 自检的字形覆盖测试引用它，不再手抄一份。 */
+    public static final String TITLE = "TalkingLive 状态与诊断";
 
     public static final int TAB_STATUS = 0;
     public static final int TAB_LOG = 1;
@@ -82,7 +94,7 @@ public class DiagnosticsWindow extends JFrame {
     private AutoCloseable logSubscription;
 
     public DiagnosticsWindow(Host host) {
-        super("TalkingLive 状态与诊断");
+        super(TITLE);
         this.host = host;
 
         setDefaultCloseOperation(WindowConstants.HIDE_ON_CLOSE);

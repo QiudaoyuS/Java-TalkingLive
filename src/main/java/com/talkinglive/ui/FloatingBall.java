@@ -54,17 +54,70 @@ public class FloatingBall extends JWindow {
         /** 左键：IDLE 时开始听写，LISTENING 时结束本段。 */
         void onLeftClick();
 
-        /** 菜单「暂停监听 / 恢复监听」。 */
+        /** 菜单 {@link MenuAction#PAUSE}。 */
         void onTogglePause();
 
-        /** 菜单「设置...」。 */
+        /** 菜单 {@link MenuAction#SETTINGS}。 */
         void onOpenSettings();
 
-        /** 菜单「查看日志」。 */
+        /** 菜单 {@link MenuAction#LOGS}。 */
         void onOpenLog();
 
-        /** 菜单「退出」。 */
+        /** 菜单 {@link MenuAction#QUIT}。 */
         void onQuit();
+    }
+
+    /**
+     * 右键菜单的条目 —— **菜单文案的唯一来源**。
+     *
+     * <p>为什么要有这个枚举：文案原先散落在 {@code buildMenu} 里当字面量用，
+     * 于是「谁也没规定它只能有一份」的地方就有了第二份。实测到的后果是**漂移**——
+     * {@code docs/IMPLEMENTATION-STATUS.md} 与 {@code docs/DESIGN.md} 都曾把这一项写成
+     * 「状态与诊断…」，而实际菜单项是「查看日志」；{@code FontGlyphCoverageTest}
+     * 抄了一份文案样本，里面也留着旧名字。
+     *
+     * <p>现在文案只在这里定义一次：菜单从这里取，文档与自检引用**枚举名**
+     * （{@code MenuAction.LOGS}）而不是抄中文字符串。
+     * {@code FontGlyphCoverageTest} 会扫源码确认没有第二处副本 ——
+     * 这条约束和 §4.3 的那几条一样，靠的是「有人会喊」，不是靠自觉。
+     */
+    public enum MenuAction {
+        /** 与左键等价的「手动开始 / 结束听写」；暂停时不可点，文案也随之改变。 */
+        MANUAL("手动开始 / 结束听写", "手动开始听写（已暂停）"),
+        /** 暂停 / 恢复监听。 */
+        PAUSE("暂停监听", "恢复监听"),
+        /** 打开设置窗口（五项，日常会改的东西）。 */
+        SETTINGS("设置..."),
+        /** 打开诊断窗口的**日志页**（状态与自检在另外两个页签）。 */
+        LOGS("查看日志"),
+        /** 退出程序。 */
+        QUIT("退出");
+
+        private final String label;
+        private final String pausedLabel;
+
+        MenuAction(String label) {
+            this(label, null);
+        }
+
+        MenuAction(String label, String pausedLabel) {
+            this.label = label;
+            this.pausedLabel = pausedLabel;
+        }
+
+        /** 默认文案。 */
+        public String label() {
+            return label;
+        }
+
+        /**
+         * 当前该显示的文案。
+         *
+         * @param paused 是否处于暂停态；该条目没有暂停态文案时与 {@link #label()} 相同
+         */
+        public String label(boolean paused) {
+            return paused && pausedLabel != null ? pausedLabel : label;
+        }
     }
 
     /** 位置或贴边状态变了，需要持久化。 */
@@ -568,30 +621,30 @@ public class FloatingBall extends JWindow {
         // 菜单文字曾经成过方块，根因是字体缺字形，不是编码。
         menu.setFont(Theme.menuFont(12));
 
-        JMenuItem manual = menuItem(paused ? "手动开始听写（已暂停）" : "手动开始 / 结束听写");
+        JMenuItem manual = menuItem(MenuAction.MANUAL.label(paused));
         manual.setEnabled(!paused);
         manual.addActionListener(a -> listener.onLeftClick());
         menu.add(manual);
 
         menu.addSeparator();
 
-        JMenuItem pause = menuItem(paused ? "恢复监听" : "暂停监听");
+        JMenuItem pause = menuItem(MenuAction.PAUSE.label(paused));
         pause.addActionListener(a -> listener.onTogglePause());
         menu.add(pause);
 
         menu.addSeparator();
 
-        JMenuItem settings = menuItem("设置...");
+        JMenuItem settings = menuItem(MenuAction.SETTINGS.label());
         settings.addActionListener(a -> listener.onOpenSettings());
         menu.add(settings);
 
-        JMenuItem logs = menuItem("查看日志");
+        JMenuItem logs = menuItem(MenuAction.LOGS.label());
         logs.addActionListener(a -> listener.onOpenLog());
         menu.add(logs);
 
         menu.addSeparator();
 
-        JMenuItem quit = menuItem("退出");
+        JMenuItem quit = menuItem(MenuAction.QUIT.label());
         quit.addActionListener(a -> listener.onQuit());
         menu.add(quit);
 
