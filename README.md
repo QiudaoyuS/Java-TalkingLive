@@ -58,8 +58,16 @@ Expand-Archive "$dir\vosk-model-small-cn-0.22.zip" -DestinationPath $dir
 > 解压后 `graph/` 下**没有 `words.txt`**（词表编在 `Gr.fst` 二进制里），所以查词只能用
 > `vosk_model_find_word()` API —— 见 `DESIGN.md` 附录 D.1。
 
-装好大模型 `vosk-model-cn-0.22` 会自动生效（识别明显更准，代价是冷启动约 17–21 秒、
-常驻内存约 2.4 GB）：获取路径与实测数据见 `docs/ENGINE-EXPERIMENT.md`。
+装好大模型 `vosk-model-cn-0.22` 会自动生效（识别明显更准，代价见下）：获取路径与实测数据见 `docs/ENGINE-EXPERIMENT.md`。
+
+> **代价（实测，含口径 —— 同一件事按不同口径能差一个数量级）**：装大模型时正常启动
+> **工作集约 3.6GB**（任务管理器「内存」列）、**私有提交约 4.6GB**（决定还能不能再开别的程序）、
+> 「球出现」要等约 **18 秒**（模型加载 16–18 秒）。它是**原生内存**，不在 Java 堆里
+> （堆内仅 3MB），所以 `-Xmx` 管不到它。
+> 闲置约 1 小时后工作集会被系统裁剪到约 0.76GB。不想要这份开销：
+> 在 `config.json` 里设 `useLargeModel: false` 并重启（代价是准确率下降、
+> 且小模型**词表里没有任何英文**，AI / PDF 这类词会被漏掉）。
+> 取舍的理由与复核条件见 `docs/DECISIONS.md` D0/D1。
 
 ### 2. 一键启动
 
@@ -97,6 +105,8 @@ java -jar target\talkinglive.jar                    # 常驻后台，桌面上�
 java -jar target\talkinglive.jar --settings         # 启动并打开设置窗口
 java -jar target\talkinglive.jar --refiner none     # 关闭精化（用预览文本直接注入）
 java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无设备时试界面用）
+java -jar target\talkinglive.jar --install-startup  # 设置开机自启（默认不开；写当前用户的「启动」文件夹）
+java -jar target\talkinglive.jar --uninstall-startup # 取消开机自启
 ```
 
 > ⚠️ **`JAVA_HOME` 必须指向 JDK 21**（本机为 `D:\Code\Java\jdk-21.0.12.1`）。
@@ -126,7 +136,9 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 **操作**：
 
 - **左键**：待唤醒时＝开始听写；听写中＝结束本段
-- **右键**：菜单 —— 手动开始 / 结束听写 · 暂停监听 / 恢复监听 · 设置... · 查看日志 · 退出
+- **右键**：菜单 —— 手动开始 / 结束听写 · 暂停监听 / 恢复监听 · 设置... · 查看日志 · **重置到屏幕中央** · **临时隐藏（到点自动恢复）** · 退出
+  （后两项是给"球找不到"兜底的：球是唯一入口，被全屏程序遮住或被拖到可见区外时，
+  以前只剩杀进程这一条路 —— 而单实例锁还会在重启时告诉你"已经在运行了"）
 - **拖动**：移动位置（会自动夹在屏幕可见范围内）
 - **贴边收起**：拖到屏幕左右边缘 40px 内松手 → 吸附到该侧、只露一小条；鼠标移到露出部分自动滑出，移开约 450ms 后收回
 
@@ -169,8 +181,9 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 
 改动**即时生效、无需保存**，界面上会显示「修改已保存并立即生效」。
 
-> 注入间隔（`charGapMillis`）、单段上限（`maxSegmentSeconds`）、热词表（`hotwords`）是
-> 「改一次就不动」的参数，只在 `config.json` 里改（路径显示在设置页页脚）。
+> 注入间隔（`charGapMillis`）、单段上限（`maxSegmentSeconds`）、热词表（`hotwords`）、
+> **大模型开关（`useLargeModel`）** 是「改一次就不动」的参数，只在 `config.json` 里改
+> （路径显示在设置页页脚）。
 > **改完请重启程序** —— 运行中的实例会把内存里的配置写回，手改的内容会被覆盖。
 
 ### 4. 状态与诊断窗口
@@ -308,6 +321,7 @@ com.talkinglive
 | 文档 | 作用 |
 |---|---|
 | `docs/IMPLEMENTATION-STATUS.md` | **现在能干什么、不能干什么**（先看这个） |
+| `docs/DECISIONS.md` | **已经拍板的决策**：结论 / 理由 / 代价 / 复核条件（未定的在 PENDING-ISSUES） |
 | `docs/PENDING-ISSUES.md` | **已知但尚未修的问题**：按优先级降序，每条给位置 / 后果 / 修法 / 成本 |
 | `docs/DESIGN.md` | 产品设计（要做什么），含交互清单、异常与降级、手工验收清单 |
 | `docs/TECH-PLAN.md` | 技术方案（用什么实现；与设计冲突时以它为准） |
