@@ -63,6 +63,22 @@ public class FloatingBall extends JWindow {
         /** 菜单 {@link MenuAction#LOGS}。 */
         void onOpenLog();
 
+        /**
+         * 菜单 {@link MenuAction#RESET_POSITION}。
+         *
+         * <p>存在的理由：球是**唯一入口**，而它可能被全屏程序遮住、被拖到屏幕边缘之外、
+         * 或被贴边收起后找不着 —— 那时用户只剩"杀进程"这一条路（{@code PENDING-ISSUES} P2.3）。
+         */
+        void onResetPosition();
+
+        /**
+         * 菜单 {@link MenuAction#HIDE_TEMPORARILY}。
+         *
+         * <p>注意它**只隐藏界面**：唤醒词检测不依赖悬浮球，所以隐藏期间照常可以说唤醒词听写；
+         * 到点会自动回来（没有全局热键，所以不能做成"藏着等你叫"）。
+         */
+        void onHideTemporarily();
+
         /** 菜单 {@link MenuAction#QUIT}。 */
         void onQuit();
     }
@@ -90,6 +106,10 @@ public class FloatingBall extends JWindow {
         SETTINGS("设置..."),
         /** 打开诊断窗口的**日志页**（状态与自检在另外两个页签）。 */
         LOGS("查看日志"),
+        /** 把球移回屏幕中央（找不到球、或被拖到可见区外时的出口）。 */
+        RESET_POSITION("重置到屏幕中央"),
+        /** 临时隐藏（到点自动回来；隐藏期间唤醒词仍然有效）。时长见 {@link #HIDE_MILLIS}。 */
+        HIDE_TEMPORARILY("临时隐藏（到点自动恢复）"),
         /** 退出程序。 */
         QUIT("退出");
 
@@ -135,8 +155,17 @@ public class FloatingBall extends JWindow {
     /** 收起后露出多少像素的**窗口**（球体只占中间 52px，所以要加内边距）。 */
     private static final int PEEK = 20;
 
-    /** 松手时距边缘这个距离以内就吸附（附录 A：判定距离 40px）。 */
+    /** 松开鼠标后，距边缘这个距离以内就吸附（附录 A：判定距离 40px）。 */
     private static final int DOCK_THRESHOLD = 40;
+
+    /**
+     * 「临时隐藏」的时长。
+     *
+     * <p>时长只在这里定义一次；菜单文案**刻意不写数字**（写死了就会与这里脱钩，
+     * 变成"文案说 30 分钟、实际 5 分钟"这种没人核对的不一致）。
+     * 具体几分钟由提示条按这个常量算出来告诉用户（{@code App.BallActions.onHideTemporarily}）。
+     */
+    public static final long HIDE_MILLIS = 30L * 60 * 1000;
 
     /** 移开鼠标后约 450ms 才收回（§2.3），150ms 轮询 × 3 次。 */
     private static final int OUTSIDE_TICKS_TO_HIDE = 3;
@@ -154,6 +183,8 @@ public class FloatingBall extends JWindow {
     private AppConfig.DockSide docked = AppConfig.DockSide.NONE;
     private boolean revealed = true;
     private Timer slideTimer;
+    /** 临时隐藏的恢复计时器（非 null 即表示当前处于隐藏中，见 {@link #hideTemporarily}）。 */
+    private Timer hideTimer;
 
     private float pulsePhase = 0f;
     private final Timer pulseTimer;
@@ -644,6 +675,18 @@ public class FloatingBall extends JWindow {
 
         menu.addSeparator();
 
+        // 「球找不到 / 不想看到它」的两个出口（P2.3）：球是唯一入口，
+        // 没有它们时只剩杀进程这一条路。
+        JMenuItem reset = menuItem(MenuAction.RESET_POSITION.label());
+        reset.addActionListener(a -> listener.onResetPosition());
+        menu.add(reset);
+
+        JMenuItem hide = menuItem(MenuAction.HIDE_TEMPORARILY.label());
+        hide.addActionListener(a -> listener.onHideTemporarily());
+        menu.add(hide);
+
+        menu.addSeparator();
+
         JMenuItem quit = menuItem(MenuAction.QUIT.label());
         quit.addActionListener(a -> listener.onQuit());
         menu.add(quit);
@@ -675,6 +718,72 @@ public class FloatingBall extends JWindow {
     /** 供自检直接触发吸附判定。 */
     public void dockForTest() {
         maybeDock();
+    }
+
+    /**
+     * 把球移回屏幕中央，并解除贴边。
+     *
+     * <p>给"找不到球"兜底（{@code PENDING-ISSUES} P2.3）：球是唯一入口，被全屏程序遮住、
+     * 被拖到可见区外、或贴边收起后忘了怎么找回来时，用户此前只能杀进程 ——
+     * 而单实例锁还会在重启时告诉他"已经在运行了"。
+     *
+     * <p>刻意顺手**解除贴边**：收起状态正是"找不到它"的常见原因。
+     */
+    public void resetToCenter() {
+        Rectangle screen = getGraphicsConfiguration().getBounds();
+        docked = AppConfig.DockSide.NONE;
+        revealed = true;
+        stopDockWatcher();
+        stopSlide();
+        setLocationClamped(screen.x + (screen.width - WINDOW_SIZE) / 2,
+                screen.y + (screen.height - WINDOW_SIZE) / 2);
+        if (geometryListener != null) {
+            geometryListener.onGeometryChanged(getX(), getY(), docked);
+        }
+        repaint();
+    }
+
+    /**
+     * 临时隐藏，{@code millis} 之后自动出现。
+     *
+     * <p>为什么必须是"自动回来"而不是"等你叫它"：产品没有全局热键（{@code DESIGN.md} §3.2），
+     * 一旦藏起来就没有任何把手能把它叫回来。所以这个入口只用于"我现在不想看到它"，
+     * 而不是"关掉它"。
+     *
+     * <p>隐藏的**只是界面**：唤醒词检测与注入都不经过悬浮球，所以隐藏期间照常说唤醒词即可听写。
+     */
+    public void hideTemporarily(long millis) {
+        stopDockWatcher();
+        stopSlide();
+        pulseTimer.stop();
+        setVisible(false);
+        if (hideTimer != null) {
+            hideTimer.stop();
+        }
+        hideTimer = new Timer((int) Math.max(1000, Math.min(Integer.MAX_VALUE, millis)), e -> showAgain());
+        hideTimer.setRepeats(false);
+        hideTimer.start();
+        log.info("悬浮球已临时隐藏，{} 分钟后自动出现（唤醒词仍然有效）",
+                Math.round(millis / 60000.0));
+    }
+
+    private void showAgain() {
+        hideTimer = null;
+        setVisible(true);
+        // 期间可能拔过屏/改过分辨率：显示之后再夹一次，避免出现在可见区之外
+        setLocationClamped(getX(), getY());
+        if ("LISTENING".equals(state) && !paused) {
+            pulseTimer.start();
+        }
+        if (docked != AppConfig.DockSide.NONE) {
+            startDockWatcher();
+        }
+        log.info("悬浮球已恢复显示");
+    }
+
+    /** 是否处于临时隐藏中（供自检）。 */
+    public boolean hiddenTemporarily() {
+        return hideTimer != null;
     }
 
     /** 供自检读取「收到过几次 mouseEntered」。 */

@@ -194,6 +194,55 @@ public final class App {
     /** 同一个标题的提示在这个间隔内只弹一次。 */
     private static final long NOTICE_THROTTLE_MILLIS = 60_000;
 
+    /**
+     * 安装 / 卸载开机自启（D4）。
+     *
+     * <p><b>输出刻意用 ASCII</b>：Windows 控制台默认 GBK，中文会乱码 —— 而乱码不只是难看，
+     * 它会**掩盖真正的失败信息**（{@code DESIGN.md} §9.2 踩过的坑）。所以面向控制台的
+     * 摘要一律 ASCII，中文说明留在 README 与注释里。
+     *
+     * <p>机制是**启动文件夹**而不是注册表 Run 键 —— 后者被安全策略保护、未签名进程写不进去
+     * （实测证据见 {@link com.talkinglive.system.StartupEntry} 的类注释）。
+     */
+    private static void runStartupCommand(Options opts) {
+        if (!com.talkinglive.system.StartupEntry.supported()) {
+            System.out.println("[startup] not supported on this platform (Windows only)");
+            return;
+        }
+        try {
+            if (opts.uninstallStartup) {
+                com.talkinglive.system.StartupEntry.uninstall(
+                        com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME);
+                System.out.println("[startup] autostart removed: deleted "
+                        + com.talkinglive.system.StartupEntry.startupFile(
+                                com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME));
+                return;
+            }
+            Path launcher = com.talkinglive.system.StartupEntry.resolveLauncher();
+            if (launcher == null) {
+                // 找不到启动器就**什么都不写**：写一个指向不存在文件的启动项
+                // 等于"开机后什么都没发生"，比不设置更糟。
+                System.out.println("[startup] launcher not found: "
+                        + com.talkinglive.system.StartupEntry.LAUNCHER
+                        + " (expected next to target/). Nothing was changed.");
+                System.out.println("[startup] run this from the project root, e.g.:"
+                        + " java -jar target\\talkinglive.jar --install-startup");
+                return;
+            }
+            com.talkinglive.system.StartupEntry.install(
+                    com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME, launcher);
+            System.out.println("[startup] autostart enabled: wrote "
+                    + com.talkinglive.system.StartupEntry.startupFile(
+                            com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME));
+            System.out.println("[startup] it launches silently at logon via: " + launcher);
+            System.out.println("[startup] note: the model still needs 16-18s to load"
+                    + " (a loading window is shown)");
+            System.out.println("[startup] to undo: java -jar target\\talkinglive.jar --uninstall-startup");
+        } catch (IOException | RuntimeException e) {
+            System.out.println("[startup] failed: " + e);
+        }
+    }
+
     // ------------------------------------------------------------ main
 
     public static void main(String[] args) throws Exception {
@@ -206,6 +255,12 @@ public final class App {
         Options opts = Options.parse(args);
         if (opts.help) {
             Options.printHelp();
+            return;
+        }
+        if (opts.installStartup || opts.uninstallStartup) {
+            // 这类命令**不进 start()**：不需要配置、不需要模型、不需要单实例锁，
+            // 也不该有任何界面。（自启默认不开 —— 写注册表必须由用户显式要求，见 D4。）
+            runStartupCommand(opts);
             return;
         }
         App app = new App();
@@ -242,6 +297,9 @@ public final class App {
         /** 允许同时运行多份（默认禁止，见 start() 里的单实例保护）。 */
         boolean allowMultiple;
         String refiner;
+        /** 安装 / 卸载开机自启（D4；见 {@link com.talkinglive.system.StartupEntry}）。 */
+        boolean installStartup;
+        boolean uninstallStartup;
 
         static Options parse(String[] args) {
             Options o = new Options();
@@ -255,6 +313,8 @@ public final class App {
                     case "--self-check" -> o.selfCheck = true;
                     case "--mic-test" -> o.micTest = true;
                     case "--allow-multiple" -> o.allowMultiple = true;
+                    case "--install-startup" -> o.installStartup = true;
+                    case "--uninstall-startup" -> o.uninstallStartup = true;
                     case "--refiner" -> {
                         if (i + 1 < args.length) {
                             o.refiner = args[++i];
@@ -281,6 +341,8 @@ public final class App {
                       --no-microphone   不打开麦克风（无麦克风环境下试界面用）
                       --refiner <名>    指定精化引擎：auto | vosk-offline | none
                       --allow-multiple  允许同时运行多份（默认禁止，避免多颗悬浮球）
+                      --install-startup 设置开机自启（默认不开；写入当前用户的「启动」文件夹）
+                      --uninstall-startup 取消开机自启（删掉那个启动器文件）
                       --console         除日志文件外也输出到控制台（默认为真）
                       --help            显示本帮助
                     """);
@@ -610,6 +672,15 @@ public final class App {
      * **不知道为什么在等**才可怕。
      */
     private VoskModel loadRecognitionModel() {
+        if (!config.useLargeModel()) {
+            // 用户自己关掉了大模型（D1 的出口）。这里**必须说清楚代价**，
+            // 而不是安静地用回小模型 —— 否则他会以为"识别变差了是软件的问题"。
+            log.info("按配置使用小模型识别（useLargeModel=false）：启动更快、内存更省，准确率较低");
+            notices.add("已按配置（useLargeModel=false）使用小模型识别：启动更快、内存更省，"
+                    + "但准确率较低，且小模型词表里没有任何英文（AI / PDF 这类词会被漏掉）。\n"
+                    + "想改回大模型：把 config.json 的 useLargeModel 设回 true 并重启程序。");
+            return voskModel;
+        }
         Path dir = AppPaths.asrModelDir();
         boolean hasLarge = !dir.equals(AppPaths.voskModelDir());
         long t0 = System.nanoTime();
@@ -1335,6 +1406,33 @@ public final class App {
         }
 
         @Override
+        public void onResetPosition() {
+            onUi(() -> {
+                if (ball == null) {
+                    return;
+                }
+                ball.resetToCenter();
+                showNotice("已重置悬浮球位置",
+                        "球已移到屏幕中央并解除贴边（位置已保存，下次启动仍在中央）。");
+            });
+        }
+
+        @Override
+        public void onHideTemporarily() {
+            onUi(() -> {
+                if (ball == null) {
+                    return;
+                }
+                ball.hideTemporarily(FloatingBall.HIDE_MILLIS);
+                // 必须说清两件事：多久回来、以及**它还在工作** ——
+                // 否则用户会以为隐藏等于退出，然后去杀进程（那正好是这个菜单要避免的）。
+                showNotice("悬浮球已临时隐藏",
+                        Math.round(FloatingBall.HIDE_MILLIS / 60000.0) + " 分钟后自动出现。"
+                                + "隐藏的只是界面：唤醒词照常有效，说唤醒词即可开始听写。");
+            });
+        }
+
+        @Override
         public void onQuit() {
             shutdown();
         }
@@ -1767,7 +1865,17 @@ public final class App {
         if (usingLarge) {
             asrOk = true;
             asrDetail = "预览与落字共用**大模型**（CER 7.43%，词表含 AI/APP/CPU 等英文）："
-                    + asrModel.path();
+                    + asrModel.path()
+                    + " —— 代价：常驻工作集约 3.6GB / 私有提交约 4.6GB、启动同步加载 16–18 秒"
+                    + "（实测；想省内存可在 config.json 里设 useLargeModel=false 并重启）";
+        } else if (!config.useLargeModel()) {
+            // 用户自己关掉的：**不能报成红项** —— 那是他的选择，不是故障。
+            // 但必须把代价写清楚，否则他只会觉得"这软件识别不准"。
+            asrOk = true;
+            asrDetail = "**按配置使用小模型**（config.json 的 useLargeModel=false）：启动更快、"
+                    + "内存更省，代价是准确率较低（CER 17.15% 对 7.43%），"
+                    + "且小模型词表内没有任何英文 —— AI / PDF 这类词会被漏掉。"
+                    + "想用回大模型：把该键设回 true 并重启";
         } else {
             asrOk = false;
             asrDetail = "预览与落字都用**小模型**（CER 17.15%，且词表内没有任何英文，"

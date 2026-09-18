@@ -177,6 +177,30 @@ public final class AppConfig {
      */
     private String hotwords = "";
 
+    /**
+     * 是否用**大模型**做识别（实时预览 / 落字 / 段落精化三者共用）。
+     *
+     * <p>默认 {@code true}：装好大模型即自动生效，这是刻意的 —— 用户抱怨的
+     * 「识别不准 / 漏英文」根因就是小模型的精度上限（CER 17.15% 对 7.43%），
+     * 而且小模型词表里**没有任何英文**（AI / APP / CPU / PDF 全部发不出来）。
+     *
+     * <p>那为什么还要给这个开关（决策见 {@code docs/DECISIONS.md} 的 D1）：
+     * 大模型的代价是**实打实的**，实测（16GB 机器、启动 20 秒后稳定值）——
+     * <b>工作集约 3.6GB、私有提交约 4.6GB</b>，且启动时要同步加载 16–18 秒；
+     * 它还是**原生内存**，不在 Java 堆里（堆内仅 3MB），{@code -Xmx} 管不到。
+     * 在 8GB 机器上这笔开销会挤压整机：提交量不足 → 换页 → 别的程序变慢，
+     * 而归因不到这颗不到 1cm² 的小球上。
+     *
+     * <p><b>所以给的是"用户自己说了算"的出口，而不是程序替他悄悄降级</b> ——
+     * 悄悄降级等于违背已经拍板的"准确率优先"，而用户还不知道自己为什么忽好忽坏
+     * （§7「任何失败都必须可见」）。
+     *
+     * <p>它是「改一次就不再动」的参数，因此只放配置文件（与 {@link #charGapMillis} 同理），
+     * 界面上不出现；诊断窗口的状态页会**如实显示**当前在用哪个模型、以及是不是被这个开关关掉的。
+     * <b>改完需重启</b>（模型只在启动时加载一次）。
+     */
+    private boolean useLargeModel = true;
+
     private final Ball ball = new Ball();
 
     // ------------------------------------------------------------ 访问器
@@ -261,6 +285,15 @@ public final class AppConfig {
         this.hotwords = v == null ? "" : v.strip();
     }
 
+    /** 是否用大模型做识别。见 {@link #useLargeModel}（改完需重启）。 */
+    public boolean useLargeModel() {
+        return useLargeModel;
+    }
+
+    public void setUseLargeModel(boolean v) {
+        this.useLargeModel = v;
+    }
+
     /**
      * 解析后的热词表。
      *
@@ -324,6 +357,7 @@ public final class AppConfig {
         c.maxSegmentSeconds = maxSegmentSeconds;
         c.charGapMillis = charGapMillis;
         c.hotwords = hotwords;
+        c.useLargeModel = useLargeModel;
         // 位置没保存过时 x/y 是 MIN_VALUE，这里必须原样带过去，
         // 否则 hasPosition() 会从 false 变成 true，悬浮球位置凭空"有了"。
         c.ball.setPosition(ball.x(), ball.y());
@@ -408,6 +442,9 @@ public final class AppConfig {
         // 空字符串也写出去：让用户能在配置文件里看到「有热词这个功能」，
         // 否则一个从没配过热词的人根本不知道它存在。
         m.put("hotwords", hotwords);
+        // 与 hotwords 同理写出去：让用户能在配置文件里看到「有这个大模型开关」，
+        // 否则从没关过大模型的人根本不知道它存在（D1 的出口必须是**看得见**的）。
+        m.put("useLargeModel", useLargeModel);
         m.put("ball", ball.toJson());
         return m;
     }
@@ -434,6 +471,8 @@ public final class AppConfig {
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
         c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
         c.hotwords = JsonCodec.str(m, "hotwords", "").strip();
+        // 缺失时默认 true（老配置里没有这个键 → 行为与以前完全一致）
+        c.useLargeModel = JsonCodec.bool(m, "useLargeModel", true);
         // 连续输入模式（continuousMode / stopWord / continuousIdleSeconds）已被移除：
         // 实测用起来比单段模式更繁琐 —— 说完结束词还要等静音超时才收尾，
         // 而单段模式里「到此为止」本身就立刻停止录音。旧配置里残留的这三个键

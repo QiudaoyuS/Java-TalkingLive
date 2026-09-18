@@ -657,4 +657,51 @@ class AppConfigTest {
             live.validate();                // 原文必须仍然合法（不抛）
         }
     }
+
+    /**
+     * 大模型开关（{@code docs/DECISIONS.md} D1）。
+     *
+     * <p>它是"接受大模型的内存/启动代价，但给用户一条**自己说了算**的出口"
+     * 这条决策的载体：关掉之后必须真的按小模型走（{@code App.loadRecognitionModel} 读它），
+     * 而老配置（没有这个键）的行为不能变。
+     */
+    @Nested
+    @DisplayName("大模型开关 useLargeModel（D1 的出口）")
+    class LargeModelSwitch {
+
+        @Test
+        @DisplayName("默认开启：装好大模型即自动生效这个行为不能被改掉")
+        void defaultsToTrue() {
+            assertTrue(new AppConfig().useLargeModel());
+            assertTrue(AppConfig.fromJsonText("{\"wakeWord\":\"子曰\"}").useLargeModel(),
+                    "老配置里没有这个键 → 必须默认 true，行为与以前完全一致");
+        }
+
+        @Test
+        @DisplayName("写进 JSON 再读回来（出口必须是看得见的，不能只活在内存里）")
+        void roundTrip() {
+            AppConfig c = new AppConfig();
+            c.setUseLargeModel(false);
+            String json = c.toJsonText();
+            assertTrue(json.contains("useLargeModel"),
+                    "要写出去，否则用户不知道有这个开关：\n" + json);
+            assertFalse(AppConfig.fromJsonText(json).useLargeModel());
+        }
+
+        @Test
+        @DisplayName("copy() 带着它走（设置窗口在副本上改，漏了它就等于开关被静默重置）")
+        void copyCarriesTheSwitch() {
+            AppConfig c = new AppConfig();
+            c.setUseLargeModel(false);
+            assertFalse(c.copy().useLargeModel());
+        }
+
+        @Test
+        @DisplayName("它不影响配置合法性（这是取舍，不是错误）")
+        void neverRejectedByValidation() {
+            AppConfig c = new AppConfig();
+            c.setUseLargeModel(false);
+            c.validate();   // 不抛
+        }
+    }
 }
