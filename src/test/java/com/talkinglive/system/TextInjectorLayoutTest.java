@@ -1,6 +1,7 @@
 package com.talkinglive.system;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.talkinglive.core.AppConfig;
@@ -231,6 +232,47 @@ class TextInjectorLayoutTest {
             } catch (AppConfig.ConfigException e) {
                 return true;
             }
+        }
+    }
+
+    @Nested
+    @DisplayName("事件数核对：部分写入必须被当成失败（PENDING 1.1「出口诚实」）")
+    class Accounting {
+
+        @Test
+        @DisplayName("计划事件数 = 2 × UTF-16 长度 + 2 × 退格数")
+        void plannedEventsCountsUtf16Units() {
+            assertEquals(0, TextInjector.plannedEvents(null, 0));
+            assertEquals(0, TextInjector.plannedEvents("", 0));
+            assertEquals(6, TextInjector.plannedEvents("今天天", 0));
+            // 代理对：一个码点、两个 UTF-16 单元 → 四组事件（Windows 的既定行为）
+            assertEquals(4, TextInjector.plannedEvents("😀", 0));
+            assertEquals(2, TextInjector.plannedEvents("", 1));
+            assertEquals(8, TextInjector.plannedEvents("今天", 2));
+            // 负数退格按 0 计（否则基准会被算成负数，"写少了"永远判不出来）：
+            // "今" 是 1 个 UTF-16 单元 → 2 个事件，与退格数无关
+            assertEquals(2, TextInjector.plannedEvents("今", -5));
+        }
+
+        @Test
+        @DisplayName("部分写入 → ok=false + PARTIAL_WRITE（不再报告成功）")
+        void partialWriteIsFailure() {
+            TextInjector.Result r = TextInjector.Result.partial(14, 20, "只写入了 14/20 个键盘事件");
+            assertFalse(r.ok(), "部分写入必须报失败：否则用户丢字，而程序说成功");
+            assertEquals(TextInjector.Result.Failure.PARTIAL_WRITE, r.failure());
+            assertEquals(14, r.eventsSent());
+            assertEquals(20, r.eventsExpected());
+            assertTrue(r.message().contains("14/20"), r.message());
+        }
+
+        @Test
+        @DisplayName("成功时也带上期望值，便于事后按日志核对")
+        void okCarriesExpectation() {
+            TextInjector.Result r = TextInjector.Result.okExact(20, 20);
+            assertTrue(r.ok());
+            assertEquals(20, r.eventsSent());
+            assertEquals(20, r.eventsExpected());
+            assertEquals(TextInjector.Result.Failure.NONE, r.failure());
         }
     }
 

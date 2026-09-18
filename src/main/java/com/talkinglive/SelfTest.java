@@ -175,7 +175,7 @@ public final class SelfTest {
 
     /** 跑全部自检。**必须在非 EDT 线程上调用**（见类注释）。 */
     public static Result run() {
-        return new Result(List.copyOf(collect().items));
+        return new Result(List.copyOf(collect(true).items));
     }
 
     /**
@@ -184,18 +184,42 @@ public final class SelfTest {
      * <p>只有拿到 {@code App} 探针时才跑那一节 —— 没有探针就不声称验证过。
      */
     public static Result run(Env env) {
-        SelfTest t = collect();
+        return run(env, true);
+    }
+
+    /**
+     * 跑自检，并由调用方决定**是否包含 UI 段**。
+     *
+     * <p>为什么要这个开关：{@code --doctor} 承诺的是「环境自检后退出」，而它此前调的是
+     * 上面那个无参版本 —— 只要桌面可用就会跑 UI 段，也就是**造一颗悬浮球并用
+     * {@code Robot} 真的移动鼠标**。文档与注释都写着「不碰鼠标」，与真实行为相反
+     * （实测抓出来的：日志里 {@code --doctor} 的输出含 B 项与 {@code ballVisible=true}）。
+     * 于是那个承诺永远是假的，而用户可能正在用鼠标做别的事。
+     *
+     * <p>现在按调用方分工：{@code --doctor} 传 {@code false}（不碰 UI，并在报告里如实写明跳过），
+     * {@code --self-check} 传 {@code true}（UI 段与真实路径那节归它）。
+     *
+     * @param env         App 探针；null 表示不跑「真实路径」一节
+     * @param includeUi   是否包含 UI 段（造窗口 + Robot 操作真实鼠标）
+     */
+    public static Result run(Env env, boolean includeUi) {
+        SelfTest t = collect(includeUi);
         if (env != null) {
             t.runRealPath(env);
         }
         return new Result(List.copyOf(t.items));
     }
 
-    private static SelfTest collect() {
+    private static SelfTest collect(boolean includeUi) {
         SelfTest t = new SelfTest();
         t.runCoreLogic();
         t.runPipeline();
-        if (canTouchUi()) {
+        if (!includeUi) {
+            // 如实写进报告：跳过不等于通过。否则报告看上去"全绿"，
+            // 而读者会以为 UI 那几项也验过了（本项目吃过这个亏）。
+            t.add("UI", "UI 段：按参数跳过", true,
+                    "--doctor 不造窗口、不碰鼠标（这是它的承诺）；要验悬浮球/预览条/设置窗口请跑 --self-check");
+        } else if (canTouchUi()) {
             t.runUi();
         } else {
             t.add("UI", "图形环境", false, "无可用显示（headless），UI 自检已跳过——这类检查必须在真实桌面上跑");

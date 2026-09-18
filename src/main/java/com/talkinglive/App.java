@@ -1984,15 +1984,10 @@ public final class App {
     /**
      * 环境自检（{@code --doctor} / {@code --headless}）。
      *
-     * <p><b>它并不是「不碰 UI」。</b>这里调的是完整的 {@code SelfTest.run(SelfTest.Env)}，
-     * 而 {@code SelfTest} 只要检测到桌面可用就会跑 UI 段 —— 也就是会**短暂造一颗悬浮球、
-     * 并用 {@code Robot} 真的移动鼠标**（实测确认：报告里会打印 B 项与
-     * {@code ballVisible=true}）。此前本方法的注释与 README 都写着「不启动 UI」，
-     * 与真实行为相反。无桌面时该段自动跳过，并在报告里如实标注。
-     *
-     * <p>因此它与 {@code --self-check} 的差别只剩输出：本命令多打一份组件状态行、
-     * 并把报告写到 {@code doctor-report.txt}。若希望 {@code --doctor} 彻底不碰 UI，
-     * 需要给 {@code SelfTest} 加一个开关 —— 已记为 {@code docs/PENDING-ISSUES.md} 的 5.16。
+     * <p><b>它真的不碰 UI</b>：UI 段（悬浮球 / 预览条 / 设置窗口 / Robot 操作真实鼠标）
+     * 由参数关掉，报告里会**如实写明"UI 段：按参数跳过"**（跳过 ≠ 通过）。
+     * 这条承诺此前是假的 —— 那时它调的是完整自检，桌面可用就会造一颗悬浮球并移动鼠标，
+     * 而文档写着"不碰鼠标"（实测抓出，见 {@code docs/DECISIONS.md} 的 D5）。
      */
     private void doctor(Options opts) {
         StringBuilder sb = new StringBuilder();
@@ -2009,10 +2004,9 @@ public final class App {
                     line.ok() ? "[ok]  " : "[FAIL]",
                     line.detail() == null ? "" : line.detail().replace("\n", " | ")));
         }
-        sb.append('\n').append(SelfTest.run(new SelfTestEnv()).report());
-        sb.append("\n注：--doctor 与 --self-check 跑的是同一套自检（含 UI 段）——"
-                        + "有桌面时会短暂造一颗悬浮球，并用 Robot 真的移动鼠标。\n")
-                .append("    两者的差别只在输出：本命令多打组件状态行，并写入 doctor-report.txt。\n");
+        sb.append('\n').append(SelfTest.run(new SelfTestEnv(), false).report());
+        sb.append("\n注：--doctor 不跑 UI 段（不造窗口、不碰鼠标），上面那一行已如实标注为「按参数跳过」。\n")
+                .append("    要验悬浮球 / 预览条 / 设置窗口与真实鼠标路径，请跑 --self-check。\n");
         String text = sb.toString();
         System.out.println(toAscii(text));
         try {
@@ -2028,7 +2022,9 @@ public final class App {
     private void runSelfCheckAndExit() {
         // 带探针跑：真实路径那几条断言（改配置是否真生效、Esc 是否真接线、
         // 提示条是否真的不抢焦点）只有拿到 App 才能验。
-        SelfTest.Result r = SelfTest.run(new SelfTestEnv());
+        // includeUi=true：UI 段（悬浮球 / 预览条 / 设置窗口 / 真实鼠标）归本命令，
+        // --doctor 那边明确关掉（见 SelfTest.run 的注释与 DECISIONS.md D5）。
+        SelfTest.Result r = SelfTest.run(new SelfTestEnv(), true);
         String ascii = toAscii(r.report());
         System.out.println(ascii);
         try {

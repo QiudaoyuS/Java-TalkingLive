@@ -199,15 +199,28 @@ public final class WindowsTextInjector implements TextInjector {
             }
             events += n;
         }
+        int expected = TextInjector.plannedEvents(body, backspaces);
+        if (events < expected) {
+            // ★ 「出口诚实」：写少了就是失败，不许报告成功。
+            //   此前这里只 log.error 然后照样返回"已写入的正数"，于是：
+            //   ① 用户丢字却收到"成功"，诊断页里一条记录都没有；
+            //   ② 会话账本以为整段都落地了，下一次退格会按**不存在的字数**退。
+            String msg = "只写入了 " + events + "/" + expected + " 个键盘事件"
+                    + "（文本 " + body.length() + " 个 UTF-16 单元 + 退格 " + backspaces + "）："
+                    + "目标程序可能吞掉了部分字符（自绘输入框灌太快），或注入被权限策略部分拦截。"
+                    + "已注入的内容**可能不完整**，请自行核对。";
+            log.error("注入不完整：{}", msg);
+            return Result.partial(events, expected, msg);
+        }
         injections.incrementAndGet();
         injectedCodePoints.addAndGet(TextUtils.codePointCount(body));
-        log.info("注入完成：退格={} 文本={} 事件数={}（每字 2 事件，可据此判断是否发全）{}{}",
-                backspaces, Logging.describeWithFingerprint(body), events,
+        log.info("注入完成：退格={} 文本={} 事件数={}/{}（每字 2 事件，可据此判断是否发全）{}{}",
+                backspaces, Logging.describeWithFingerprint(body), events, expected,
                 retargeted ? "（已把焦点还原到目标）" : "",
                 retargetNote == null ? "" : "（焦点还原失败，注入到当前焦点）");
 
-        Result r = Result.ok(events);
-        return retargetNote == null ? r : new Result(true, events, retargetNote, Result.Failure.NONE);
+        return retargetNote == null ? Result.okExact(events, expected)
+                : Result.okWithNote(events, expected, retargetNote);
     }
 
     /**

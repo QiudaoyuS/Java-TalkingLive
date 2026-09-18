@@ -42,13 +42,29 @@ public interface TextInjector {
      * <p>{@code ok=false} 时 {@code message} **必须**是能直接给用户看的中文说明——
      * §7「任何失败都必须可见」。UIPI 静默丢弃是最需要说清楚的一种：
      * 目标程序以管理员运行时，注入会被系统丢掉而不报错。
+     *
+     * <p><b>{@code eventsExpected} 存在的理由（PENDING 1.1「出口诚实」）</b>：
+     * {@code SendInput} 会如实报告"写了多少个事件"，而此前**没有任何地方核对它是否等于
+     * 我们应该写的数量** —— 于是"只写进去一部分"被当成成功：用户丢字，程序报告成功，
+     * 诊断页里一条记录都没有；而会话账本以为整段都落地了，下一次退格会按**不存在的字数**退。
+     * 现在期望值与实收值一起放在结果里，不匹配即 {@link Failure#PARTIAL_WRITE}。
+     *
+     * @param eventsSent     实际写入的事件数
+     * @param eventsExpected 按文本与退格数**应当**写入的事件数（见 {@link #plannedEvents}）
      */
-    record Result(boolean ok, int eventsSent, String message, Failure failure) {
+    record Result(boolean ok, int eventsSent, int eventsExpected, String message, Failure failure) {
 
         public enum Failure {
             NONE,
             /** SendInput 一个事件都没写进去。 */
             SEND_FAILED,
+            /**
+             * 只写入了一部分事件：文字**可能缺字**（PENDING 1.1）。
+             *
+             * <p>与 {@link #SEND_FAILED} 的区别：后者是"一个字都没进去"，
+             * 前者是"进去了一部分" —— 后者本来就会被发现，前者此前会被当成成功。
+             */
+            PARTIAL_WRITE,
             /** 目标程序以管理员运行，UIPI 隔离（§7）。 */
             UIPI_BLOCKED,
             /** 前台窗口在注入前变了。 */
@@ -57,13 +73,47 @@ public interface TextInjector {
             UNAVAILABLE
         }
 
+        /** 成功。期望值取实收值（用于"核对不适用"的场景，例如模拟按键）。 */
         public static Result ok(int eventsSent) {
-            return new Result(true, eventsSent, null, Failure.NONE);
+            return new Result(true, eventsSent, eventsSent, null, Failure.NONE);
+        }
+
+        /** 成功，且带上期望值以便日志核对。 */
+        public static Result okExact(int eventsSent, int eventsExpected) {
+            return new Result(true, eventsSent, eventsExpected, null, Failure.NONE);
+        }
+
+        /** 成功，但要说一句（例如"焦点还原失败，文字注入到了当前焦点"）。 */
+        public static Result okWithNote(int eventsSent, int eventsExpected, String note) {
+            return new Result(true, eventsSent, eventsExpected, note, Failure.NONE);
         }
 
         public static Result fail(Failure failure, String message) {
-            return new Result(false, 0, message, failure);
+            return new Result(false, 0, 0, message, failure);
         }
+
+        /** 部分写入：**必须当成失败**，不能报告成功。 */
+        public static Result partial(int eventsSent, int eventsExpected, String message) {
+            return new Result(false, eventsSent, eventsExpected, message, Failure.PARTIAL_WRITE);
+        }
+    }
+
+    /**
+     * 应当写入的键盘事件数 —— 「出口诚实」的核对基准。
+     *
+     * <p>{@code KEYEVENTF_UNICODE} 下**一个 UTF-16 code unit 要 down + up 两个事件**，
+     * 所以文本部分就是 {@code 2 × text.length()}：按 **UTF-16 长度**算，而不是码点 ——
+     * 补充平面字符（emoji、生僻字）在 UTF-16 里是两个 code unit，正好对应四组事件。
+     * 退格同理，一个退格两个事件。
+     *
+     * <p>刻意与实现**分开算**：只有独立算出的基准才能用来核对实现有没有少写。
+     *
+     * @param text       要注入的文本（null 视为空）
+     * @param backspaces 退格数（码点为单位；负数按 0 处理）
+     */
+    static int plannedEvents(String text, int backspaces) {
+        int textEvents = (text == null ? 0 : text.length()) * 2;
+        return Math.max(0, backspaces) * 2 + textEvents;
     }
 
     /**
