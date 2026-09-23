@@ -916,14 +916,11 @@ public final class SelfTest {
                     @Override
                     public void onOpenLog() {}
 
-                    // 自检里的替身不接这两个动作：它只验"窗口属性/菜单能否弹出/贴边收起"，
-                    // 不验"重置位置与临时隐藏真的执行了"—— 那需要真 App（BallActions）。
-                    // 关掉/隐藏球会让后面的断言失去对象，所以这里刻意什么也不做。
+                    // 自检里的替身不接"重置位置"：它只验"窗口属性/菜单能否弹出/贴边收起"，
+                    // 不验"重置真的执行了"—— 那需要真 App（BallActions）。
+                    // 关掉/挪动球会让后面的断言失去对象，所以这里刻意什么也不做。
                     @Override
                     public void onResetPosition() {}
-
-                    @Override
-                    public void onHideTemporarily() {}
 
                     @Override
                     public void onQuit() {}

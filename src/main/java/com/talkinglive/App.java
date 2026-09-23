@@ -1418,21 +1418,6 @@ public final class App {
         }
 
         @Override
-        public void onHideTemporarily() {
-            onUi(() -> {
-                if (ball == null) {
-                    return;
-                }
-                ball.hideTemporarily(FloatingBall.HIDE_MILLIS);
-                // 必须说清两件事：多久回来、以及**它还在工作** ——
-                // 否则用户会以为隐藏等于退出，然后去杀进程（那正好是这个菜单要避免的）。
-                showNotice("悬浮球已临时隐藏",
-                        Math.round(FloatingBall.HIDE_MILLIS / 60000.0) + " 分钟后自动出现。"
-                                + "隐藏的只是界面：唤醒词照常有效，说唤醒词即可开始听写。");
-            });
-        }
-
-        @Override
         public void onQuit() {
             shutdown();
         }
