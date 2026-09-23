@@ -117,7 +117,10 @@ Expand-Archive "$dir\vosk-model-small-cn-0.22.zip" -DestinationPath $dir
 ```powershell
 .\mvnw.cmd package        # 编译 + 跑全部单测
 .\mvnw.cmd test           # 只跑单测
-.\mvnw.cmd -Pdist package # jpackage 产出带运行时的 app image（target/dist）
+.\mvnw.cmd -Pdist package # 编译 + 跑全部单测，再用 jpackage 产出带运行时的 app image
+#   产物：target\dist\TalkingLive\TalkingLive.exe —— 双击即用，目标机器**不需要装 JDK**
+#   注意：**只能用 `-Pdist package`**，不能直接 `-Pdist jpackage` —— 打包前有一步"把主 jar
+#   与依赖拼成 jpackage 要的目录形状"的暂存，它绑在 package 阶段，跳过它 jpackage 会报「找不到 jar」
 ```
 
 ```powershell
@@ -231,10 +234,11 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 
 ```powershell
 # ① 环境自检：模型 / 词表校验 / 麦克风 / 注入器 / 配置往返 / 端到端管线 + 全部自检项
-#    ⚠️ 它**不是**「不碰鼠标」：有桌面时会跑 UI 段（短暂造一颗悬浮球 + Robot 移动鼠标）
+#    **不碰 UI**（DECISIONS.md D5）：UI 段会如实标成「已按参数跳过」—— 跳过 ≠ 通过
 java -jar target\talkinglive.jar --doctor
 
-# ② 完整自检：与 ① 跑的是同一套检查，差别只在输出（① 多打组件状态行并写 doctor-report.txt）
+# ② 完整自检：与 ① 是同一套检查，区别是 ① 多打组件状态行并写 doctor-report.txt，
+#    而 ② **会跑 UI 段**：短暂造一颗悬浮球、并用 Robot 真的移动鼠标（别在正用鼠标时跑）
 java -jar target\talkinglive.jar --self-check
 
 # ③ 引擎基准：回填 DESIGN.md §6 的性能预算（模型加载、内存、离线 RTF）

@@ -478,7 +478,9 @@ talkinglive/
 
 ```
 mvnw package                     # 编译 + 跑测试
-mvnw -Pdist jpackage             # 产出带运行时的 exe（M5）
+mvnw -Pdist package              # 产出 app image（target/dist/TalkingLive/TalkingLive.exe，M5）
+                                 # ⚠️ 不要直接跑 `mvnw -Pdist jpackage` —— 打包前有一步"拼出 jpackage
+                                 #    要的目录形状"的暂存绑在 package 阶段，跳过它 jpackage 会报「找不到 jar」
 ```
 
 ### 10.3 模型文件

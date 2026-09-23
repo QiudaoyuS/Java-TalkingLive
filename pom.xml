@@ -128,7 +128,7 @@
         </configuration>
       </plugin>
 
-      <!-- 产出可直接 java -jar 的运行时目录（jpackage 的输入） -->
+      <!-- 产出可直接 java -jar / -cp 使用的运行时目录：target/lib（给开发期用，不是 jpackage 的输入） -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-dependency-plugin</artifactId>
@@ -146,7 +146,18 @@
         </executions>
       </plugin>
 
-      <!-- jpackage：mvnw -Pdist package 产出带运行时的 exe（M5） -->
+      <!--
+        jpackage：mvnw -Pdist package 产出带运行时的 app image（M5）。
+
+        ⚠️ <input> 的语义以前理解错了，所以 -Pdist 一直是坏的（详见 docs/IMPLEMENTATION-STATUS.md 的 M5）：
+        jpackage 把 input 目录里的内容**平铺**进 app 目录，并要求 <mainJar> **就在 input 里**。
+        而主 jar 的清单写的是 Class-Path: lib/xxx.jar（见上面 jar 插件的 classpathPrefix），
+        所以 app 目录必须长成「talkinglive.jar + lib/ 子目录」这个形状：
+          · 直接把 target/lib 当 input → jpackage 找不到 talkinglive.jar（这就是原故障）；
+          · 直接把 target/ 当 input → classes/、测试报表、maven-status 会被一起打进交付物。
+        因此由 profile `dist` 先拼出一个暂存目录 target/app-input，
+        形状与「java -jar target/talkinglive.jar」所用的布局一致（jar 在根、依赖在 lib/）。
+      -->
       <plugin>
         <groupId>org.panteleyev</groupId>
         <artifactId>jpackage-maven-plugin</artifactId>
@@ -156,7 +167,7 @@
           <appVersion>1.0.0</appVersion>
           <vendor>TalkingLive</vendor>
           <type>APP_IMAGE</type>
-          <input>${project.build.directory}/lib</input>
+          <input>${project.build.directory}/app-input</input>
           <mainJar>${project.build.finalName}.jar</mainJar>
           <mainClass>${main.class}</mainClass>
           <destination>${project.build.directory}/dist</destination>
@@ -173,6 +184,50 @@
       <id>dist</id>
       <build>
         <plugins>
+          <!--
+            拼出 jpackage 的 input 目录 target/app-input（XML 注释里不能写那两个连字符，所以这里只说 input）：
+              app-input/talkinglive.jar   ← 主 jar（它清单里的 Class-Path 是 lib/xxx.jar）
+              app-input/lib/*.jar         ← 运行时依赖
+            必须声明在下面的 jpackage 之前 —— 同一个 phase（package）内按声明顺序执行。
+            只在 dist profile 里做：普通的 mvnw package 不必多拷一份依赖。
+          -->
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-resources-plugin</artifactId>
+            <version>3.4.0</version>
+            <executions>
+              <execution>
+                <id>stage-main-jar</id>
+                <phase>package</phase>
+                <goals><goal>copy-resources</goal></goals>
+                <configuration>
+                  <outputDirectory>${project.build.directory}/app-input</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${project.build.directory}</directory>
+                      <includes>
+                        <include>${project.build.finalName}.jar</include>
+                      </includes>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>stage-lib</id>
+                <phase>package</phase>
+                <goals><goal>copy-resources</goal></goals>
+                <configuration>
+                  <outputDirectory>${project.build.directory}/app-input/lib</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${project.build.directory}/lib</directory>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
           <plugin>
             <groupId>org.panteleyev</groupId>
             <artifactId>jpackage-maven-plugin</artifactId>

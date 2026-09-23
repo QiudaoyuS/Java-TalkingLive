@@ -34,7 +34,7 @@
 | **M2** | 小 Vosk 接入：唤醒词 + 结束词检测 | ✅ **代码完成，命中率待测** | `VoskKeywordDetector`、`VoskModel`；模型加载/词表校验/语法构建已实测 |
 | **M3** | 精化 + 浮窗预览（go/no-go） | ⚠️ **部分完成** | 浮窗预览完成；精化位由 Vosk 离线重跑顶替（SenseVoice 待落地，见 `ENGINE-EXPERIMENT.md`） |
 | **M4** | 状态机 + 注入 + 切窗口 + 自动发送 | ✅ **已完成** | `StateMachine`、`WindowsTextInjector`、`ForegroundWatcher` + 单测与端到端自检 |
-| **M5** | 标点 + jpackage 打包 | ⚠️ **部分完成** | 标点后处理完成；jpackage 配置已就绪（`-Pdist`），未产出安装包验证 |
+| **M5** | 标点 + jpackage 打包 | ✅ **已完成** | 标点后处理完成。`-Pdist package` **原先是坏的**（jpackage 的 input 指向 `target/lib`，而主 jar 在 `target/` → 报「找不到 talkinglive.jar」），已修并实测产出：`target/dist/TalkingLive/TalkingLive.exe` —— exe 版本资源 = 1.0.0、`app/talkinglive.jar` + `app/lib/`（7 个依赖）、`.cfg` 的 classpath 与 `app-version=1.0.0` 齐全、`TalkingLive.exe --help` 退出码 0；布局约束由 `PackagingLayoutTest` 守住 |
 
 ---
 
@@ -82,6 +82,7 @@
 | 29 | **注入前剔除控制字符**（换行/制表会被当按键送出，在聊天工具里等于提前发送） | `TextUtilsTest.ControlChars` 4 项 + `Accounting.planAfterFilteringControls` |
 | 30 | **自动发送前由注入器复核前台**（`press(combo, expectedWindow)`；安全前提不再只留在调用方） | 见 `DECISIONS.md` A-4；端到端仍属 §9.3 手工清单 |
 | 31 | **诊断窗口「重新自检」在后台线程跑**，且按 `includeUi=false` 生成报告（不再冻窗、不再造第二颗球/抢鼠标） | `SelfTestUiGateTest` 守住 includeUi=false 那一半（EDT 那一半没有自动守卫，见其类注释） |
+| 32 | **jpackage 打包链路修好**：`-Pdist package` 产出 `target/dist/TalkingLive/TalkingLive.exe`（自带运行时、目标机器不需要 JDK） | `PackagingLayoutTest` 4 项守住布局（input 是暂存目录、主 jar 的暂存名与 `mainJar` 一致、依赖落在 `lib/`、暂存声明在 jpackage 之前）；端到端实测见 M5 那一行 |
 
 ### 3.2 已完成但**未在真实设备上验证**
 
@@ -121,10 +122,11 @@
 
 ```powershell
 # ① 环境自检（含模型/词表/注入器/配置/WAV/端到端管线 + 全部自检项）
-#    ⚠️ 不是「不碰鼠标」：有桌面时会跑 UI 段（短暂造悬浮球 + Robot 移动鼠标），见 PENDING 5.16
+#    **不碰 UI**（DECISIONS.md D5）：UI 段会如实标成「已按参数跳过」—— 跳过 ≠ 通过
 java -cp "target\classes;target\lib\*" com.talkinglive.App --doctor
 
-# ② 完整自检（与 ① 同一套检查；① 只是多打组件状态行并写 doctor-report.txt）
+# ② 完整自检（与 ① 同一套检查；① 多打组件状态行并写 doctor-report.txt）
+#    与 ① 的关键区别：② **会跑 UI 段** —— 短暂造悬浮球 + Robot 移动鼠标（别在正用鼠标时跑）
 java -cp "target\classes;target\lib\*" com.talkinglive.App --self-check
 
 # ③ 单元测试（不需要麦克风与桌面；**数量见输出结尾，本文不写死** —— 手写常量必然过期）
@@ -201,3 +203,4 @@ java -jar target\talkinglive.jar
 | 0.5 | 本次（D1–D6 落地 + D3 修订） | ① **§3.1 新增 5 条能力**（21–25：出口诚实 / `--doctor` 不碰 UI / 重置球的位置 / 开机自启 / 大模型开关），每条都写出对应的测试类；② **§3.2 第 7 项**的大模型常驻内存按**实测口径**改写（工作集约 3.6GB / 私有提交约 4.6GB，此前记的"2.4GB"对不上任何口径）；③ 决策结论一律指向 `docs/DECISIONS.md`，本文不再复述理由 |
 | 0.6 | 本次（A 批次） | **§3.1 新增 6 条能力**（26–31）：实时预览真的实时（partial 键名修正）· 贴边收起后单击有效 · 修饰键闸门 · 注入前剔除控制字符 · 自动发送前复核前台 · 诊断窗口自检移出 EDT。P0（实时预览从未生效）与 1.3/1.4/1.6/1.7/2.1/5.2 六条已从 `PENDING-ISSUES.md` 删除，四个行为决定的代价与复核条件记进 `DECISIONS.md`「A 批次」 |
 | 0.7 | 本次（内存事故复盘 + 自启回退） | ① **§3.1 第 24 条改为"已移除"**（开机自启，D4 修订）+ 新增 24b「内存占用可见」；② 起因是用户实测"打游戏十分钟内多次因虚拟内存不足被强退"——四种配置的提交量实测并列在 `PENDING-ISSUES` 4.9（大模型 4.3GB / 小模型 1.0–1.4GB）；③ 顺带修掉一个真 bug：**未安装大模型时会把小模型加载两遍**（并把预览那行日志说得相反） |
+| 0.8 | 本次（打包链路修复） | ① **M5 由"⚠️ 部分完成"改为"✅ 已完成"**：`-Pdist package` 一直是坏的（jpackage 的 input 指向 `target/lib`，而主 jar 在 `target/`，于是 jpackage 报「找不到 talkinglive.jar」——本轮修版本号时第一次真跑它才发现）；修法是先在 `dist` profile 里拼一个暂存目录 `target/app-input`（形状：jar 在根 + 依赖在 `lib/`，与清单的 `Class-Path` 一致）；② §3.1 新增第 32 条并配 `PackagingLayoutTest`（**验证过它真会红**：把 input 改回 `target/lib` 即失败）；③ 顺带修掉 `README.md` 自检一节里一句**与实现相反**的过时说明 —— 它写 `--doctor`「不是不碰鼠标」，而 D5 之后 `--doctor` 走的是 `includeUi=false`，会造悬浮球与移动鼠标的是 `--self-check` |
