@@ -161,5 +161,11 @@ rem dialog instead (see the catch in App.main) -- after hiding the console that
 rem dialog is the only failure path, which is why it must not be removed.
 rem
 rem To keep a console for troubleshooting use tools\run-console.cmd.
-start "" "%JAVAW_EXE%" -Dfile.encoding=UTF-8 -jar "target\talkinglive.jar" %*
+rem Heap bounds: this app's Java heap usage is tiny (measured ~3 MB -- the Vosk models
+rem live in NATIVE memory, not the Java heap). Without bounds, JVM ergonomics on a
+rem 16 GB machine reserves a quarter of RAM as max heap, which inflates the process's
+rem COMMIT charge (task manager: "Commit size" / "virtual memory"). Measured:
+rem 4,686 MB -> 4,457 MB. Small, but free -- and it caps worst-case heap growth.
+rem The real memory cost is the model itself (see docs/DECISIONS.md D1).
+start "" "%JAVAW_EXE%" -Xmx512m -Xms32m -Dfile.encoding=UTF-8 -jar "target\talkinglive.jar" %*
 endlocal

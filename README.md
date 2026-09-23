@@ -60,13 +60,24 @@ Expand-Archive "$dir\vosk-model-small-cn-0.22.zip" -DestinationPath $dir
 
 装好大模型 `vosk-model-cn-0.22` 会自动生效（识别明显更准，代价见下）：获取路径与实测数据见 `docs/ENGINE-EXPERIMENT.md`。
 
-> **代价（实测，含口径 —— 同一件事按不同口径能差一个数量级）**：装大模型时正常启动
-> **工作集约 3.6GB**（任务管理器「内存」列）、**私有提交约 4.6GB**（决定还能不能再开别的程序）、
-> 「球出现」要等约 **18 秒**（模型加载 16–18 秒）。它是**原生内存**，不在 Java 堆里
-> （堆内仅 3MB），所以 `-Xmx` 管不到它。
-> 闲置约 1 小时后工作集会被系统裁剪到约 0.76GB。不想要这份开销：
-> 在 `config.json` 里设 `useLargeModel: false` 并重启（代价是准确率下降、
+> **代价（实测，含口径 —— 同一件事按不同口径能差一个数量级）**：
+>
+> | 配置 | 工作集（任务管理器「内存」） | **提交大小（同窗口「虚拟内存」）** |
+> |---|---|---|
+> | **大模型（默认，`run.cmd` 已带 `-Xmx512m`）** | 约 3.6GB | **约 4.3GB** |
+> | 大模型 + 默认 JVM 参数 | 约 3.6GB | 约 4.6GB |
+> | 小模型（`useLargeModel: false`） | 约 0.35GB | **约 1.0–1.4GB** |
+>
+> 「球出现」要等约 **18 秒**（模型加载 16–18 秒）。模型是**原生内存**，不在 Java 堆里
+> （堆内仅 3MB），所以 `-Xmx` 只能影响其中一小部分（实测省约 0.35GB）。
+>
+> ⚠️ **提交大小是常驻的、系统回收不了**：闲置约 1 小时后工作集会被裁剪到约 0.76GB，
+> 但**提交照旧是 4.3GB**。它的后果很实际 —— 打游戏或跑大型程序时，游戏自己往往要 8–14GB 提交，
+> 叠加这 4.3GB 就可能触到系统提交上限，表现为"**虚拟内存不足，程序被强制退出**"（实测发生过）。
+> 所以：**打游戏 / 跑大型程序之前先退出本程序**；想让它长期更省就用小模型
+> （在 `config.json` 里设 `useLargeModel: false` 并重启，代价是准确率下降、
 > 且小模型**词表里没有任何英文**，AI / PDF 这类词会被漏掉）。
+> 当前占用可以在诊断窗口的「状态」页第一屏看到（「内存占用」那一行）。
 > 取舍的理由与复核条件见 `docs/DECISIONS.md` D0/D1。
 
 ### 2. 一键启动
@@ -105,8 +116,6 @@ java -jar target\talkinglive.jar                    # 常驻后台，桌面上�
 java -jar target\talkinglive.jar --settings         # 启动并打开设置窗口
 java -jar target\talkinglive.jar --refiner none     # 关闭精化（用预览文本直接注入）
 java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无设备时试界面用）
-java -jar target\talkinglive.jar --install-startup  # 设置开机自启（默认不开；写当前用户的「启动」文件夹）
-java -jar target\talkinglive.jar --uninstall-startup # 取消开机自启
 ```
 
 > ⚠️ **`JAVA_HOME` 必须指向 JDK 21**（本机为 `D:\Code\Java\jdk-21.0.12.1`）。

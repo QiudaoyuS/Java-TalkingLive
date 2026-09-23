@@ -194,55 +194,12 @@ public final class App {
     /** 同一个标题的提示在这个间隔内只弹一次。 */
     private static final long NOTICE_THROTTLE_MILLIS = 60_000;
 
-    /**
-     * 安装 / 卸载开机自启（D4）。
-     *
-     * <p><b>输出刻意用 ASCII</b>：Windows 控制台默认 GBK，中文会乱码 —— 而乱码不只是难看，
-     * 它会**掩盖真正的失败信息**（{@code DESIGN.md} §9.2 踩过的坑）。所以面向控制台的
-     * 摘要一律 ASCII，中文说明留在 README 与注释里。
-     *
-     * <p>机制是**启动文件夹**而不是注册表 Run 键 —— 后者被安全策略保护、未签名进程写不进去
-     * （实测证据见 {@link com.talkinglive.system.StartupEntry} 的类注释）。
-     */
-    private static void runStartupCommand(Options opts) {
-        if (!com.talkinglive.system.StartupEntry.supported()) {
-            System.out.println("[startup] not supported on this platform (Windows only)");
-            return;
-        }
-        try {
-            if (opts.uninstallStartup) {
-                com.talkinglive.system.StartupEntry.uninstall(
-                        com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME);
-                System.out.println("[startup] autostart removed: deleted "
-                        + com.talkinglive.system.StartupEntry.startupFile(
-                                com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME));
-                return;
-            }
-            Path launcher = com.talkinglive.system.StartupEntry.resolveLauncher();
-            if (launcher == null) {
-                // 找不到启动器就**什么都不写**：写一个指向不存在文件的启动项
-                // 等于"开机后什么都没发生"，比不设置更糟。
-                System.out.println("[startup] launcher not found: "
-                        + com.talkinglive.system.StartupEntry.LAUNCHER
-                        + " (expected next to target/). Nothing was changed.");
-                System.out.println("[startup] run this from the project root, e.g.:"
-                        + " java -jar target\\talkinglive.jar --install-startup");
-                return;
-            }
-            com.talkinglive.system.StartupEntry.install(
-                    com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME, launcher);
-            System.out.println("[startup] autostart enabled: wrote "
-                    + com.talkinglive.system.StartupEntry.startupFile(
-                            com.talkinglive.system.StartupEntry.STARTUP_FILE_NAME));
-            System.out.println("[startup] it launches silently at logon via: " + launcher);
-            System.out.println("[startup] note: the model still needs 16-18s to load"
-                    + " (a loading window is shown)");
-            System.out.println("[startup] to undo: java -jar target\\talkinglive.jar --uninstall-startup");
-        } catch (IOException | RuntimeException e) {
-            System.out.println("[startup] failed: " + e);
-        }
-    }
 
+    // 这里**曾经**有 --install-startup / --uninstall-startup（D4，写启动文件夹），
+    // 已按用户要求**整体移除** —— 理由见 docs/DECISIONS.md 的 D4 修订：
+    // 大模型常驻会让进程的**提交量达到约 4.7GB，且系统回收不了**（闲置时只裁剪工作集），
+    // 而"开机静默启动"等于让它在你打游戏时也躺在内存里；用户实测因此出现过
+    // "虚拟内存不足被强制退出"。一个会自我启动的重内存后台程序，风险大于它带来的便利。
     // ------------------------------------------------------------ main
 
     public static void main(String[] args) throws Exception {
@@ -255,12 +212,6 @@ public final class App {
         Options opts = Options.parse(args);
         if (opts.help) {
             Options.printHelp();
-            return;
-        }
-        if (opts.installStartup || opts.uninstallStartup) {
-            // 这类命令**不进 start()**：不需要配置、不需要模型、不需要单实例锁，
-            // 也不该有任何界面。（自启默认不开 —— 写注册表必须由用户显式要求，见 D4。）
-            runStartupCommand(opts);
             return;
         }
         App app = new App();
@@ -297,9 +248,6 @@ public final class App {
         /** 允许同时运行多份（默认禁止，见 start() 里的单实例保护）。 */
         boolean allowMultiple;
         String refiner;
-        /** 安装 / 卸载开机自启（D4；见 {@link com.talkinglive.system.StartupEntry}）。 */
-        boolean installStartup;
-        boolean uninstallStartup;
 
         static Options parse(String[] args) {
             Options o = new Options();
@@ -313,8 +261,6 @@ public final class App {
                     case "--self-check" -> o.selfCheck = true;
                     case "--mic-test" -> o.micTest = true;
                     case "--allow-multiple" -> o.allowMultiple = true;
-                    case "--install-startup" -> o.installStartup = true;
-                    case "--uninstall-startup" -> o.uninstallStartup = true;
                     case "--refiner" -> {
                         if (i + 1 < args.length) {
                             o.refiner = args[++i];
@@ -341,8 +287,6 @@ public final class App {
                       --no-microphone   不打开麦克风（无麦克风环境下试界面用）
                       --refiner <名>    指定精化引擎：auto | vosk-offline | none
                       --allow-multiple  允许同时运行多份（默认禁止，避免多颗悬浮球）
-                      --install-startup 设置开机自启（默认不开；写入当前用户的「启动」文件夹）
-                      --uninstall-startup 取消开机自启（删掉那个启动器文件）
                       --console         除日志文件外也输出到控制台（默认为真）
                       --help            显示本帮助
                     """);
@@ -683,21 +627,25 @@ public final class App {
         }
         Path dir = AppPaths.asrModelDir();
         boolean hasLarge = !dir.equals(AppPaths.voskModelDir());
+        if (!hasLarge) {
+            log.warn("识别模型：**小模型**（CER 17.15%，且词表内没有任何英文，"
+                    + "因此英文词会被漏掉）。更准的做法是把 vosk-model-cn-0.22 解压到 {}"
+                    + "（CER 7.43%，词表含 AI/APP/CPU 等）", AppPaths.modelsDir());
+            // 写进 notices 而不是只记日志：这是**用户能自己解决**的一件事，
+            // 而且他抱怨的「识别不准/漏英文」根因就在这里，必须让他看见。
+            notices.add("未安装大模型，正在用小模型识别：准确率较低，且会漏掉英文词（如 AI）。\n"
+                    + "想要更准：把 vosk-model-cn-0.22 解压到 " + AppPaths.modelsDir() + " 即自动启用。");
+            // ★ 复用唤醒检测已经加载的那一份，**不要**再 load 同一个目录：
+            //   否则同一个小模型会被装进内存两遍（实测：小模型路径下工作集 345MB）。
+            //   顺带修掉一个说谎的日志 —— 「实时预览就绪」那行是按**对象身份**判断
+            //   "是不是大模型"的，装了两份时它会把小模型报成"（识别模型 大模型）"。
+            return voskModel;
+        }
         long t0 = System.nanoTime();
         try {
             VoskModel m = VoskModel.load(dir);
             long ms = (System.nanoTime() - t0) / 1_000_000;
-            if (hasLarge) {
-                log.info("识别模型：大模型 {}（预览与落字共用，加载 {}ms）", dir, ms);
-            } else {
-                log.warn("识别模型：**小模型**（CER 17.15%，且词表内没有任何英文，"
-                        + "因此英文词会被漏掉）。更准的做法是把 vosk-model-cn-0.22 解压到 {}"
-                        + "（CER 7.43%，词表含 AI/APP/CPU 等）", AppPaths.modelsDir());
-                // 写进 notices 而不是只记日志：这是**用户能自己解决**的一件事，
-                // 而且他抱怨的「识别不准/漏英文」根因就在这里，必须让他看见。
-                notices.add("未安装大模型，正在用小模型识别：准确率较低，且会漏掉英文词（如 AI）。\n"
-                        + "想要更准：把 vosk-model-cn-0.22 解压到 " + AppPaths.modelsDir() + " 即自动启用。");
-            }
+            log.info("识别模型：大模型 {}（预览与落字共用，加载 {}ms）", dir, ms);
             return m;
         } catch (IOException | RuntimeException e) {
             log.error("识别模型加载失败，回退到唤醒用小模型：{}", e.getMessage());
@@ -1898,10 +1846,47 @@ public final class App {
                 injector.available() ? "就绪" : "不可用", injector.available(),
                 injector.available() ? injector.describe() : injector.unavailableReason()));
 
+        // 内存占用 —— **必须让用户看得见**，不能让它"偷偷"占着。
+        // 大模型常驻会让本进程的**提交量**（任务管理器里的「提交大小」/「虚拟内存」）达到约 4.7GB，
+        // 而提交是**回收不了**的：闲置时系统只裁剪工作集（实测 3.64GB → 0.76GB），提交照旧。
+        // 用户实测出现过打游戏时"虚拟内存不足被强制退出"，根因就是它与游戏抢提交额度。
+        long committed = committedBytes();
+        if (committed > 0) {
+            boolean lean = committed < 3L * 1024 * 1024 * 1024;
+            out.add(new StatusLine("内存占用", String.format("%.1f GB（提交）", committed / 1073741824.0),
+                    lean,
+                    "提交量是**常驻**的：闲置时系统只裁剪工作集，提交不会降。"
+                            + "装大模型时约 4.7GB，用小模型约 1.4GB —— "
+                            + "**打游戏 / 跑大型程序之前建议先退出本程序**（游戏自己往往要 8–14GB 提交）。"
+                            + (lean ? "" : "想让它长期更省：把 config.json 的 useLargeModel 设为 false 并重启"
+                                    + "（代价是准确率下降、且小模型会漏英文词）。")));
+        }
+
         if (lastInjectionError != null) {
             out.add(new StatusLine("最近一次注入失败", "见日志", false, lastInjectionError));
         }
         return out;
+    }
+
+    /**
+     * 本进程的**提交量**（字节）；取不到返回 -1。
+     *
+     * <p>为什么显示的是"提交"而不是"工作集"：提交决定"还能不能再开别的程序"
+     * （系统提交额度用尽时，其他程序会因"内存不足/虚拟内存不足"失败），
+     * 而工作集只是此刻压在物理内存里的部分 —— 系统一裁剪它就降下去了，
+     * 容易让人误以为"它其实不占内存"。
+     */
+    private static long committedBytes() {
+        try {
+            java.lang.management.OperatingSystemMXBean bean =
+                    java.lang.management.ManagementFactory.getOperatingSystemMXBean();
+            if (bean instanceof com.sun.management.OperatingSystemMXBean sun) {
+                return sun.getCommittedVirtualMemorySize();
+            }
+        } catch (RuntimeException e) {
+            // 取不到就不显示这一行 —— 一个可选指标不该让诊断页报错
+        }
+        return -1;
     }
 
     private void addWordLine(List<StatusLine> out, String field, String word) {
