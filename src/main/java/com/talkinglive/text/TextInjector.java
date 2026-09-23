@@ -65,6 +65,16 @@ public interface TextInjector {
              * 前者是"进去了一部分" —— 后者本来就会被发现，前者此前会被当成成功。
              */
             PARTIAL_WRITE,
+            /**
+             * 注入前检测到修饰键（Ctrl/Alt/Shift/Win）正被按住，为避免把文字打成快捷键而中止
+             * （{@code PENDING-ISSUES} P1.4）。
+             *
+             * <p>为什么不硬发：按住 Ctrl 时 {@code KEYEVENTF_UNICODE} 事件会被目标按
+             * "修饰键 + 虚拟键"解释 —— 文字变成快捷键，而 {@code SendInput} 会如实报告成功，
+             * 重试救不了；某些组合（Ctrl+W / Ctrl+S）还有破坏性。
+             * 中止的代价是这一段没打进去，但那是**可见**的（提示里会带上识别到的内容）。
+             */
+            MODIFIER_HELD,
             /** 目标程序以管理员运行，UIPI 隔离（§7）。 */
             UIPI_BLOCKED,
             /** 前台窗口在注入前变了。 */
@@ -126,6 +136,21 @@ public interface TextInjector {
 
     /** 模拟一次按键（自动发送）。 */
     Result press(KeyCombo combo);
+
+    /**
+     * 模拟一次按键，并**要求目标窗口仍是前台**（{@code PENDING-ISSUES} P1.3）。
+     *
+     * <p>为什么要把这个前提搬进注入器：安全前提放在调用方时，任何**新的**调用点都会绕过它 ——
+     * 而一个回车落在聊天工具里是**不可挽回**的（消息会被直接发出去）。
+     * 默认实现退化为 {@link #press(KeyCombo)}（非 Windows 实现无需关心），
+     * 真正的 Win32 实现会先复核前台窗口。
+     *
+     * @param combo          要按的键
+     * @param expectedWindow 期望仍是前台的窗口句柄；0 表示不校验
+     */
+    default Result press(KeyCombo combo, long expectedWindow) {
+        return press(combo);
+    }
 
     /** 注入器是否可用；不可用时 {@link #unavailableReason()} 给出原因。 */
     boolean available();

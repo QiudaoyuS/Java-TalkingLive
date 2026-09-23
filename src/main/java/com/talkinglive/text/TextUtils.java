@@ -131,6 +131,42 @@ public final class TextUtils {
     }
 
     /**
+     * 去掉**控制字符**（{@code \n} / {@code \t} / {@code \r} 及其它 C0/C1）。
+     *
+     * <p>为什么必须在**注入前**做（{@code PENDING-ISSUES} P1.7）：
+     * {@code KEYEVENTF_UNICODE} 会把识别结果里的换行/制表**当按键**送进目标程序 ——
+     * 在聊天工具里，一个换行就等于"把还没写完的消息发出去"。
+     *
+     * <p>为什么不在更早的文本层做：{@code PunctuationProcessor} 刻意**保留**换行与制表
+     * （它认为那可能是用户有意的分段），而预览也确实应该按原样显示。所以这道防线只能放在
+     * 出口处 —— 注入器面对的是**任意**目标程序，不能假设它把换行当排版而不是当"发送"。
+     *
+     * @param s 任意文本；null 视为空
+     * @return 去掉控制字符后的文本（没有控制字符时原样返回同一个对象，避免无谓分配）
+     */
+    public static String withoutControlChars(String s) {
+        if (s == null || s.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = null;
+        int i = 0;
+        while (i < s.length()) {
+            int cp = s.codePointAt(i);
+            int chars = Character.charCount(cp);
+            boolean control = cp < 0x20 || (cp >= 0x7F && cp <= 0x9F);
+            if (control) {
+                if (out == null) {
+                    out = new StringBuilder(s.length()).append(s, 0, i);
+                }
+            } else if (out != null) {
+                out.appendCodePoint(cp);
+            }
+            i += chars;
+        }
+        return out == null ? s : out.toString();
+    }
+
+    /**
      * 从文本中移除指定的**词**（用于把唤醒词/结束词从正文里剔掉）。
      *
      * <p>{@code TECH-PLAN} §6.3 明确列为需验证项：「段落音频以唤醒词开头，

@@ -264,9 +264,24 @@ public final class VoskModel implements AutoCloseable {
             return closed ? "" : textOf(VoskNative.get().vosk_recognizer_result(handle));
         }
 
-        /** 中间结果文本（随时可能被改写）。 */
+        /**
+         * 中间结果文本（随时可能被改写）。
+         *
+         * <p><b>它读的是 {@code "partial"} 键，不是 {@code "text"}。</b>原生层实测
+         * （直接调 C API 打原始 JSON）：
+         * <pre>
+         *   vosk_recognizer_partial_result  →  {"partial" : "…"}
+         *   vosk_recognizer_result          →  {"text" : "…"}
+         *   vosk_recognizer_final_result    →  {"text" : "…"}
+         * </pre>
+         * 这里**曾经**错误地复用了 {@link #textOf}（只读 {@code "text"}），于是恒返回空串 ——
+         * 后果是整段说话期间预览浮窗一个字都不出，只在端点命中或段末收尾时**一次性出现全文**
+         * （用户看到的正是"最后几秒才整体出现"）。连带失效的还有两级文字样式、
+         * "引擎回头改字"的可观测性，以及 `DESIGN.md` §2.2 第 4 步那个主交互。
+         * 详见 {@code docs/DECISIONS.md} 与 {@code PENDING-ISSUES.md} 的 P0。
+         */
         public String partialResult() {
-            return closed ? "" : textOf(VoskNative.get().vosk_recognizer_partial_result(handle));
+            return closed ? "" : partialOf(VoskNative.get().vosk_recognizer_partial_result(handle));
         }
 
         /** 吐出剩余音频并定稿。**注意**：它会同时清空识别状态。 */
@@ -336,13 +351,29 @@ public final class VoskModel implements AutoCloseable {
 
         /** Vosk 结果 JSON → 去空格的可读文本；解析失败返回空串。 */
         public static String textOf(String json) {
+            return fieldOf(json, "text");
+        }
+
+        /**
+         * 同上，但读 {@code "partial"} 键（**中间结果专用**）。
+         *
+         * <p>两个键**必须分开解析**：把它们合成一个"两个键都试"的解析器，只会把
+         * "调用点用错"重新变成静默行为 —— 那正是这个 bug 藏了几个月的原因
+         * （{@code textOf} 与它那条测试本身都没错，错的是 partial 复用了它）。
+         */
+        public static String partialOf(String json) {
+            return fieldOf(json, "partial");
+        }
+
+        /** Vosk 结果 JSON → 指定字段 → 去掉词间空格；解析失败返回空串（音频线程不能死）。 */
+        private static String fieldOf(String json, String key) {
             if (json == null || json.isBlank()) {
                 return "";
             }
             String raw;
             try {
                 raw = com.talkinglive.core.JsonCodec.str(
-                        com.talkinglive.core.JsonCodec.parseObject(json), "text", "");
+                        com.talkinglive.core.JsonCodec.parseObject(json), key, "");
             } catch (RuntimeException e) {
                 // 引擎给出了非预期内容：不改写、不崩溃，只当没有结果。
                 // 音频线程不能因为一行 JSON 死掉。

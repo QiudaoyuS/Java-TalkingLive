@@ -152,6 +152,13 @@ public class FloatingBall extends JWindow {
     /** 松开鼠标后，距边缘这个距离以内就吸附（附录 A：判定距离 40px）。 */
     private static final int DOCK_THRESHOLD = 40;
 
+    /**
+     * 判定为「点击」的最大位移（**屏幕像素**）。
+     *
+     * <p>手会抖，所以不能要求位移严格为 0；但也不能太大，否则"想拖动却只挪了一点"会被当成点击。
+     */
+    private static final int CLICK_SLOP_PX = 5;
+
     /** 移开鼠标后约 450ms 才收回（§2.3），150ms 轮询 × 3 次。 */
     private static final int OUTSIDE_TICKS_TO_HIDE = 3;
 
@@ -378,7 +385,7 @@ public class FloatingBall extends JWindow {
                     return;
                 }
                 revealNow();          // 收起状态下按下去，先滑出来再说
-                pressPoint = e.getPoint();
+                pressPoint = screenPointOf(e);
                 dragged = false;
             }
 
@@ -387,7 +394,7 @@ public class FloatingBall extends JWindow {
                 if (pressPoint == null) {
                     return;
                 }
-                boolean wasClick = !dragged && e.getPoint().distance(pressPoint) < 5;
+                boolean wasClick = isClick(pressPoint, screenPointOf(e), dragged);
                 pressPoint = null;
                 dragged = false;
 
@@ -720,6 +727,39 @@ public class FloatingBall extends JWindow {
             geometryListener.onGeometryChanged(getX(), getY(), docked);
         }
         repaint();
+    }
+
+    /**
+     * 判定「按下 → 松开」是否算一次点击 —— **必须用屏幕坐标**。
+     *
+     * <p>为什么不能用组件坐标（这是 0.9.12 修掉的一个真缺陷）：贴边收起状态下按下鼠标时，
+     * {@code mousePressed} 会先 {@code revealNow()} 把球滑出来，而那一步**在静止的光标下
+     * 平移了窗口**（约 48px）。于是松手时同一个屏幕位置对应的**组件坐标**已经变了 ≥48px
+     * （哪怕只过一帧也有 11px），{@code e.getPoint().distance(pressPoint) < 5} 对任何真实
+     * 点击**恒为 false** → 不走 {@code onLeftClick()} 而走 {@code maybeDock()} → 判定仍该贴边
+     * → 收回 → 150ms 轮询发现鼠标还在 → 再滑出。
+     * <b>净效果是"弹出 → 缩回 → 再弹出"，什么都没发生</b>，而"球被收起"正是最需要
+     * "点一下就说话"的状态（球是唯一入口）。
+     *
+     * <p>用屏幕坐标则两种情况都对：真点击时按下与松开在同一屏幕位置（窗口怎么动都不影响）；
+     * 真拖动时窗口跟着鼠标走，屏幕距离自然变大。
+     *
+     * @param pressScreen   按下时的屏幕坐标
+     * @param releaseScreen 松开时的屏幕坐标
+     * @param dragged       期间是否收到了 {@code mouseDragged}
+     */
+    static boolean isClick(Point pressScreen, Point releaseScreen, boolean dragged) {
+        return !dragged && pressScreen != null && releaseScreen != null
+                && pressScreen.distance(releaseScreen) < CLICK_SLOP_PX;
+    }
+
+    /** 事件的屏幕坐标；组件尚未显示等极端情况下退回组件坐标，绝不抛异常。 */
+    private static Point screenPointOf(MouseEvent e) {
+        try {
+            return e.getLocationOnScreen();
+        } catch (java.awt.IllegalComponentStateException ex) {
+            return e.getPoint();
+        }
     }
 
     /** 供自检读取「收到过几次 mouseEntered」。 */

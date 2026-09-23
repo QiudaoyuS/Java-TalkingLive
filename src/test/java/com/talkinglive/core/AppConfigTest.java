@@ -704,4 +704,48 @@ class AppConfigTest {
             c.validate();   // 不抛
         }
     }
+
+    /**
+     * 注入间隔的下限（{@code PENDING-ISSUES} P1.6）。
+     *
+     * <p>0 曾经是合法值，而它是**已知的丢字值**（灌太快时微信这类自绘输入框会主动丢掉
+     * 后面的字符，而 {@code SendInput} 会如实报告"全部写入成功"）。所以下限提到 5ms；
+     * 但老配置里可能残留 0，读入时应当**抬到下限**，而不是让程序起不来。
+     */
+    @Nested
+    @DisplayName("注入间隔下限 charGapMillis ≥ 5ms")
+    class CharGapFloor {
+
+        @Test
+        @DisplayName("下限不再是 0（0 是已知的丢字值）")
+        void floorIsNotZero() {
+            assertTrue(AppConfig.MIN_CHAR_GAP_MILLIS >= 5,
+                    "0 会让自绘输入框丢字，不该留在可行域里；实际下限 = "
+                            + AppConfig.MIN_CHAR_GAP_MILLIS);
+        }
+
+        @Test
+        @DisplayName("老配置里的 0 被抬到下限，而不是让程序起不来")
+        void legacyZeroIsClampedOnRead() {
+            AppConfig c = AppConfig.fromJsonText("{\"wakeWord\":\"子曰\",\"charGapMillis\":0}");
+            assertEquals(AppConfig.MIN_CHAR_GAP_MILLIS, c.charGapMillis(),
+                    "读入时必须抬到下限：直接拒绝会让老配置的机器再也起不来（P5.9 那个坑）");
+            c.validate();   // 抬过之后是合法配置
+        }
+
+        @Test
+        @DisplayName("程序内设成 0 仍算非法（迁移只针对读入的历史值）")
+        void programmaticZeroIsStillRejected() {
+            AppConfig c = new AppConfig();
+            c.setCharGapMillis(0);
+            assertThrows(ConfigException.class, c::validate);
+        }
+
+        @Test
+        @DisplayName("正常值原样保留")
+        void normalValueSurvives() {
+            AppConfig c = AppConfig.fromJsonText("{\"wakeWord\":\"子曰\",\"charGapMillis\":40}");
+            assertEquals(40, c.charGapMillis());
+        }
+    }
 }

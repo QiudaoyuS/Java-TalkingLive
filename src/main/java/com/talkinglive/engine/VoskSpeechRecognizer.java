@@ -85,8 +85,13 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
         String tail = recognizer.finalResult();
         if (out.isEmpty() && tail != null && !tail.isBlank()) {
             // 兜底：流式期间一个字都没定稿，但收尾时 Vosk 吐出了内容。
-            // 实测存在这种情况（用户说了一整句，accept 全程返回 false、partial 也空），
-            // 若不接住这一段就白录了。
+            //
+            // ★ 这条兜底长期掩盖了一个真 bug：partial 结果被用 "text" 键解析（它实际是
+            //   "partial" 键），于是**整段说话期间预览一个字都不出**，只有在端点或这里
+            //   才一次性出现全文。当时的注释把它写成"引擎的脾气"，还据此加了兜底 ——
+            //   症状被盖住，根因没被找到（见 VoskModel.partialResult 的注释与 PENDING 的 P0）。
+            //   键名现在已改对；这条兜底**保留**：它守的是另一件事（段末定稿），
+            //   去掉它会丢掉"端点没命中但收尾有字"的段落。
             out = TextUtils.collapseWhitespace(tail);
             nonEmptyOutputs++;
         }

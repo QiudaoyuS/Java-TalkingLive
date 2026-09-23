@@ -182,6 +182,19 @@ public final class WindowsTextInjector implements TextInjector {
             }
         }
 
+        // ★ 修饰键闸门（PENDING 1.4）：按住 Ctrl/Alt/Shift/Win 时，Unicode 事件会被目标按
+        //   "修饰键 + 虚拟键"解释 —— 文字变成快捷键（Ctrl+W 之类还有破坏性），
+        //   而 SendInput 会如实报告"写入成功"，所以事后无法分辨、重试也救不了。
+        //   先给用户一小会儿松手；仍按着就中止，并说清为什么（绝不自己补发 keyup：
+        //   那会与用户的真实按键状态打架）。
+        String held = awaitModifiersReleased();
+        if (held != null) {
+            String msg = "检测到 " + held + " 处于按下状态，为避免把整段文字打成快捷键，本次**没有注入**。"
+                    + "请松开后重新说一遍（若它其实没被按住，说明键盘状态卡住了，按一下该键即可恢复）。";
+            log.error("注入已中止：{}", msg);
+            return Result.fail(Result.Failure.MODIFIER_HELD, msg);
+        }
+
         int events = 0;
         if (backspaces > 0) {
             int n = sendBackspaces(backspaces);
@@ -190,7 +203,15 @@ public final class WindowsTextInjector implements TextInjector {
             }
             events += n;
         }
-        String body = text == null ? "" : text;
+        // ★ 控制字符必须在**注入前**去掉（PENDING 1.7）：KEYEVENTF_UNICODE 会把换行/制表
+        //   当按键送进目标程序，而在聊天工具里一个换行就等于"把没写完的消息发出去"。
+        //   文本层刻意保留换行（可能是有意的分段），所以这道防线只能在出口。
+        String requested = text == null ? "" : text;
+        String body = TextUtils.withoutControlChars(requested);
+        if (body.length() != requested.length()) {
+            log.warn("注入前已过滤 {} 个控制字符（换行/制表会被当按键送出，在聊天工具里等于提前发送）",
+                    requested.length() - body.length());
+        }
         if (!body.isEmpty()) {
             int n = sendUnicode(body);
             if (n < 0) {
@@ -334,6 +355,90 @@ public final class WindowsTextInjector implements TextInjector {
         }
         log.info("自动发送：{}（事件数={}）", combo.display(), sent);
         return Result.ok(sent);
+    }
+
+    /**
+     * 自动发送前复核前台窗口（{@code PENDING-ISSUES} P1.3）。
+     *
+     * <p>把安全前提搬进注入器，而不是留在调用方：调用方那边确实已经判过一次
+     * （{@code StateMachine.autoSendAllowed}），但**任何新的调用点都会绕过它** ——
+     * 而一个回车落在聊天工具里是不可挽回的（消息会被直接发出去）。
+     */
+    @Override
+    public Result press(KeyCombo combo, long expectedWindow) {
+        if (expectedWindow != 0) {
+            long now = currentForeground();
+            if (now != expectedWindow) {
+                String msg = "自动发送已跳过：前台窗口已不是原来的目标（当前 0x"
+                        + Long.toHexString(now) + "，目标 0x" + Long.toHexString(expectedWindow)
+                        + "）。一个回车落在别的程序里可能把没写完的消息发出去，所以宁可不发。";
+                log.warn("{}", msg);
+                return Result.fail(Result.Failure.FOREGROUND_CHANGED, msg);
+            }
+        }
+        return press(combo);
+    }
+
+    // ------------------------------------------------------------ 修饰键闸门
+
+    /** 注入前等待修饰键松开的轮询次数 × 间隔 = 最多等这么久。 */
+    private static final int MODIFIER_WAIT_TICKS = 10;
+    private static final long MODIFIER_WAIT_MILLIS = 100;
+
+    /**
+     * 等修饰键松开；仍按着就返回它的名字（不再等）。
+     *
+     * @return 被按住的修饰键描述（如 {@code "Ctrl+Shift"}）；都松开了返回 null
+     */
+    private String awaitModifiersReleased() {
+        for (int i = 0; i < MODIFIER_WAIT_TICKS; i++) {
+            String held = describeModifiers(
+                    keyDown(Win32.VK_CONTROL), keyDown(Win32.VK_MENU),
+                    keyDown(Win32.VK_SHIFT), keyDown(Win32.VK_LWIN) || keyDown(Win32.VK_RWIN));
+            if (held == null) {
+                if (i > 0) {
+                    log.info("修饰键已松开（等了约 {}ms），继续注入", i * MODIFIER_WAIT_MILLIS);
+                }
+                return null;
+            }
+            sleep(MODIFIER_WAIT_MILLIS);
+        }
+        return describeModifiers(
+                keyDown(Win32.VK_CONTROL), keyDown(Win32.VK_MENU),
+                keyDown(Win32.VK_SHIFT), keyDown(Win32.VK_LWIN) || keyDown(Win32.VK_RWIN));
+    }
+
+    /**
+     * 把"哪些修饰键正被按住"拼成一句人话 —— **纯函数，可单测**（原生查询那部分不可单测）。
+     *
+     * @return 如 {@code "Ctrl"} / {@code "Ctrl+Alt"}；都没按返回 null
+     */
+    static String describeModifiers(boolean ctrl, boolean alt, boolean shift, boolean win) {
+        StringBuilder sb = new StringBuilder();
+        if (ctrl) {
+            sb.append("Ctrl");
+        }
+        if (alt) {
+            sb.append(sb.length() == 0 ? "" : "+").append("Alt");
+        }
+        if (shift) {
+            sb.append(sb.length() == 0 ? "" : "+").append("Shift");
+        }
+        if (win) {
+            sb.append(sb.length() == 0 ? "" : "+").append("Win");
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+
+    /** 该虚拟键此刻是否被按住（{@code GetAsyncKeyState} 的最高位）。 */
+    private static boolean keyDown(int vk) {
+        try {
+            return (Win32.User32.INSTANCE.GetAsyncKeyState(vk) & 0x8000) != 0;
+        } catch (RuntimeException | UnsatisfiedLinkError e) {
+            // 读不到就当作"没按住"：保守地继续注入（与 UIPI 判断里的同一条原则 ——
+            // 宁可注入失败后再提示，也不要因为读不到状态就拒绝一次本来能成功的注入）
+            return false;
+        }
     }
 
     // ------------------------------------------------------------ 底层

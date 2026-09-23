@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 配置读写（{@code DESIGN.md} §4.5：纯逻辑，可单测）。
@@ -12,6 +14,8 @@ import java.util.Map;
  * 因此可以在无桌面环境下完整单测——包括启动时的强制校验（§4.3）。
  */
 public final class AppConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(AppConfig.class);
 
     public static final String DEFAULT_WAKE_WORD = "子曰";
     public static final String DEFAULT_END_WORD = "到此为止";
@@ -147,15 +151,21 @@ public final class AppConfig {
      * （日志表现为「14 个事件全部写入成功，但输入框里只有 2 个字」）。
      * 需要的间隔随微信版本、输入法、机器负载而变，因此必须让用户能调。
      *
-     * <p>默认 {@value #DEFAULT_CHAR_GAP_MILLIS}ms；范围 0–200。
-     * 调大更稳（代价是注入变慢），调 0 则退化为「尽快灌入」
-     * （标准控件如记事本、浏览器用 0 也没问题）。
+     * <p>默认 {@value #DEFAULT_CHAR_GAP_MILLIS}ms；范围 {@value #MIN_CHAR_GAP_MILLIS}–{@value #MAX_CHAR_GAP_MILLIS}。
+     * 调大更稳（代价是注入变慢）。
+     *
+     * <p><b>下限为什么不是 0</b>：0 曾经是合法值，而它是**已知的丢字值** —— 灌得太快时
+     * 自绘输入框会主动丢掉后面的 {@code WM_CHAR}，症状是"输入框里只出现第一个字"，
+     * 而 {@code SendInput} 会如实报告"全部写入成功"。一个已知会出错的取值不该留在可行域里
+     * （{@code PENDING-ISSUES} P1.6）。老配置里残留的 0 会在读入时被抬到下限并记一条警告，
+     * 而不是让程序起不来。
      */
     private int charGapMillis = DEFAULT_CHAR_GAP_MILLIS;
 
     /** 每字之间的默认间隔：见 {@link #charGapMillis}。 */
     public static final int DEFAULT_CHAR_GAP_MILLIS = 20;
-    public static final int MIN_CHAR_GAP_MILLIS = 0;
+    /** 下限 5ms：0 是已知会丢字的值，不再允许（见 {@link #charGapMillis}）。 */
+    public static final int MIN_CHAR_GAP_MILLIS = 5;
     public static final int MAX_CHAR_GAP_MILLIS = 200;
 
     /**
@@ -469,7 +479,16 @@ public final class AppConfig {
         c.sendKey = SendKey.fromDisplay(JsonCodec.str(m, "sendKey", SendKey.ENTER.display()));
         c.sendOnSilenceTimeout = JsonCodec.bool(m, "sendOnSilenceTimeout", false);
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
-        c.charGapMillis = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
+        // 注入间隔：老配置里可能有 0（它曾经是合法值，而灌太快会让自绘输入框丢字）。
+        // 这里**抬到下限并记警告**，而不是让程序起不来 —— "非法配置=起不来"本身
+        // 就是 PENDING 5.9 记着的坑，而这一条纯粹是历史遗留值的迁移。
+        int gap = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
+        if (gap < MIN_CHAR_GAP_MILLIS) {
+            log.warn("配置里的 charGapMillis={} 低于下限 {}ms（0 会让微信这类自绘输入框丢字），"
+                    + "已抬到下限；下次保存时写回", gap, MIN_CHAR_GAP_MILLIS);
+            gap = MIN_CHAR_GAP_MILLIS;
+        }
+        c.charGapMillis = gap;
         c.hotwords = JsonCodec.str(m, "hotwords", "").strip();
         // 缺失时默认 true（老配置里没有这个键 → 行为与以前完全一致）
         c.useLargeModel = JsonCodec.bool(m, "useLargeModel", true);

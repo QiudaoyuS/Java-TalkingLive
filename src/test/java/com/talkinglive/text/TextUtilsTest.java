@@ -2,6 +2,7 @@ package com.talkinglive.text;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -633,6 +634,51 @@ class TextUtilsTest {
         @DisplayName("批大小非法时至少为 1，不会死循环")
         void invalidBatchSize() {
             assertEquals(List.of("a", "b"), TextInjector.batchByCodePoints("ab", 0));
+        }
+    }
+
+    /**
+     * 注入前的控制字符过滤（{@code PENDING-ISSUES} P1.7）。
+     *
+     * <p>为什么它在文本层做成一个纯函数：{@code KEYEVENTF_UNICODE} 会把换行/制表**当按键**
+     * 送进目标程序，在聊天工具里一个换行就等于"把没写完的消息发出去"。
+     * 而 {@code PunctuationProcessor} 刻意保留换行（可能是有意的分段），
+     * 所以这道防线放在出口，且必须可单测。
+     */
+    @Nested
+    @DisplayName("控制字符过滤（注入前）")
+    class ControlChars {
+
+        @Test
+        @DisplayName("换行 / 制表 / 回车及其它 C0 控制字符都被去掉")
+        void removesControls() {
+            assertEquals("今天天气不错", TextUtils.withoutControlChars("今天\n天气\t不错"));
+            assertEquals("abc", TextUtils.withoutControlChars("a\r\nb\u0000c"));
+            assertEquals("", TextUtils.withoutControlChars("\n\t\r"));
+        }
+
+        @Test
+        @DisplayName("C1 控制字符也去掉（0x7F–0x9F）")
+        void removesC1Controls() {
+            assertEquals("ab", TextUtils.withoutControlChars("a\u007F\u0085b"));
+        }
+
+        @Test
+        @DisplayName("正常文本原样返回，包括代理对与全角空格（它们不是控制字符）")
+        void keepsNormalText() {
+            assertEquals("今天😀不错", TextUtils.withoutControlChars("今天😀不错"));
+            // 全角空格属于 Zs 不是 Cc：它由 PunctuationProcessor 负责清理，不该在这里顺手删掉
+            assertEquals("今天　天气", TextUtils.withoutControlChars("今天　天气"));
+            String clean = "今天天气";
+            assertSame(clean, TextUtils.withoutControlChars(clean),
+                    "没有控制字符时应当原样返回同一个对象，避免每段都多一次拷贝");
+        }
+
+        @Test
+        @DisplayName("null 与空串得到空串（不抛）")
+        void nullsAreSafe() {
+            assertEquals("", TextUtils.withoutControlChars(null));
+            assertEquals("", TextUtils.withoutControlChars(""));
         }
     }
 }

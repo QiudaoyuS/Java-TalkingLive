@@ -274,6 +274,52 @@ class TextInjectorLayoutTest {
             assertEquals(20, r.eventsExpected());
             assertEquals(TextInjector.Result.Failure.NONE, r.failure());
         }
+
+        @Test
+        @DisplayName("先过滤控制字符再算事件数（否则核对基准会比实发多）")
+        void planAfterFilteringControls() {
+            String raw = "a\nb";                       // 3 个 UTF-16 单元
+            assertEquals(6, TextInjector.plannedEvents(raw, 0));
+            // 注入器实际发的是过滤后的文本，所以基准必须用同一份
+            assertEquals(4, TextInjector.plannedEvents(
+                    com.talkinglive.text.TextUtils.withoutControlChars(raw), 0));
+        }
+    }
+
+    /**
+     * 修饰键闸门（{@code PENDING-ISSUES} P1.4）。
+     *
+     * <p>这里只测**可单测的那一半**：把按键状态拼成人话的纯函数。原生查询
+     * （{@code GetAsyncKeyState}）在无桌面环境下不可靠，且"按住 Ctrl 时注入会变快捷键"
+     * 这件事只能靠真实目标程序验证 —— 那属于 §9.3 的手工清单。
+     * 但拼名字这段逻辑值得钉住：它决定提示里写的是什么，写错了用户按提示操作也没用。
+     */
+    @Nested
+    @DisplayName("修饰键（按住时中止注入）")
+    class Modifiers {
+
+        @Test
+        @DisplayName("都没按 → null（正常路径不打扰）")
+        void noneHeld() {
+            assertEquals(null, WindowsTextInjector.describeModifiers(false, false, false, false));
+        }
+
+        @Test
+        @DisplayName("单个修饰键：名字不带多余的分隔符")
+        void singleModifier() {
+            assertEquals("Ctrl", WindowsTextInjector.describeModifiers(true, false, false, false));
+            assertEquals("Alt", WindowsTextInjector.describeModifiers(false, true, false, false));
+            assertEquals("Shift", WindowsTextInjector.describeModifiers(false, false, true, false));
+            assertEquals("Win", WindowsTextInjector.describeModifiers(false, false, false, true));
+        }
+
+        @Test
+        @DisplayName("多个修饰键按固定顺序用 + 连接")
+        void multipleModifiers() {
+            assertEquals("Ctrl+Alt", WindowsTextInjector.describeModifiers(true, true, false, false));
+            assertEquals("Ctrl+Alt+Shift+Win",
+                    WindowsTextInjector.describeModifiers(true, true, true, true));
+        }
     }
 
     @Nested

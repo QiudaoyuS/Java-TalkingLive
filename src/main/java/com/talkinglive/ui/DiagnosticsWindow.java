@@ -91,6 +91,10 @@ public class DiagnosticsWindow extends JFrame {
     private final JPanel statusPanel = new JPanel();
     private final JTextArea logArea = new JTextArea();
     private final JTextArea selfCheckArea = new JTextArea();
+    /** 「重新自检」按钮：跑的时候要禁用，避免连点跑多遍（自检会占用引擎）。 */
+    private JButton selfCheckButton;
+    /** 自检是否正在跑（后台线程读写，见 {@link #runSelfCheckAsync}）。 */
+    private volatile boolean selfCheckRunning;
     private AutoCloseable logSubscription;
 
     public DiagnosticsWindow(Host host) {
@@ -296,15 +300,55 @@ public class DiagnosticsWindow extends JFrame {
         bottom.setBackground(Theme.BG);
         bottom.add(small("把这段结果贴给开发者即可定位环境问题（不含转写内容）"),
                 BorderLayout.CENTER);
-        bottom.add(button("重新自检", e -> selfCheckArea.setText(host.diagnosticsReport())),
-                BorderLayout.EAST);
+        selfCheckButton = button("重新自检", e -> runSelfCheckAsync());
+        bottom.add(selfCheckButton, BorderLayout.EAST);
         p.add(bottom, BorderLayout.SOUTH);
         return p;
     }
 
-    /** 供 App 在窗口可见时填充自检结果。 */
+    /** 供 App 在窗口可见时填充自检结果（同样走后台线程，见 {@link #runSelfCheckAsync}）。 */
     public void refreshSelfCheck() {
-        selfCheckArea.setText(host.diagnosticsReport());
+        runSelfCheckAsync();
+    }
+
+    /**
+     * 在**后台线程**跑自检，完成后回填到 EDT。
+     *
+     * <p>为什么必须这样（{@code PENDING-ISSUES} P5.2）：自检包含端到端管线等几十项，在 EDT 上
+     * 同步跑会把窗口冻住数秒 —— 而这一页的作用恰恰是"点一下看看系统好不好"，
+     * 冻住的界面会让人以为它坏了。之前那条更糟：它还会在**真实桌面**上跑 UI 自检
+     * （造一颗悬浮球、用 Robot 移动鼠标），结论本身也失真 ——
+     * 现在那份报告由 {@code App.diagnosticsReport()} 明确按 {@code includeUi=false} 生成。
+     *
+     * <p>自检**必须在非 EDT 线程上跑**是 {@code SelfTest} 自己写死的前提
+     * （{@code Robot.delay} 阻塞的是当前线程，若那就是 EDT，事件与动画都排不进队）。
+     */
+    private void runSelfCheckAsync() {
+        if (selfCheckRunning) {
+            return;   // 连点两次不必跑两遍
+        }
+        selfCheckRunning = true;
+        selfCheckButton.setEnabled(false);
+        selfCheckArea.setText("正在自检…（几十项检查，通常 1–3 秒；期间界面可正常使用）");
+        Thread t = new Thread(() -> {
+            String report;
+            try {
+                report = host.diagnosticsReport();
+            } catch (Throwable e) {
+                // 兜 Throwable：自检里的原生库/引擎调用可能抛出 Error，
+                // 而这一页是**只读诊断**，任何失败都该显示出来而不是让窗口半死不活。
+                report = "自检失败：" + e;
+            }
+            final String text = report;
+            javax.swing.SwingUtilities.invokeLater(() -> {
+                selfCheckArea.setText(text);
+                selfCheckArea.setCaretPosition(0);
+                selfCheckRunning = false;
+                selfCheckButton.setEnabled(true);
+            });
+        }, "self-check-ui");
+        t.setDaemon(true);
+        t.start();
     }
 
     // ==================== 零件 ====================

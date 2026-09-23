@@ -30,6 +30,13 @@ public final class Win32 {
     public static final int VK_CONTROL = 0x11;
     public static final int VK_ESCAPE = 0x1B;
     public static final int VK_BACK = 0x08;
+    /** Shift —— 注入前要查的修饰键之一（按住时 Unicode 事件会被解释成快捷键）。 */
+    public static final int VK_SHIFT = 0x10;
+    /** Alt（即 {@code VK_MENU}）—— 同上。 */
+    public static final int VK_MENU = 0x12;
+    /** 左 / 右 Win 键 —— 同上。 */
+    public static final int VK_LWIN = 0x5B;
+    public static final int VK_RWIN = 0x5C;
 
     public static final int GWL_EXSTYLE = -20;
     public static final int WS_EX_TOOLWINDOW = 0x00000080;

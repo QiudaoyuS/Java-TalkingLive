@@ -242,6 +242,22 @@ class VoskGrammarTest {
         }
 
         @Test
+        @DisplayName("partial 用 \"partial\" 键 —— 用错键会让实时预览恒为空（P0 的回归测试）")
+        void partialHasItsOwnKey() {
+            // 这条是"实时预览从未生效"那个 bug 的看门：原生层实测 partial 的键是 "partial"，
+            // 而 result / final_result 是 "text"。若有人让 partialResult() 又去复用 textOf()，
+            // 下面第一条会立刻失败。
+            assertEquals("abc", VoskModel.Recognizer.partialOf("{\"partial\" : \"abc\"}"));
+            assertEquals("今天天气不错",
+                    VoskModel.Recognizer.partialOf("{\"partial\" : \"今天 天气 不错\"}"));
+            assertEquals("", VoskModel.Recognizer.partialOf("{\"text\" : \"abc\"}"),
+                    "text 不该被当成 partial：两个键分两处解析，混用就回到静默失效");
+            assertEquals("", VoskModel.Recognizer.partialOf("{}"));
+            assertEquals("", VoskModel.Recognizer.partialOf("not json"));
+            assertEquals("", VoskModel.Recognizer.partialOf(null));
+        }
+
+        @Test
         @DisplayName("空文本、null、空串、非法 JSON 都返回空串而不抛异常（音频线程不能死）")
         void malformedInputsAreSafe() {
             assertEquals("", VoskModel.Recognizer.textOf("{\"text\":\"\"}"));

@@ -1212,7 +1212,10 @@ public final class App {
 
             // 自动发送的条件收敛成一条纯规则（含"前台已变就不发"），见 StateMachine.autoSendAllowed
             if (config.autoSend() && StateMachine.autoSendAllowed(ctx, config.sendOnSilenceTimeout())) {
-                TextInjector.Result pr = injector.press(TextInjector.KeyCombo.fromConfig(config.sendKey()));
+                // 带上目标窗口：注入器会再复核一次前台（P1.3）—— 安全前提不能只留在调用方，
+                // 否则任何新的调用点都会绕过它，而一个回车落在聊天工具里是不可挽回的。
+                TextInjector.Result pr = injector.press(
+                        TextInjector.KeyCombo.fromConfig(config.sendKey()), s.targetWindow());
                 if (!pr.ok()) {
                     log.warn("自动发送失败：{}", pr.message());
                     showNotice("自动发送失败", pr.message());
@@ -1743,7 +1746,11 @@ public final class App {
 
         @Override
         public String diagnosticsReport() {
-            return SelfTest.run().report();
+            // ★ includeUi=false：这里是在**产品自己运行中**被点出来的（诊断窗口的「重新自检」）。
+            //   若带上 UI 段，它会再造一颗悬浮球、用 Robot 移动真实鼠标 —— 与真球打架，
+            //   还会把用户的鼠标抢走；而它要回答的问题（各组件就绪情况）根本不需要那一节。
+            //   需要完整 UI 检查时跑 --self-check（那是独立进程，不干扰正在使用的实例）。
+            return SelfTest.run(new SelfTestEnv(), false).report();
         }
 
         @Override
