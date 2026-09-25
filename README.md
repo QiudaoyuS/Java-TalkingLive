@@ -16,43 +16,80 @@
 
 ---
 
-## 📌 当前状态与版本
+当前版本 **1.0.0** ｜ 完全本地、不联网 ｜ 真机验收仍有未跑完的项，见 `docs/IMPLEMENTATION-STATUS.md` §3.2
 
-当前版本 **1.0.0**（对应 `pom.xml` 的 `<version>` 与 jpackage 的 `<appVersion>`、git tag `v1.0.0`）。
+<a id="start"></a>
 
-**这个 1.0.0 是怎么来的、它不表示什么** —— 按用户决定，**发布版本跟随提交序号**
-（提交序号走到 `[1.0.0]`，发布版本就定 `1.0.0`）。所以它表示的是「按本项目的版本规则走到了 1.0」，
-**不代表** `DESIGN.md` §9.3 的手工验收清单已经跑完 —— 那份清单只能由**真人**在真机上做，
-自动化替代不了，而它**仍有未跑完的项**，如实列在这里：
+## 🚀 三步开始（先看这里）
 
-| §9.3 的项 | 状态 |
+**前提**：Windows + **JDK 21**（`run.cmd` 会自己去找它；只装了 JDK 8 会直接失败并说明原因）。
+
+> 用 jpackage 打出来的 `TalkingLive.exe` 自带运行时、**不需要 JDK**。目前还没有正式安装包，
+> 所以从源码跑就是下面第 ① 步。
+
+### ① 双击 `run.cmd` —— 要点的就这一个文件
+
+它会自己找 JDK 21、必要时自动构建，然后**静默启动**悬浮球（走 `TalkingLive.vbs`，桌面上不留黑窗口）。
+
+| 你想做的事 | 双击 / 运行 |
 |---|---|
-| 麦克风实际打开与采集 | ✅ 已实测打通（启动健康检查 + `--mic-test`） |
-| 唤醒词命中率 / 误触发率（第 1–2 条） | ❌ **未测**（需要真人对着麦克风说话、并人工标注参考文本） |
-| 真实语音识别质量（CER） | ❌ **未测**（CER 需要人工参考文本）；大模型的加载 17–21s、RTF 0.25–0.48 已实测 |
-| 注入到**记事本** | ✅ 已实测通过（逐字符码点核对） |
-| 注入到**微信** | ✅ 事件数与字数对得上（识别内容问题已由大模型解决） |
-| 注入到**浏览器 / IDE** | ❌ **未测**（需要真实目标程序） |
-| **浮窗弹出时焦点不被抢走（第 5 条）** | ❌ **未测 —— `IMPLEMENTATION-STATUS.md` 自己把这条标为「最关键的一条」** |
-| 采集中断后自动重连（第 9 条） | ❌ **未测**（需要真实设备被抢占） |
-| 长时间运行（≥ 2h）内存不增长（第 10 条） | ❌ 未跑长跑（已实测的是常驻**提交量**约 4.3GB，且它回收不了，见下） |
-| 冷启动总耗时 | ✅ 已实测 3.3s（窗口出现时刻，含大模型后台异步加载） |
+| **启动**（常驻后台，桌面上只有一颗悬浮球） | **双击 `run.cmd`** |
+| 第一次先验麦克风（15 秒，控制台里打出实时音量条） | `run.cmd --mic-test` |
+| 启动并打开设置窗口 | `run.cmd --settings` |
+| 环境自检后退出（不碰界面） | `run.cmd --doctor` |
 
-未跑完的部分**不会因为版本号叫 1.0 就消失**：当前已知缺口见
-`docs/IMPLEMENTATION-STATUS.md` §3.2 / §3.4；**尚未修的问题**见 `docs/PENDING-ISSUES.md`。
+### ② 没有模型？双击 `tools\get-model.cmd`
 
-> **两个版本号序列**：git 提交首行的 `[N.n.m]` 是**提交序号**（每个 commit 都会 +1，规则见
-> `AGENTS.md`）；本次用户要求**发布版本跟随提交序号**，所以两者都是 `1.0.0`。
-> 定版时必须**一起改四处**（少改一处就会互相说反）：README 这里、`pom.xml` 的 `<version>`、
-> `pom.xml` 里 jpackage 的 `<appVersion>`、git tag。
+语音模型**不进版本库**（1.3GB 的二进制不适合放仓库），所以第一次用要先把它拿到手。
+`tools\get-model.cmd` 会问你要哪一个、然后下载 + 解压到正确位置
+（`%LOCALAPPDATA%\TalkingLive\models\`），装好**自动生效，不用改任何配置**。
+
+不想用脚本也行：直接点下面的链接下载，再解压到 `%LOCALAPPDATA%\TalkingLive\models\`。
+
+| 模型 | 大小 | 国内镜像（点一下就开始下载） | 官方直链 |
+|---|---|---|---|
+| **小模型**（**必须**有：唤醒词与结束词只用它） | 42 MB | [vosk-model-small-cn-0.22.zip](https://hf-mirror.com/localstack/vosk-models/resolve/main/vosk-model-small-cn-0.22.zip) | [alphacephei](https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip) |
+| **大模型**（可选：识别明显更准） | 1.3 GB | [model-cn.zip](https://hf-mirror.com/LiangJingyi/vosk-model-cn-0.22/resolve/main/model-cn.zip) | [alphacephei](https://alphacephei.com/vosk/models/vosk-model-cn-0.22.zip) |
+
+> 实测下载速度：官方站点在国内约 **40 KB/s**，hf-mirror 约 **3.5 MB/s**（小模型）/ **13 MB/s**（大模型）。
+> 两个模型的取舍（准确率 / 内存 / 启动时间）见 [模型与启动细节](#models)。
+
+**没有模型会怎样**：程序照常启动、悬浮球也照样出现，但会**明确提示「不可用」**并告诉你怎么装 ——
+不会静默地什么都不做。
+
+### ③ 第一次先跑一次麦克风实测
+
+```powershell
+.\run.cmd --mic-test
+```
+
+它把「采音没进来」和「识别不准」这两种完全不同的问题当场分开：控制台里同时打出实时音量条、
+实时预览文字与唤醒命中计数。**只要有音量条，就说明链路是通的**。
 
 ---
 
-## 🚀 快速启动指南
+<a id="toc"></a>
 
-### 1. 准备语音模型（**必做，否则程序仍常驻但会明确提示不可用**）
+## 📑 目录
+
+- [三步开始](#start) —— 双击哪个文件、模型去哪下
+- [模型与启动细节](#models) —— 两个模型的实测代价、全部命令行参数、数据目录
+- [功能模块与使用指南](#features) —— 悬浮球 / 听写主链路 / 设置窗口 / 诊断窗口
+- [自检与诊断](#diagnostics) —— 交付前最该跑的几条命令、报告落在哪
+- [从源码构建](#build) —— `mvnw` / 打包出带运行时的程序
+- [架构分层](#arch) —— 每条分层约束由谁强制
+- [想深入看哪份文档](#docs)
+
+---
+
+<a id="models"></a>
+
+## 🧩 模型与启动细节
+
+### 模型装在哪、怎么手动装
 
 模型不进版本库，统一放在 `%LOCALAPPDATA%\TalkingLive\models\`。
+（上面 [三步开始](#start) 给的是下载链接；这一节说清装好之后会发生什么、以及代价。）
 
 ```powershell
 $dir = "$env:LOCALAPPDATA\TalkingLive\models"
@@ -89,39 +126,27 @@ Expand-Archive "$dir\vosk-model-small-cn-0.22.zip" -DestinationPath $dir
 > 当前占用可以在诊断窗口的「状态」页第一屏看到（「内存占用」那一行）。
 > 取舍的理由与复核条件见 `docs/DECISIONS.md` D0/D1。
 
-### 2. 一键启动
+### 启动方式与全部参数
 
-**最省事的方式：双击 `run.cmd`** —— 它会自己找 JDK 21、必要时自动构建、然后静默启动悬浮球
-（走 `TalkingLive.vbs`，桌面上不留黑窗口）。
+最省事的是**双击 `run.cmd`**（见开头的 [三步开始](#start)）。要传参数就在终端里运行 `.\run.cmd <参数>`：
 
-```powershell
-.\run.cmd                # 常驻后台，桌面上只有一颗悬浮球
-.\run.cmd --mic-test     # 麦克风实测（15 秒，实时音量条）—— 建议第一次先跑这个
-.\run.cmd --settings     # 启动并打开设置窗口
-.\run.cmd --doctor       # 环境自检后退出
-```
+| 参数 | 作用 |
+|---|---|
+| 无 | 常驻后台，桌面上只有一颗悬浮球 |
+| `--mic-test` | 麦克风实测：控制台里打出实时音量条 + 预览文字 + 唤醒命中计数，15 秒 |
+| `--settings` | 启动并打开设置窗口 |
+| `--doctor`（= `--headless`） | 环境自检后退出 —— **不碰 UI**（UI 段会如实标成「已按参数跳过」） |
+| `--self-check` | 完整自检 —— **会短暂造一颗悬浮球、并用 Robot 移动真实鼠标** |
+| `--refiner <名>` | 指定精化引擎：`auto` / `vosk-offline` / `none`（`none` = 用预览文本直接注入） |
+| `--no-microphone` | 不打开麦克风（没有设备时试界面用） |
+| `--allow-multiple` | 允许同时运行多份（默认禁止，避免多颗悬浮球） |
+| `--console` | 除日志文件外也输出到控制台（默认为真） |
 
-### 3. 第一次先跑麦克风实测
+> `--doctor` / `--self-check` / `--mic-test` 的结果是打在**标准输出**上的，所以 `run.cmd`
+> 会专门为它们保留控制台；只有「正常启动」才会藏掉窗口（走 `javaw`）。想要一直有控制台，
+> 用 `tools\run-console.cmd`。
 
-```powershell
-.\run.cmd --mic-test
-```
-
-它会把「采音没进来」和「识别不准」这两种完全不同的问题当场分开：屏幕上有实时音量条、
-实时预览文字与唤醒命中计数。对着麦克风说几句，只要有音量条就说明链路是通的。
-
-### 4. 手动构建与运行（备选）
-
-需要 **JDK 21**；Maven 用 wrapper（`mvnw`），无需单独安装。
-
-```powershell
-.\mvnw.cmd package        # 编译 + 跑全部单测
-.\mvnw.cmd test           # 只跑单测
-.\mvnw.cmd -Pdist package # 编译 + 跑全部单测，再用 jpackage 产出带运行时的 app image
-#   产物：target\dist\TalkingLive\TalkingLive.exe —— 双击即用，目标机器**不需要装 JDK**
-#   注意：**只能用 `-Pdist package`**，不能直接 `-Pdist jpackage` —— 打包前有一步"把主 jar
-#   与依赖拼成 jpackage 要的目录形状"的暂存，它绑在 package 阶段，跳过它 jpackage 会报「找不到 jar」
-```
+等价的 `java -jar` 写法（不经过 `run.cmd` / `TalkingLive.vbs`，一定带控制台）：
 
 ```powershell
 java -jar target\talkinglive.jar                    # 常驻后台，桌面上只有一颗悬浮球
@@ -133,10 +158,10 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 > ⚠️ **`JAVA_HOME` 必须指向 JDK 21**（本机为 `D:\Code\Java\jdk-21.0.12.1`）。
 > Maven Wrapper 优先读 `JAVA_HOME`，指向 JDK 8 会直接构建失败。
 > 注意：**已经打开的终端**里 `JAVA_HOME` 是启动时的旧值，改过环境变量后要重开终端。
->
-> 需要看控制台输出时用 `tools\run-console.cmd`（正常启动是不留控制台的）。
 
 ---
+
+<a id="features"></a>
 
 ## 💡 功能模块与使用指南
 
@@ -226,6 +251,8 @@ java -jar target\talkinglive.jar --no-microphone    # 不打开麦克风（无�
 
 ---
 
+<a id="diagnostics"></a>
+
 ## 📋 自检与诊断
 
 **这是本项目最该先跑的东西** —— 它把「交付前必须验证的事」做成了可复现的一步。
@@ -264,17 +291,38 @@ java -cp "target\talkinglive.jar;target\lib\*" com.talkinglive.SampleInjector
 
 ```
 %LOCALAPPDATA%\TalkingLive\
+├── config.json             # 配置（启动时强制校验）
+├── logs\talkinglive.log    # 滚动日志，不记转写内容
+├── models\                 # 语音模型：小模型解压后 65MB；大模型约 2GB
+│   ├── vosk-model-small-cn-0.22\   # 唤醒/结束词 + 实时预览
+│   └── model-cn\                   # 可选：大模型（识别用；`vosk-model-cn-0.22\` 同样会被识别）
+├── native\vosk\            # Vosk 原生库的解压位置（约 77MB，可自行删除，下次启动会重建）
 ├── doctor-report.txt       # --doctor 报告
 ├── selftest-report.txt     # --self-check 报告
 ├── engine-bench.txt        # EngineBench 报告
-├── config.json             # 配置（启动时强制校验）
-├── logs\talkinglive.log    # 滚动 5MB×3，不记转写内容
-├── recordings\             # 音频落盘（M1 用）
-└── models\
-    └── vosk-model-small-cn-0.22\   # 唤醒/结束词 + 实时预览
+└── recordings\             # 音频落盘（M1 用）
 ```
 
 ---
+
+<a id="build"></a>
+
+## 🛠 从源码构建
+
+需要 **JDK 21**；Maven 用 wrapper（`mvnw`），无需单独安装。
+
+```powershell
+.\mvnw.cmd package        # 编译 + 跑全部单测
+.\mvnw.cmd test           # 只跑单测
+.\mvnw.cmd -Pdist package # 编译 + 跑全部单测，再用 jpackage 产出带运行时的 app image
+#   产物：target\dist\TalkingLive\TalkingLive.exe —— 双击即用，目标机器**不需要装 JDK**
+#   注意：**只能用 `-Pdist package`**，不能直接 `-Pdist jpackage` —— 打包前有一步"把主 jar
+#   与依赖拼成 jpackage 要的目录形状"的暂存，它绑在 package 阶段，跳过它 jpackage 会报「找不到 jar」
+```
+
+---
+
+<a id="arch"></a>
 
 ## 🏗️ 架构分层（重要，且**被测试强制**）
 
@@ -340,6 +388,8 @@ com.talkinglive
 > 详见 `DESIGN.md` 修订记录 1.15。
 
 ---
+
+<a id="docs"></a>
 
 ## 📚 想深入看哪份文档
 

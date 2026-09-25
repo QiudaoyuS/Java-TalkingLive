@@ -1,0 +1,11 @@
+# Windows 批处理脚本必须以 CRLF 落盘。
+#
+# 原因：cmd.exe 在解析 goto / 标签时依赖 CRLF —— LF 的 .cmd 会报
+#   The system cannot find the batch label specified - xxx
+# （本项目实测：tools\get-model.cmd 用 LF 时正是这个报错。）
+#
+# 为什么非要写这条：只有 `git clone` 才会应用 core.autocrlf，**从 GitHub 下载 ZIP
+# 不经过它** —— 而 GitHub 归档会应用 .gitattributes，所以这条属性是"无论用户
+# 怎么拿到这份代码，批处理都是 CRLF"的唯一保证。demo\run.cmd 里就有 goto。
+*.cmd text eol=crlf
+*.bat text eol=crlf

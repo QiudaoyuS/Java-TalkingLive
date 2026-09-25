@@ -4,6 +4,7 @@
 
 | 文件 | 作用 |
 |---|---|
+| `get-model.cmd` | **第一次用之前**双击它：选小模型 / 大模型 → 自动下载（hf-mirror，失败回退官方）→ 解压到 `%LOCALAPPDATA%\TalkingLive\models\` → 校验并删掉 zip。也可脚本化：`get-model.cmd 1 --no-pause`（1=小模型、2=大模型） |
 | `verify-batch-bug.ps1` | 复现并证明「代理对跨批边界时 `batchByCodePoints` 死循环」—— 那个 bug 正是用户报告的「点不动任何东西」（死循环卡住 UI 线程）。想把前端点留证据时跑它 |
 | `ListMics.java` | 列出系统所有录音设备（排查「没有可用录音设备」/ 选错设备） |
 | `ProbeMixer.java` | 探测音频混音器的支持格式（排查设备格式与 16kHz 目标格式不匹配） |
