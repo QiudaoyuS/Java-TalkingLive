@@ -9,7 +9,7 @@
 | `verify-batch-bug.ps1` | 复现并证明「代理对跨批边界时 `batchByCodePoints` 死循环」—— 那个 bug 正是用户报告的「点不动任何东西」（死循环卡住 UI 线程）。想把前端点留证据时跑它 |
 | `ListMics.java` | 列出系统所有录音设备（排查「没有可用录音设备」/ 选错设备） |
 | `ProbeMixer.java` | 探测音频混音器的支持格式（排查设备格式与 16kHz 目标格式不匹配） |
-| `run-console.cmd` | 用 `java.exe` 启动，**保留控制台**。正常启动走 `TalkingLive.vbs`（无控制台），需要看输出时用这个 |
+| `run-console.cmd` | 用 `java.exe` 启动，**保留控制台**。正常启动（双击 `run.cmd`）走 `javaw`、不留控制台；需要看输出时用这个 |
 | `run-diagnose.cmd` | 同上，并加 `-Dtalkinglive.log.text=true` 打开日志里的转写内容（仅在排查识别问题时用） |
 
 ## 诊断入口（在 `src/main/java` 里，不在本目录）

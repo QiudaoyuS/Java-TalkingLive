@@ -16,7 +16,7 @@
 
 ---
 
-当前版本 **1.0.4** ｜ 完全本地、不联网
+当前版本 **1.0.5** ｜ 完全本地、不联网
 
 <a id="toc"></a>
 
@@ -43,7 +43,14 @@
 
 ### ① 双击 `run.cmd` —— 要点的就这一个文件
 
-它会自己找 JDK 21、必要时自动构建，然后**静默启动**悬浮球（走 `TalkingLive.vbs`，桌面上不留黑窗口）。
+它会自己找 JDK 21、必要时自动构建，然后**静默启动**悬浮球 —— 用 `javaw` 启动（GUI 子系统二进制，
+本身不带控制台），所以桌面上只剩一颗悬浮球。
+
+> 想连脚本运行那一瞬的黑窗口也不出现，可以**双击 `TalkingLive.vbs`**：它在隐藏窗口里调用 `run.cmd`；
+> 而首次还没构建时它会故意把控制台显示出来，好让你看见构建进度与错误。
+> 两个入口都能用，但**文档一律以 `run.cmd` 为准**（它能接收 `--mic-test` 等参数，出问题也看得见）——
+> 理由见 `docs/DECISIONS.md` D10。⚠️ 注意方向：是 `TalkingLive.vbs` 调用 `run.cmd`，不是反过来
+> （这里曾经写反过）。
 
 | 你想做的事 | 双击 / 运行 |
 |---|---|
@@ -146,7 +153,7 @@ Expand-Archive "$dir\vosk-model-small-cn-0.22.zip" -DestinationPath $dir
 > 会专门为它们保留控制台；只有「正常启动」才会藏掉窗口（走 `javaw`）。想要一直有控制台，
 > 用 `tools\run-console.cmd`。
 
-等价的 `java -jar` 写法（不经过 `run.cmd` / `TalkingLive.vbs`，一定带控制台）：
+等价的 `java -jar` 写法（不经过 `run.cmd`，一定带控制台）：
 
 ```powershell
 java -jar target\talkinglive.jar                    # 常驻后台，桌面上只有一颗悬浮球

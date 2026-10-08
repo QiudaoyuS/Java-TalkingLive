@@ -32,8 +32,9 @@ cd /d "%~dp0"
 
 rem UTF-8 console code page. The JVM writes UTF-8; without this the console
 rem reinterprets those bytes using the OEM code page and Chinese shows up as
-rem mojibake. Normal starts hide this console entirely (see TalkingLive.vbs),
-rem but the console-mode subcommands (--doctor etc.) print Chinese to it.
+rem mojibake. A normal start passes javaw (a GUI-subsystem binary), so the app
+rem itself never gets a console; the console-mode subcommands (--doctor etc.)
+rem keep this window because their whole result is printed into it.
 chcp 65001 >nul 2>&1
 
 rem ---- 1. collect JDK 21 candidates, first match wins ----
