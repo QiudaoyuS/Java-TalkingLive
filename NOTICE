@@ -1,0 +1,16 @@
+TalkingLive
+Copyright 2026 TalkingLive contributors
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this product except in compliance with the License. A copy of the License is in
+the file LICENSE, or at http://www.apache.org/licenses/LICENSE-2.0
+
+This product includes software developed by third parties. The complete list,
+with each component's license, is in THIRD-PARTY-NOTICES.md. In particular:
+
+  * Vosk speech recognition (Java binding + native library)
+    Alpha Cephei Inc. - https://alphacephei.com/vosk/ - Apache License 2.0
+
+The speech recognition MODELS are not part of this repository and are not
+redistributed by it: the user downloads them from their upstream source
+(Alpha Cephei or a mirror). See README.md, section "3 steps to start".

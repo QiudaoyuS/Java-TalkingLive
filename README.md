@@ -16,7 +16,7 @@
 
 ---
 
-当前版本 **1.0.6** ｜ 完全本地、不联网
+当前版本 **1.0.7** ｜ 完全本地、不联网
 
 <a id="toc"></a>
 
@@ -29,6 +29,7 @@
 - [从源码构建](#build) 
 - [架构分层](#arch) 
 - [想深入看哪份文档](#docs)
+- [许可](#license) —— Apache-2.0 与第三方声明
 
 ---
 
@@ -411,3 +412,18 @@ com.talkinglive
 | `docs/RETIRED-TOOLS.md` | 已退休的诊断工具：当初解决什么问题、下次怎么重建 |
 | `tools/README.md` | 诊断入口与启动脚本一览 |
 | `demo/` | P0 交互原型（纯模拟数据，已完成的里程碑） |
+
+---
+
+<a id="license"></a>
+
+## 📄 许可
+
+**自有代码按 [Apache License 2.0](LICENSE) 发布**（`LICENSE` 是完整正文；`NOTICE` 是署名）。
+
+随程序一起分发的第三方组件（Vosk 的 Java 绑定与原生库、JNA、FlatLaf、SLF4J、Logback）各自
+的许可与版本，列在 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) ——
+那份表由 `ThirdPartyNoticesTest` 盯着，**升级依赖却没更新声明会让构建失败**。
+
+**语音模型不在本仓库、也不由本仓库再分发**：它由你按上面 [三步开始](#start) 的链接从上游下载
+（模型自身许可是 Apache-2.0，来源见 [Vosk models](https://alphacephei.com/vosk/models)）。

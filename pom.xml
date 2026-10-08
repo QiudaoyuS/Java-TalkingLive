@@ -7,11 +7,20 @@
 
   <groupId>com.talkinglive</groupId>
   <artifactId>talkinglive</artifactId>
-  <version>1.0.6</version>
+  <version>1.0.7</version>
   <packaging>jar</packaging>
 
   <name>TalkingLive</name>
   <description>常驻后台的 Windows 语音输入工具：说唤醒词，讲的话实时出现在任意应用的光标处</description>
+
+  <!-- 自有代码按 Apache-2.0 发布；第三方组件与语音模型的声明见 THIRD-PARTY-NOTICES.md -->
+  <licenses>
+    <license>
+      <name>Apache License, Version 2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
 
   <properties>
     <maven.compiler.release>21</maven.compiler.release>
@@ -164,7 +173,7 @@
         <version>1.6.0</version>
         <configuration>
           <name>TalkingLive</name>
-          <appVersion>1.0.6</appVersion>
+          <appVersion>1.0.7</appVersion>
           <vendor>TalkingLive</vendor>
           <type>APP_IMAGE</type>
           <input>${project.build.directory}/app-input</input>
