@@ -1,9 +1,10 @@
 # tools/
 
-手工诊断与启动辅助。**全部不在产品运行路径上**，只在排查时用。
+手工诊断、启动辅助与工程脚本。**全部不在产品运行路径上**，只在排查或改版本时用。
 
 | 文件 | 作用 |
 |---|---|
+| `set-version.ps1` | **改版本号用它**（`AGENTS.md`「发布版本跟随提交序号」）：无参数 = 取 HEAD 的 `[N.n.m]` 加 1 并写进三处（README 顶部 / `pom.xml` 的 `<version>` 与 `<appVersion>`）；给一个号就用那个号；`-Check` 只核对（三处一致 + 等于 HEAD 首行，适合在 CI 里跑）；`-Tag` 核对通过后给 HEAD 打 `v<号>`。含中文，故存成 UTF-8 **BOM**（见文末两条坑） |
 | `get-model.cmd` | **第一次用之前**双击它：选小模型 / 大模型 → 自动下载（hf-mirror，失败回退官方）→ 解压到 `%LOCALAPPDATA%\TalkingLive\models\` → 校验并删掉 zip。也可脚本化：`get-model.cmd 1 --no-pause`（1=小模型、2=大模型） |
 | `verify-batch-bug.ps1` | 复现并证明「代理对跨批边界时 `batchByCodePoints` 死循环」—— 那个 bug 正是用户报告的「点不动任何东西」（死循环卡住 UI 线程）。想把前端点留证据时跑它 |
 | `ListMics.java` | 列出系统所有录音设备（排查「没有可用录音设备」/ 选错设备） |
