@@ -36,6 +36,15 @@ jobs:
       - name: 版本号守卫（三处一致 + 等于首行）
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\set-version.ps1 -Check
 
+      # 规格（specs/**）单独跑一遍：失败时一眼就能分清是"规格破了"还是"某个单测挂了"。
+      - name: 规格（已验收行为的固化基线）
+        run: .\mvnw.cmd -B test "-Dgroups=spec"
+
+      # 规格文件或解释规格的测试被改过、却没更新基线 → 红。
+      # 这一步是"改规格必然留下可见痕迹"的那道闸：CI 里红，diff 里也一定有 specs/SPEC.sha256 的变化。
+      - name: 规格基线未被悄悄改动
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\spec-freeze.ps1 -Check
+
       # 失败时也要有东西可看：测试报告与 doctor 报告都上传
       - name: 上传测试报告
         if: always()

@@ -9,3 +9,4 @@
 # 怎么拿到这份代码，批处理都是 CRLF"的唯一保证。demo\run.cmd 里就有 goto。
 *.cmd text eol=crlf
 *.bat text eol=crlf
+*.sha256 -text

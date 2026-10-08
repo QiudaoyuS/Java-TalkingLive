@@ -4,6 +4,7 @@
 
 | 文件 | 作用 |
 |---|---|
+| `spec-freeze.ps1` | **规格基线**（`specs/SPEC.sha256`）：无参数 = 重新冻结（改完规格必须跑，这一步必然出现在 `git diff` 里）；`-Check` = 只核对（CI 里跑，改了规格或 `SpecTest` 却没更新基线就红）。规格本身在 `specs/`（已验收行为的固化基线，规则见 `AGENTS.md`「规格不是普通文件」），只跑规格用 `mvnw test -Dgroups=spec` |
 | `set-version.ps1` | **改版本号用它**（`AGENTS.md`「发布版本跟随提交序号」）：无参数 = 取 HEAD 的 `[N.n.m]` 加 1 并写进三处（README 顶部 / `pom.xml` 的 `<version>` 与 `<appVersion>`）；给一个号就用那个号；`-Check` 只核对（三处一致 + 等于 HEAD 首行，适合在 CI 里跑）；`-Tag` 核对通过后给 HEAD 打 `v<号>`。含中文，故存成 UTF-8 **BOM**（见文末两条坑） |
 | `get-model.cmd` | **第一次用之前**双击它：选小模型 / 大模型 → 自动下载（hf-mirror，失败回退官方）→ 解压到 `%LOCALAPPDATA%\TalkingLive\models\` → 校验并删掉 zip。也可脚本化：`get-model.cmd 1 --no-pause`（1=小模型、2=大模型） |
 | `verify-batch-bug.ps1` | 复现并证明「代理对跨批边界时 `batchByCodePoints` 死循环」—— 那个 bug 正是用户报告的「点不动任何东西」（死循环卡住 UI 线程）。想把前端点留证据时跑它 |

@@ -83,6 +83,7 @@
 | 30 | **自动发送前由注入器复核前台**（`press(combo, expectedWindow)`；安全前提不再只留在调用方） | 见 `DECISIONS.md` A-4；端到端仍属 §9.3 手工清单 |
 | 31 | **诊断窗口「重新自检」在后台线程跑**，且按 `includeUi=false` 生成报告（不再冻窗、不再造第二颗球/抢鼠标） | `SelfTestUiGateTest` 守住 includeUi=false 那一半（EDT 那一半没有自动守卫，见其类注释） |
 | 32 | **jpackage 打包链路修好**：`-Pdist package` 产出 `target/dist/TalkingLive/TalkingLive.exe`（自带运行时、目标机器不需要 JDK） | `PackagingLayoutTest` 4 项守住布局（input 是暂存目录、主 jar 的暂存名与 `mainJar` 一致、依赖落在 `lib/`、暂存声明在 jpackage 之前）；端到端实测见 M5 那一行 |
+| 33 | **规格固化**：把"已验收的行为"写成 `specs/` 下的数据文件（`状态机/段落生命周期.txt` 16 条、`文本注入/字符到事件.txt` 9 条），由 `SpecTest` 读它们跑真实代码 | ① 可**单独跑**：`mvnw test -Dgroups=spec`（只跑规格）；② 防偷改：`specs/SPEC.sha256` + `tools\spec-freeze.ps1 -Check`（CI 里跑）—— 改规格或改 `SpecTest` 而不更新基线即红；③ **两道防线都验证过会红**：改文件 → 哈希核对 FAIL，改期望值 → 规格测试 1 项失败；规则见 `AGENTS.md`「规格不是普通文件」 |
 
 ### 3.2 已完成但**未在真实设备上验证**
 
@@ -208,3 +209,4 @@ java -jar target\talkinglive.jar
 | 0.7 | 本次（内存事故复盘 + 自启回退） | ① **§3.1 第 24 条改为"已移除"**（开机自启，D4 修订）+ 新增 24b「内存占用可见」；② 起因是用户实测"打游戏十分钟内多次因虚拟内存不足被强退"——四种配置的提交量实测并列在 `待处理问题` 4.9（大模型 4.3GB / 小模型 1.0–1.4GB）；③ 顺带修掉一个真 bug：**未安装大模型时会把小模型加载两遍**（并把预览那行日志说得相反） |
 | 0.8 | 本次（打包链路修复） | ① **M5 由"⚠️ 部分完成"改为"✅ 已完成"**：`-Pdist package` 一直是坏的（jpackage 的 input 指向 `target/lib`，而主 jar 在 `target/`，于是 jpackage 报「找不到 talkinglive.jar」——本轮修版本号时第一次真跑它才发现）；修法是先在 `dist` profile 里拼一个暂存目录 `target/app-input`（形状：jar 在根 + 依赖在 `lib/`，与清单的 `Class-Path` 一致）；② §3.1 新增第 32 条并配 `PackagingLayoutTest`（**验证过它真会红**：把 input 改回 `target/lib` 即失败）；③ 顺带修掉 `README.md` 自检一节里一句**与实现相反**的过时说明 —— 它写 `--doctor`「不是不碰鼠标」，而 D5 之后 `--doctor` 走的是 `includeUi=false`，会造悬浮球与移动鼠标的是 `--self-check` |
 | 0.9 | 本次（README 重构 + 取模型脚本） | ① **§3.2 的「怎么验证」列改成可执行步骤** —— 此前只写"见 `DESIGN.md` §9.3 清单第 N 条"，等于把"只能真人做"写成了"没人知道怎么做"：现在每项都给出**操作 + 判定目标 + 用哪个工具**（例如命中率 = 说 10 次记命中、静默 10 分钟记误唤醒），并写明"跑完一条就把该行挪进 §3.1"；② README 里那份**重复的验收表删掉了**（同一批条目只在本文写全，README 只留一行指向本节 —— 这正是本项目「只有一处写全，其余引用」的规矩，此前 README 抄了第二份）；③ 头部版本号从 **0.2 补齐到 0.9**（它又漂了一次：修订记录当时已经到 0.8） |
+| 1.0 | 本次（规格固化） | ① **§3.1 新增第 33 条**：把"已验收的行为"写成 `specs/` 下的数据（段落生命周期 16 条 + 注入分账 9 条），`SpecTest` 读它们去跑真实代码；② **能单独跑**：`mvnw test -Dgroups=spec`（只跑规格，负责人自己一条命令就能验证已验收功能）；③ **防偷改**：`specs/SPEC.sha256` + `tools\spec-freeze.ps1 -Check`（CI 里跑），两道防线都验证过**真会红**；④ 规则写进 `AGENTS.md`「规格不是普通文件」，并在 `DESIGN.md` §4.3 的「谁在守」表里占一行；⑤ 写规格时纠正了我自己的一处错误认识：`FOREGROUND_CHANGED` 只在**听写中**改注入判定，已在提交中就只记一条忽略 —— 规格里现在两条都钉着。 |

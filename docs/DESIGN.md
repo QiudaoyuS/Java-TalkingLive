@@ -240,6 +240,7 @@ Step 0（附录 B.2）只在**准确率**这一个维度上比较过 Vosk 与 wh
 | 配置必须显式校验（Vosk 对词表外的词是**静默忽略**的，见附录 C） | `AppConfig.validate()` 启动时强制 + `MicValidatorTest` / `VoskGrammarTest` | 构建失败 / 启动时拒绝 |
 | 日志不记转写内容 | `Logging.describe*` + `TextUtilsTest.LogSafe` | **只覆盖 `Logging` 本身**：「所有日志都过了它」没有机制，靠 review |
 | **出口必须诚实**：部分注入不得报成功 | `TextInjector.plannedEvents(text, backspaces)` 独立算基准，`WindowsTextInjector.inject()` 对账（实收不足即 `PARTIAL_WRITE`） | 构建失败（`TextInjectorLayoutTest.Accounting`）＋**运行期**：用户会看到"只写入了 X/Y 个键盘事件"的提示 |
+| **已验收的行为不得被悄悄改动**（规格固化） | `specs/**` 的数据 + `SpecTest`（单独跑：`mvnw test -Dgroups=spec`）+ `specs/SPEC.sha256` 与 `tools\spec-freeze.ps1 -Check`（CI 里跑） | 构建失败（改了期望值）＋ CI 失败（改了规格却忘了更新基线）。规程见 `AGENTS.md`「规格不是普通文件」 |
 
 > 「谁来喊」那一列**填不上就说明这条约束现在只是散文**。新增约束时要么同时给出机制
 > （一条源码扫描、一个断言、或一次结构性收敛），要么在表里如实留着空 —— 空着是待办，

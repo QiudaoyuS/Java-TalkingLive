@@ -1,0 +1,33 @@
+# 规格：段落生命周期（core.StateMachine）
+#
+# 意图：把「说 → 看 → 落字」的时序，以及三条硬承诺钉住：
+#   ① 取消（Esc）一个字都不注入；
+#   ② 切窗口不丢话 —— 照常提交，只是**不自动发送**（DESIGN.md §7 原规则太狠，实测后改过）；
+#   ③ 采集中断 / 提交超时**不会**把状态机永久卡住（0.9.4 修掉的两个"只能杀进程"死局）。
+# 来源：DESIGN.md §2.2 / §2.3 / §7；docs/IMPLEMENTATION-STATUS.md §3.1 第 21 / 30 条；
+#       docs/DECISIONS.md D2（出口诚实）与「A 批次」A-4。
+#
+# 语法（每行一个用例，用 | 分列；# 开头是注释，空行忽略）：
+#   用例名 | 事件序列 | 终态 | onSegmentStartRequested 次数 | onCommitReady 次数 | ctx.inject | 结束原因 | 被忽略事件数
+#   - 事件序列用 > 连接（名字取自 core.StateMachine.Event）
+#   - "-" 表示该列不做断言
+#
+# 改动规程：**改本文件 = 改规格**。必须走 [SPEC] 提交，并在 docs/DECISIONS.md 记一条 ——
+# 否则就是"为了让测试过而改期望值"，这份规格也就废了。
+
+正常一段（结束词收尾并注入） | WAKE_WORD>END_WORD>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | END_WORD | -
+静音超时收尾 | WAKE_WORD>SILENCE_TIMEOUT>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | SILENCE_TIMEOUT | -
+单段达到时长上限自动收尾 | WAKE_WORD>MAX_SEGMENT_REACHED>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | MAX_SEGMENT | -
+悬浮球左键：开始与手动结束 | TOGGLE>TOGGLE>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | MANUAL | -
+切窗口（听写中）：照常提交，但不自动发送 | WAKE_WORD>FOREGROUND_CHANGED>REFINE_DONE>INJECTED | IDLE | 1 | 1 | no | FOREGROUND_CHANGED | -
+切窗口（已在提交中）：被忽略，注入目标已锁定 | WAKE_WORD>END_WORD>FOREGROUND_CHANGED>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | END_WORD | 1
+Esc 取消：一个字都不注入 | WAKE_WORD>CANCEL | IDLE | 1 | 0 | - | - | -
+提交中按 Esc 也能取消 | WAKE_WORD>END_WORD>CANCEL | IDLE | 1 | 0 | - | - | -
+取消后迟到的精化结果被忽略 | WAKE_WORD>END_WORD>CANCEL>REFINE_DONE | IDLE | 1 | 0 | - | - | 1
+待唤醒时按 Esc 被忽略 | CANCEL | IDLE | 0 | 0 | - | - | 1
+重复唤醒被忽略（不重启段落） | WAKE_WORD>WAKE_WORD | LISTENING | 1 | 0 | - | - | 1
+提交中收到唤醒被忽略（避免把上一段注入进新段落） | WAKE_WORD>END_WORD>WAKE_WORD>REFINE_DONE>INJECTED | IDLE | 1 | 1 | yes | END_WORD | 1
+采集中断：本段取消并回到待唤醒（不卡在听写中） | WAKE_WORD>AUDIO_LOST | IDLE | 1 | 0 | - | - | -
+采集中断后可以重新说一遍 | WAKE_WORD>AUDIO_LOST>WAKE_WORD>END_WORD>REFINE_DONE>INJECTED | IDLE | 2 | 1 | yes | END_WORD | -
+提交超时：本段取消并回到待唤醒（不卡在提交中） | WAKE_WORD>END_WORD>COMMIT_TIMEOUT | IDLE | 1 | 0 | - | - | -
+暂停监听时唤醒被忽略 | PAUSE>WAKE_WORD | IDLE | 0 | 0 | - | - | 1
