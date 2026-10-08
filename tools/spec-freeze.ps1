@@ -24,18 +24,31 @@ $targets += Get-ChildItem (Join-Path $root 'specs') -Recurse -File |
     Where-Object { $_.Name -ne 'SPEC.sha256' }
 $targets += Get-Item (Join-Path $root 'src\test\java\com\talkinglive\SpecTest.java')
 
-$lines = @()
-foreach ($f in ($targets | Sort-Object FullName)) {
-    $rel = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
-    $hash = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
-    $lines += "$hash  $rel"
-}
-$new = ($lines -join "`n") + "`n"
-
 function Read-Normalized([string]$path) {
     # 行尾可能被 autocrlf 变成 CRLF，比对前统一成 LF（清单本身在 .gitattributes 里标了 -text）
     return ([System.IO.File]::ReadAllText($path)) -replace "`r`n", "`n"
 }
+
+function Get-NormalizedHash([string]$path) {
+    # ⚠️ 必须对**规范化后的内容**（CRLF → LF）算哈希，不能直接对字节算（Get-FileHash）：
+    # 否则同一份规格在本机（autocrlf=true，签出 CRLF）与 CI runner（LF）会得出不同哈希，
+    # 表现是"什么都没改却报规格被改过"—— 这个假红实测复现过。
+    $text = ([System.IO.File]::ReadAllText($path)) -replace "`r`n", "`n"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes($text)
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLower()
+    } finally {
+        $sha.Dispose()
+    }
+}
+
+$lines = @()
+foreach ($f in ($targets | Sort-Object FullName)) {
+    $rel = $f.FullName.Substring($root.Length + 1).Replace('\', '/')
+    $lines += "$(Get-NormalizedHash $f.FullName)  $rel"
+}
+$new = ($lines -join "`n") + "`n"
 
 if ($Check) {
     if (-not (Test-Path $manifest)) {
