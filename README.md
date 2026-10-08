@@ -16,7 +16,7 @@
 
 ---
 
-当前版本 **1.0.11** ｜ 完全本地、不联网
+当前版本 **1.1.0** ｜ 完全本地、不联网
 
 <a id="toc"></a>
 
@@ -64,9 +64,9 @@
 
 语音模型**不进版本库**（1.3GB 的二进制不适合放仓库），所以第一次用要先把它拿到手。
 `tools\get-model.cmd` 会问你要哪一个、然后下载 + 解压到正确位置
-（`%LOCALAPPDATA%\TalkingLive\models\`），装好**自动生效，不用改任何配置**。
+（`%LOCALAPPDATA%\TalkingLiveData\models\`），装好**自动生效，不用改任何配置**。
 
-不想用脚本也行：直接点下面的链接下载，再解压到 `%LOCALAPPDATA%\TalkingLive\models\`。
+不想用脚本也行：直接点下面的链接下载，再解压到 `%LOCALAPPDATA%\TalkingLiveData\models\`。
 
 | 模型 | 大小 | 国内镜像（点一下就开始下载） | 官方直链 |
 |---|---|---|---|
@@ -96,11 +96,11 @@
 
 ### 模型装在哪、怎么手动装
 
-模型不进版本库，统一放在 `%LOCALAPPDATA%\TalkingLive\models\`。
+模型不进版本库，统一放在 `%LOCALAPPDATA%\TalkingLiveData\models\`。
 （上面 [三步开始](#start) 给的是下载链接；这一节说清装好之后会发生什么、以及代价。）
 
 ```powershell
-$dir = "$env:LOCALAPPDATA\TalkingLive\models"
+$dir = "$env:LOCALAPPDATA\TalkingLiveData\models"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Invoke-WebRequest `
   -Uri 'https://hf-mirror.com/localstack/vosk-models/resolve/main/vosk-model-small-cn-0.22.zip' `
@@ -298,7 +298,7 @@ java -cp "target\talkinglive.jar;target\lib\*" com.talkinglive.SampleInjector
 会让中文乱码并**掩盖真正的失败信息** —— 这是 `DESIGN.md` §9.2 踩过的坑）：
 
 ```
-%LOCALAPPDATA%\TalkingLive\
+%LOCALAPPDATA%\TalkingLiveData\
 ├── config.json             # 配置（启动时强制校验）
 ├── logs\talkinglive.log    # 滚动日志，不记转写内容
 ├── models\                 # 语音模型：小模型解压后 65MB；大模型约 2GB

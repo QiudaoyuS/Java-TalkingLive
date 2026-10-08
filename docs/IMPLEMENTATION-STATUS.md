@@ -152,7 +152,7 @@ java -jar target\talkinglive.jar
 报告落盘位置（全部 UTF-8，控制台只输出 ASCII 摘要——Windows 控制台默认 GBK 会乱码）：
 
 ```
-%LOCALAPPDATA%\TalkingLive\
+%LOCALAPPDATA%\TalkingLiveData\
 ├── doctor-report.txt      # --doctor 的完整报告
 ├── selftest-report.txt    # --self-check 的完整报告
 ├── engine-bench.txt       # EngineBench 的完整报告

@@ -18,7 +18,7 @@
 
 小模型与大模型都**不在版本库里**，也**不由本仓库分发**：用户按 `README.md` 的
 [三步开始](../README.md) 从上游下载（Alpha Cephei 官方站或其镜像），程序只是去
-`%LOCALAPPDATA%\TalkingLive\models\` 找它。
+`%LOCALAPPDATA%\TalkingLiveData\models\` 找它。
 
 两个模型的许可都是 **Apache-2.0**（来源：[Vosk models 官方列表](https://alphacephei.com/vosk/models)）：
 

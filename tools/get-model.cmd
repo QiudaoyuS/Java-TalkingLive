@@ -10,7 +10,7 @@ rem  model -- the app runs and says "model unavailable" but cannot
 rem  transcribe. This script fetches one and unpacks it to the exact
 rem  place the app looks for it.
 rem
-rem  Target: %LOCALAPPDATA%\TalkingLive\models\
+rem  Target: %LOCALAPPDATA%\TalkingLiveData\models\
 rem    small model  -> vosk-model-small-cn-0.22\  (REQUIRED: wake word /
 rem                    end word detection only supports this one)
 rem    large model  -> model-cn\                  (optional: much better
@@ -31,7 +31,7 @@ rem  NOTE 3: the zip is written to %TEMP% and deleted after a successful
 rem  unpack -- otherwise the large model would leave 1.3GB behind.
 rem ============================================================
 
-set "MODELS=%LOCALAPPDATA%\TalkingLive\models"
+set "MODELS=%LOCALAPPDATA%\TalkingLiveData\models"
 set "ZIP=%TEMP%\talkinglive-model.zip"
 
 set "MIRROR_SMALL=https://hf-mirror.com/localstack/vosk-models/resolve/main/vosk-model-small-cn-0.22.zip"

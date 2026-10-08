@@ -365,7 +365,7 @@ talkinglive/
 ## 6. 性能与资源预算
 
 > 下表中标「实测」的项来自本机真实测量（`java -cp ... com.talkinglive.engine.EngineBench`，
-> 完整报告见 `%LOCALAPPDATA%\TalkingLive\engine-bench.txt` 与 `docs/ENGINE-EXPERIMENT.md` §3）；
+> 完整报告见 `%LOCALAPPDATA%\TalkingLiveData\engine-bench.txt` 与 `docs/ENGINE-EXPERIMENT.md` §3）；
 > 标「未测」的项需要**麦克风与真人说话**，属 §9.3 的手工集成验证。
 
 | 指标 | 目标 | 实测 | 说明 |
@@ -486,7 +486,7 @@ mvnw -Pdist package              # 产出 app image（target/dist/TalkingLive/Ta
 
 ### 10.3 模型文件
 
-Vosk 小模型与精化模型（SenseVoice）均**不进版本库**，放置于 `%LOCALAPPDATA%\TalkingLive\models\`。
+Vosk 小模型与精化模型（SenseVoice）均**不进版本库**，放置于 `%LOCALAPPDATA%\TalkingLiveData\models\`。
 获取方式见附录 D。
 
 ---
@@ -684,7 +684,7 @@ Step 0 的验证脚本目前位于 `%TEMP%\vosk-verify\`（`probe_vocab.py` / `p
 模型文件较大，**不进版本库**，统一放在：
 
 ```
-%LOCALAPPDATA%\TalkingLive\models\
+%LOCALAPPDATA%\TalkingLiveData\models\
 ├── vosk-model-small-cn-0.22\      # 唤醒词/结束词检测 + 实时预览（约 42MB）
 └── sense-voice\                    # 转写精化（SenseVoice，见附录 D.2）
 ```
@@ -725,7 +725,7 @@ https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07
 https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt
 ```
 
-放置位置：`%LOCALAPPDATA%\TalkingLive\models\sense-voice\`（`AppPaths.refinerModelDir()`）。
+放置位置：`%LOCALAPPDATA%\TalkingLiveData\models\sense-voice\`（`AppPaths.refinerModelDir()`）。
 
 > ⚠️ **为什么现在还装不起来**：模型能下载，但 **sherpa-onnx 没有 Maven Central 的
 > Java 绑定，也没有 Windows x64 预编译原生产物**。上游只发 Android/iOS/Python/C++ 产物，

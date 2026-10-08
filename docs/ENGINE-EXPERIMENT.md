@@ -45,7 +45,7 @@
 **环境**：Windows 11 家庭版中文版；Intel Core i7-12650H（16 逻辑核）；JDK 21.0.12.1；
 模型 `vosk-model-small-cn-0.22`（解压后 65 MB）；`libvosk.dll` 25 MB。
 **工具**：`java -cp ... com.talkinglive.engine.EngineBench`（本仓库自带，可复跑）。
-**完整原始报告**：`%LOCALAPPDATA%\TalkingLive\engine-bench.txt`。
+**完整原始报告**：`%LOCALAPPDATA%\TalkingLiveData\engine-bench.txt`。
 
 | 指标 | 实测值 | 对应 `DESIGN.md` §6 目标 | 判读 |
 |---|---|---|---|
@@ -134,7 +134,7 @@ gen=3  预览『现在一麦克风测试现在进行卖空测试』精化『…�
 
 `AppPaths.asrModelDir()` 按「显式配置 > 自动探测大模型 > 小模型」决定**识别用模型**，
 而**实时预览、落字、段落精化三者共用它**。`AppPaths.detectLargeModelDir()` 会在
-`%LOCALAPPDATA%\TalkingLive\models\` 下自动探测 `vosk-model-cn-0.22` 或 `model-cn`
+`%LOCALAPPDATA%\TalkingLiveData\models\` 下自动探测 `vosk-model-cn-0.22` 或 `model-cn`
 （两个名字都认：官方解压名与我们下载脚本的解压名）。**只要目录在就自动用**。
 
 | 职责 | 模型 | 原因 |
@@ -210,7 +210,7 @@ $env:TALKINGLIVE_ASR_MODEL = "D:\some\other\model"
 | `hf-mirror.com/LiangJingyi/vosk-model-cn-0.22`（`model-cn.zip`） | **13 MB/s** | 1.3GB **89 秒**下完 |
 
 ```powershell
-$dir = "$env:LOCALAPPDATA\TalkingLive\models"
+$dir = "$env:LOCALAPPDATA\TalkingLiveData\models"
 $zip = Join-Path $dir 'model-cn.zip'
 Invoke-WebRequest -UseBasicParsing -Uri `
   'https://hf-mirror.com/LiangJingyi/vosk-model-cn-0.22/resolve/main/model-cn.zip' -OutFile $zip
@@ -270,7 +270,7 @@ https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07
 https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt
 ```
 
-放置位置：`%LOCALAPPDATA%\TalkingLive\models\sense-voice\`
+放置位置：`%LOCALAPPDATA%\TalkingLiveData\models\sense-voice\`
 
 ### 当前实际使用：Vosk 小模型
 

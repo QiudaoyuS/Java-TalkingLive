@@ -26,7 +26,19 @@ public final class AppPaths {
 
     private AppPaths() {}
 
-    /** 根目录：{@code -Dtalkinglive.home=...} > {@code %LOCALAPPDATA%\TalkingLive} > {@code ~/.talkinglive}。 */
+    /**
+     * 根目录：{@code -Dtalkinglive.home=...} > {@code %LOCALAPPDATA%\TalkingLiveData} > {@code ~/.talkinglive}。
+     *
+     * <p><b>为什么数据目录叫 {@code TalkingLiveData} 而不是 {@code TalkingLive}</b>：
+     * jpackage 的 Windows 安装包**按用户安装时默认就装在 {@code %LOCALAPPDATA%\TalkingLive}**，
+     * 而卸载会把那个目录**整棵删掉** —— 实测过一次：卸载把 models（3.4GB）、config.json、
+     * logs 一起端走了。程序与数据同目录就等于"卸载即丢数据"，所以两者必须分家：
+     * 程序在 {@code %LOCALAPPDATA%\TalkingLive}，数据在 {@code %LOCALAPPDATA%\TalkingLiveData}。
+     * 理由与复核条件见 {@code docs/DECISIONS.md} 的 **D11 修订**。
+     *
+     * <p>可用系统属性 {@code talkinglive.home} 覆盖根目录——测试与「换个目录跑一遍」
+     * 都靠它（见 {@link #HOME_PROPERTY}）。
+     */
     public static Path home() {
         String override = System.getProperty(HOME_PROPERTY);
         if (override != null && !override.isBlank()) {
@@ -34,7 +46,7 @@ public final class AppPaths {
         }
         String local = System.getenv("LOCALAPPDATA");
         if (local != null && !local.isBlank()) {
-            return Paths.get(local, "TalkingLive").toAbsolutePath().normalize();
+            return Paths.get(local, "TalkingLiveData").toAbsolutePath().normalize();
         }
         return Paths.get(System.getProperty("user.home"), ".talkinglive").toAbsolutePath().normalize();
     }

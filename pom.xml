@@ -7,7 +7,7 @@
 
   <groupId>com.talkinglive</groupId>
   <artifactId>talkinglive</artifactId>
-  <version>1.0.11</version>
+  <version>1.1.0</version>
   <packaging>jar</packaging>
 
   <name>TalkingLive</name>
@@ -173,7 +173,7 @@
         <version>1.6.0</version>
         <configuration>
           <name>TalkingLive</name>
-          <appVersion>1.0.11</appVersion>
+          <appVersion>1.1.0</appVersion>
           <vendor>TalkingLive</vendor>
           <type>APP_IMAGE</type>
           <input>${project.build.directory}/app-input</input>
@@ -240,6 +240,94 @@
           <plugin>
             <groupId>org.panteleyev</groupId>
             <artifactId>jpackage-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>jpackage</id>
+                <phase>package</phase>
+                <goals><goal>jpackage</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!--
+      installer：产出**向导式安装包**（`mvnw -Pinstaller package` → target/dist/TalkingLive-<版本>.exe）。
+
+      为什么是 EXE 而不是 MSI：MSI 面向企业批量部署（GPO / 静默安装），而这里的场景是
+      "陌生人从 GitHub 下载下来，双击一个文件、一路下一步"。EXE 是 jpackage 的向导式安装器。
+
+      为什么 winPerUserInstall：装进用户目录 → **不弹 UAC**。对一个个人工具来说，
+      要求管理员权限是纯粹的劝退（也让"装不上"变成一个说不清的问题）。
+
+      为什么 winUpgradeUuid：jpackage 的 Windows 安装包靠它识别"这是同一个产品的另一个版本"，
+      覆盖安装/升级替换都要它，且**必须固定**（每次生成一个新的会让升级变成并存两份）。
+
+      前提：jpackage 生成 MSI/EXE 需要 **WiX 3.x**（candle.exe / light.exe 在 PATH 上）。
+      它不支持 WiX 4/5 —— 实测报「找不到 WiX 工具 (light.exe, candle.exe)」。
+      本项目把 WiX 3.14 解压在 C:\Tools\wix314 并加进用户 PATH。
+
+      ⚠️ 暂存步骤在这里**重复了一份**：Maven 的 profile 之间不会继承，而 jpackage 需要
+      target/app-input 那个形状（jar 在根 + 依赖在 lib/）。改 dist 的那份时记得同步这里。
+    -->
+    <profile>
+      <id>installer</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-resources-plugin</artifactId>
+            <version>3.4.0</version>
+            <executions>
+              <execution>
+                <id>stage-main-jar</id>
+                <phase>package</phase>
+                <goals><goal>copy-resources</goal></goals>
+                <configuration>
+                  <outputDirectory>${project.build.directory}/app-input</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${project.build.directory}</directory>
+                      <includes>
+                        <include>${project.build.finalName}.jar</include>
+                      </includes>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>stage-lib</id>
+                <phase>package</phase>
+                <goals><goal>copy-resources</goal></goals>
+                <configuration>
+                  <outputDirectory>${project.build.directory}/app-input/lib</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${project.build.directory}/lib</directory>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+
+          <plugin>
+            <groupId>org.panteleyev</groupId>
+            <artifactId>jpackage-maven-plugin</artifactId>
+            <configuration>
+              <type>EXE</type>
+              <!-- 开始菜单 + 桌面快捷方式（用户能自己取消：winShortcutPrompt 没开，装完就有） -->
+              <winMenu>true</winMenu>
+              <winMenuGroup>TalkingLive</winMenuGroup>
+              <winShortcut>true</winShortcut>
+              <!-- 按用户安装 → 不弹 UAC；同时让"装到哪"可选 -->
+              <winPerUserInstall>true</winPerUserInstall>
+              <winDirChooser>true</winDirChooser>
+              <!-- 安装向导里的许可页：直接用仓库根那份 Apache-2.0 全文 -->
+              <licenseFile>${project.basedir}/LICENSE</licenseFile>
+              <winUpgradeUuid>27c958ff-215c-4c1c-b286-dbd0b1060a06</winUpgradeUuid>
+            </configuration>
             <executions>
               <execution>
                 <id>jpackage</id>

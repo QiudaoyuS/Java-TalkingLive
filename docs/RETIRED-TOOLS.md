@@ -41,7 +41,7 @@
 **当初解决什么**：「点不动」现场只存在几秒（重启就没了），必须能当场取证。
 它一次性抓下：① 可能遮屏的大窗口/置顶窗口（特别是 DT 覆盖层）；
 ② **卡住的修饰键**（Ctrl/Alt/Shift/Win 卡住是"看着没问题但点不动"的经典原因）；
-③ 前台窗口；④ 光标下的窗口。报告写到 `%LOCALAPPDATA%\TalkingLive\block-snapshot.txt`。
+③ 前台窗口；④ 光标下的窗口。报告写到 `%LOCALAPPDATA%\TalkingLiveData\block-snapshot.txt`。
 
 **结论**：没抓到异常现场，问题未复现（详见 `IMPLEMENTATION-STATUS.md`）。
 **注意"卡住的修饰键"这一项排查价值很高**，值得记住：那是"什么都没坏但什么都点不动"的头号原因。
