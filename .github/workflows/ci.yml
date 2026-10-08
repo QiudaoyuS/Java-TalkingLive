@@ -1,0 +1,46 @@
+# CI：只做"每次提交都能自证"的那几件事。
+#
+# 为什么是 windows-latest（不是 ubuntu）：
+#   这个程序用 JNA 调 Win32（SendInput / 窗口样式 / 前台窗口 / GetAsyncKeyState），
+#   结构化自检里还用 java.awt.Robot 驱动真实鼠标；跑到 Linux 上要么编不过、要么测不了。
+#   另外 jpackage 打 Windows app image 也必须在 Windows 上。
+#
+# 这里**刻意不装 WiX、不跑 -Pdist**：打包属于发布动作，另外 runner 上是否预装 WiX 3.x
+#   需要实测，先不当成每次提交都要过的关卡（想加的话见 docs/待处理问题.md 的 M5 相关条目）。
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      # 450+ 项单元测试（含 ArchitectureTest 的分层扫描、PackagingLayoutTest、
+      # VersionConsistencyTest、ThirdPartyNoticesTest 等"有人喊"的约束）
+      - name: mvnw test
+        run: .\mvnw.cmd -B test
+
+      # AGENTS.md「发布版本跟随提交序号」的另一半：三处版本号要一致，
+      # 而且必须等于本次提交首行的 [N.n.m]（这一半只能在提交之后查，所以放在这里）。
+      - name: 版本号守卫（三处一致 + 等于首行）
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools\set-version.ps1 -Check
+
+      # 失败时也要有东西可看：测试报告与 doctor 报告都上传
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          if-no-files-found: ignore
