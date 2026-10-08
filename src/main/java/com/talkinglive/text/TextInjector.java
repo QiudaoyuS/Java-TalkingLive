@@ -43,7 +43,7 @@ public interface TextInjector {
      * §7「任何失败都必须可见」。UIPI 静默丢弃是最需要说清楚的一种：
      * 目标程序以管理员运行时，注入会被系统丢掉而不报错。
      *
-     * <p><b>{@code eventsExpected} 存在的理由（PENDING 1.1「出口诚实」）</b>：
+     * <p><b>{@code eventsExpected} 存在的理由（待处理问题 1.1「出口诚实」）</b>：
      * {@code SendInput} 会如实报告"写了多少个事件"，而此前**没有任何地方核对它是否等于
      * 我们应该写的数量** —— 于是"只写进去一部分"被当成成功：用户丢字，程序报告成功，
      * 诊断页里一条记录都没有；而会话账本以为整段都落地了，下一次退格会按**不存在的字数**退。
@@ -59,7 +59,7 @@ public interface TextInjector {
             /** SendInput 一个事件都没写进去。 */
             SEND_FAILED,
             /**
-             * 只写入了一部分事件：文字**可能缺字**（PENDING 1.1）。
+             * 只写入了一部分事件：文字**可能缺字**（待处理问题 1.1）。
              *
              * <p>与 {@link #SEND_FAILED} 的区别：后者是"一个字都没进去"，
              * 前者是"进去了一部分" —— 后者本来就会被发现，前者此前会被当成成功。
@@ -67,7 +67,7 @@ public interface TextInjector {
             PARTIAL_WRITE,
             /**
              * 注入前检测到修饰键（Ctrl/Alt/Shift/Win）正被按住，为避免把文字打成快捷键而中止
-             * （{@code PENDING-ISSUES} P1.4）。
+             * （{@code 待处理问题} P1.4）。
              *
              * <p>为什么不硬发：按住 Ctrl 时 {@code KEYEVENTF_UNICODE} 事件会被目标按
              * "修饰键 + 虚拟键"解释 —— 文字变成快捷键，而 {@code SendInput} 会如实报告成功，
@@ -138,7 +138,7 @@ public interface TextInjector {
     Result press(KeyCombo combo);
 
     /**
-     * 模拟一次按键，并**要求目标窗口仍是前台**（{@code PENDING-ISSUES} P1.3）。
+     * 模拟一次按键，并**要求目标窗口仍是前台**（{@code 待处理问题} P1.3）。
      *
      * <p>为什么要把这个前提搬进注入器：安全前提放在调用方时，任何**新的**调用点都会绕过它 ——
      * 而一个回车落在聊天工具里是**不可挽回**的（消息会被直接发出去）。

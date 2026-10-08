@@ -236,7 +236,7 @@ class TextInjectorLayoutTest {
     }
 
     @Nested
-    @DisplayName("事件数核对：部分写入必须被当成失败（PENDING 1.1「出口诚实」）")
+    @DisplayName("事件数核对：部分写入必须被当成失败（待处理问题 1.1「出口诚实」）")
     class Accounting {
 
         @Test
@@ -287,7 +287,7 @@ class TextInjectorLayoutTest {
     }
 
     /**
-     * 修饰键闸门（{@code PENDING-ISSUES} P1.4）。
+     * 修饰键闸门（{@code 待处理问题} P1.4）。
      *
      * <p>这里只测**可单测的那一半**：把按键状态拼成人话的纯函数。原生查询
      * （{@code GetAsyncKeyState}）在无桌面环境下不可靠，且"按住 Ctrl 时注入会变快捷键"

@@ -67,7 +67,7 @@ public class FloatingBall extends JWindow {
          * 菜单 {@link MenuAction#RESET_POSITION}。
          *
          * <p>存在的理由：球是**唯一入口**，而它可能被全屏程序遮住、被拖到屏幕边缘之外、
-         * 或被贴边收起后找不着 —— 那时用户只剩"杀进程"这一条路（{@code PENDING-ISSUES} P2.3）。
+         * 或被贴边收起后找不着 —— 那时用户只剩"杀进程"这一条路（{@code 待处理问题} P2.3）。
          */
         void onResetPosition();
 
@@ -709,7 +709,7 @@ public class FloatingBall extends JWindow {
     /**
      * 把球移回屏幕中央，并解除贴边。
      *
-     * <p>给"找不到球"兜底（{@code PENDING-ISSUES} P2.3）：球是唯一入口，被全屏程序遮住、
+     * <p>给"找不到球"兜底（{@code 待处理问题} P2.3）：球是唯一入口，被全屏程序遮住、
      * 被拖到可见区外、或贴边收起后忘了怎么找回来时，用户此前只能杀进程 ——
      * 而单实例锁还会在重启时告诉他"已经在运行了"。
      *

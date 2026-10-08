@@ -182,7 +182,7 @@ public final class WindowsTextInjector implements TextInjector {
             }
         }
 
-        // ★ 修饰键闸门（PENDING 1.4）：按住 Ctrl/Alt/Shift/Win 时，Unicode 事件会被目标按
+        // ★ 修饰键闸门（待处理问题 1.4）：按住 Ctrl/Alt/Shift/Win 时，Unicode 事件会被目标按
         //   "修饰键 + 虚拟键"解释 —— 文字变成快捷键（Ctrl+W 之类还有破坏性），
         //   而 SendInput 会如实报告"写入成功"，所以事后无法分辨、重试也救不了。
         //   先给用户一小会儿松手；仍按着就中止，并说清为什么（绝不自己补发 keyup：
@@ -203,7 +203,7 @@ public final class WindowsTextInjector implements TextInjector {
             }
             events += n;
         }
-        // ★ 控制字符必须在**注入前**去掉（PENDING 1.7）：KEYEVENTF_UNICODE 会把换行/制表
+        // ★ 控制字符必须在**注入前**去掉（待处理问题 1.7）：KEYEVENTF_UNICODE 会把换行/制表
         //   当按键送进目标程序，而在聊天工具里一个换行就等于"把没写完的消息发出去"。
         //   文本层刻意保留换行（可能是有意的分段），所以这道防线只能在出口。
         String requested = text == null ? "" : text;
@@ -358,7 +358,7 @@ public final class WindowsTextInjector implements TextInjector {
     }
 
     /**
-     * 自动发送前复核前台窗口（{@code PENDING-ISSUES} P1.3）。
+     * 自动发送前复核前台窗口（{@code 待处理问题} P1.3）。
      *
      * <p>把安全前提搬进注入器，而不是留在调用方：调用方那边确实已经判过一次
      * （{@code StateMachine.autoSendAllowed}），但**任何新的调用点都会绕过它** ——

@@ -638,7 +638,7 @@ class TextUtilsTest {
     }
 
     /**
-     * 注入前的控制字符过滤（{@code PENDING-ISSUES} P1.7）。
+     * 注入前的控制字符过滤（{@code 待处理问题} P1.7）。
      *
      * <p>为什么它在文本层做成一个纯函数：{@code KEYEVENTF_UNICODE} 会把换行/制表**当按键**
      * 送进目标程序，在聊天工具里一个换行就等于"把没写完的消息发出去"。

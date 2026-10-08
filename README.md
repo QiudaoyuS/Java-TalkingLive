@@ -16,7 +16,7 @@
 
 ---
 
-当前版本 **1.0.5** ｜ 完全本地、不联网
+当前版本 **1.0.6** ｜ 完全本地、不联网
 
 <a id="toc"></a>
 
@@ -403,8 +403,8 @@ com.talkinglive
 | 文档 | 作用 |
 |---|---|
 | `docs/IMPLEMENTATION-STATUS.md` | **现在能干什么、不能干什么**（先看这个） |
-| `docs/DECISIONS.md` | **已经拍板的决策**：结论 / 理由 / 代价 / 复核条件（未定的在 PENDING-ISSUES） |
-| `docs/PENDING-ISSUES.md` | **已知但尚未修的问题**：按优先级降序，每条给位置 / 后果 / 修法 / 成本 |
+| `docs/DECISIONS.md` | **已经拍板的决策**：结论 / 理由 / 代价 / 复核条件（未定的在 `docs/待处理问题.md`） |
+| `docs/待处理问题.md` | **已知但尚未修的问题**：按优先级降序，每条给位置 / 后果 / 修法 / 成本 |
 | `docs/DESIGN.md` | 产品设计（要做什么），含交互清单、异常与降级、手工验收清单 |
 | `docs/TECH-PLAN.md` | 技术方案（用什么实现；与设计冲突时以它为准） |
 | `docs/ENGINE-EXPERIMENT.md` | 精化引擎落地报告：实测数据、SenseVoice 不可直接依赖的确认、未测项 |

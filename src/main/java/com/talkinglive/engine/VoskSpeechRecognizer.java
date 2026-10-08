@@ -89,7 +89,7 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
             // ★ 这条兜底长期掩盖了一个真 bug：partial 结果被用 "text" 键解析（它实际是
             //   "partial" 键），于是**整段说话期间预览一个字都不出**，只有在端点或这里
             //   才一次性出现全文。当时的注释把它写成"引擎的脾气"，还据此加了兜底 ——
-            //   症状被盖住，根因没被找到（见 VoskModel.partialResult 的注释与 PENDING 的 P0）。
+            //   症状被盖住，根因没被找到（见 VoskModel.partialResult 的注释与待处理问题的 P0）。
             //   键名现在已改对；这条兜底**保留**：它守的是另一件事（段末定稿），
             //   去掉它会丢掉"端点没命中但收尾有字"的段落。
             out = TextUtils.collapseWhitespace(tail);

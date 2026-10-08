@@ -133,7 +133,7 @@ public final class TextUtils {
     /**
      * 去掉**控制字符**（{@code \n} / {@code \t} / {@code \r} 及其它 C0/C1）。
      *
-     * <p>为什么必须在**注入前**做（{@code PENDING-ISSUES} P1.7）：
+     * <p>为什么必须在**注入前**做（{@code 待处理问题} P1.7）：
      * {@code KEYEVENTF_UNICODE} 会把识别结果里的换行/制表**当按键**送进目标程序 ——
      * 在聊天工具里，一个换行就等于"把还没写完的消息发出去"。
      *

@@ -9,7 +9,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 /**
- * 悬浮球「点击 vs 拖动」的判定（{@code PENDING-ISSUES} P2.1 的回归测试）。
+ * 悬浮球「点击 vs 拖动」的判定（{@code 待处理问题} P2.1 的回归测试）。
  *
  * <p>背景：这个判定曾经用**组件坐标**比较按下点与松开点，而贴边收起状态下按下时
  * 会先把球滑出来 —— 窗口在静止的光标下平移约 48px，于是同一个屏幕位置对应的组件坐标

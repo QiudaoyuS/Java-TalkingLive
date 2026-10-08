@@ -278,7 +278,7 @@ public final class VoskModel implements AutoCloseable {
          * 后果是整段说话期间预览浮窗一个字都不出，只在端点命中或段末收尾时**一次性出现全文**
          * （用户看到的正是"最后几秒才整体出现"）。连带失效的还有两级文字样式、
          * "引擎回头改字"的可观测性，以及 `DESIGN.md` §2.2 第 4 步那个主交互。
-         * 详见 {@code docs/DECISIONS.md} 与 {@code PENDING-ISSUES.md} 的 P0。
+         * 详见 {@code docs/DECISIONS.md} 与 {@code 待处理问题.md} 的 P0。
          */
         public String partialResult() {
             return closed ? "" : partialOf(VoskNative.get().vosk_recognizer_partial_result(handle));

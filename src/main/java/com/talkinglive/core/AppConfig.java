@@ -157,7 +157,7 @@ public final class AppConfig {
      * <p><b>下限为什么不是 0</b>：0 曾经是合法值，而它是**已知的丢字值** —— 灌得太快时
      * 自绘输入框会主动丢掉后面的 {@code WM_CHAR}，症状是"输入框里只出现第一个字"，
      * 而 {@code SendInput} 会如实报告"全部写入成功"。一个已知会出错的取值不该留在可行域里
-     * （{@code PENDING-ISSUES} P1.6）。老配置里残留的 0 会在读入时被抬到下限并记一条警告，
+     * （{@code 待处理问题} P1.6）。老配置里残留的 0 会在读入时被抬到下限并记一条警告，
      * 而不是让程序起不来。
      */
     private int charGapMillis = DEFAULT_CHAR_GAP_MILLIS;
@@ -481,7 +481,7 @@ public final class AppConfig {
         c.maxSegmentSeconds = JsonCodec.intVal(m, "maxSegmentSeconds", DEFAULT_MAX_SEGMENT_SECONDS);
         // 注入间隔：老配置里可能有 0（它曾经是合法值，而灌太快会让自绘输入框丢字）。
         // 这里**抬到下限并记警告**，而不是让程序起不来 —— "非法配置=起不来"本身
-        // 就是 PENDING 5.9 记着的坑，而这一条纯粹是历史遗留值的迁移。
+        // 就是待处理问题 5.9 记着的坑，而这一条纯粹是历史遗留值的迁移。
         int gap = JsonCodec.intVal(m, "charGapMillis", DEFAULT_CHAR_GAP_MILLIS);
         if (gap < MIN_CHAR_GAP_MILLIS) {
             log.warn("配置里的 charGapMillis={} 低于下限 {}ms（0 会让微信这类自绘输入框丢字），"
