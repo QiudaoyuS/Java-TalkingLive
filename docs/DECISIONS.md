@@ -232,6 +232,47 @@
 
 ---
 
+## D13｜安装包不给用户选目录（固定 `%LOCALAPPDATA%\TalkingLive`）+ 日志路径只有一个来源（2026-10-19，实测触发）
+
+- **触发**：2026-10-19 在本机把安装包**真装了四轮**（默认位置 / 自选 `D:\Program\demoProgram` /
+  `D:\Program\TalkingLiveTest` / `D:\Program\TLTest3`），装与卸各试了"设置→应用"和"管理员命令行"
+  两条路。结论来自这四轮，不是推理。
+- **结论一：`winDirChooser` 从 `true` 改成 `false`** —— 安装位置固定为 jpackage 按用户安装的默认值
+  `%LOCALAPPDATA%\TalkingLive`，向导里不再出现"选择安装目录"这一页。
+- **理由一（更严重）：卸载会递归删除整个安装目录，包括用户自己的文件。**
+  jpackage 生成的 WiX 源里有这一句（`bundle.wxf` 第 2967 行，属性值 = `[INSTALLDIR]`）：
+  `<util:RemoveFolderEx On="uninstall" Property="RM_RF..."/>` —— 那是 WiX Util 扩展的**递归删除**，
+  不是 MSI 那个"只删空目录"的 `RemoveFolder`。实测：往安装目录放一个 `keep.txt` 再卸载，
+  **`keep.txt` 和目录一起消失**。也就是说"允许用户自选目录"等于提供一个能一键删掉
+  `D:\Program` 下全部资料的按钮（那台机器上它旁边就是 `DeepSeekProgram`、`git`、`Mysql`）。
+- **理由二：装到非系统盘时，非提权卸载必然失败。** 同一份 1.1.2 安装包：
+  - 装到 `D:\Program\TLTest3`，从「设置 → 应用」卸载 → 弹窗
+    `Could not set file security for file 'D:\Config.Msi\25c97b9.rbf'. Error: 5`，卸载挂住、点 OK 又弹；
+  - 同一台机器、同一份安装，用**管理员** `msiexec /x {A2F61103-...} /qb /l*v` 卸载 →
+    MSI 日志末尾 `Product: TalkingLive -- Removal completed successfully`、
+    `MainEngineThread is returning 0`，一次通过；
+  - 装到默认位置（`%LOCALAPPDATA%`，位于用户配置内），从「设置 → 应用」卸载（非提权）→ 干净通过。
+  - 排除过的假设：`D:\Config.Msi` 的 ACL 与 `C:\Config.Msi` **完全一样**（都是 `SYSTEM` +
+    `Administrators`），而且普通用户能在 `D:\` 根建文件并改 ACL —— 所以不是"那块盘权限坏了"，
+    是"非提权事务去碰了只属于 SYSTEM/管理员的目录"。
+- **结论二：日志根目录只由 `AppPaths.home()` 决定**（新增 `com.talkinglive.core.LogHomePropertyDefiner`，
+  由 `logback.xml` 的 `<define>` 调用），不再写死路径；测试期用
+  `-Dtalkinglive.home=target/test-home` 重定向，`mvnw test` 不再写用户真实日志。
+- **理由（实测三条，都是写死路径造成的）**：① 日志落在 `%LOCALAPPDATA%\TalkingLive\logs`，
+  而程序自己报告 `home=...\TalkingLiveData` —— 数据目录下的 `logs` 一直是空壳；
+  ② `%LOCALAPPDATA%\TalkingLive` 正是默认安装目录，卸载递归删它 → **日志陪葬**（实测 C 盘那次
+  卸载把整目录删了，含 1.7MB 日志）；③ 跑一次 `mvnw test` 把用户真实日志从 90KB 写成 1.7MB。
+- **代价**：用户不能自定义安装位置。安装体积约 178MB（在 C 盘）；2GB 的模型本来就在
+  `%LOCALAPPDATA%\TalkingLiveData`，不受影响。想装到别的盘的用户没有出口 —— 这是刻意的取舍：
+  宁可少一个选项，也不留一个能删掉用户资料的按钮。
+- **复核条件**：将来若要恢复"自选安装目录"，**必须同时**做到：① 安装目录由我们决定层级
+  （应用落在所选目录的下一层子目录里），使 `RemoveFolderEx` 的递归删除范围不覆盖用户文件；
+  ② 卸载能在**非提权**下完成（否则"设置→应用"这条路必然失败）；③ 重做一次
+  "装到非系统盘 → 设置→应用卸载 → 看是否弹 Error 5 / 用户文件是否还在"。
+  `PackagingLayoutTest.installerDoesNotOfferDirectoryChoice` 会挡住"顺手把 `winDirChooser` 打开"。
+
+---
+
 ## A 批次｜"唯一出口 / 入口"六项缺陷修复里的四个行为决定（2026-09-19）
 
 > 六条缺陷本身是 bug 修复（不需要拍板），但其中**四处改变了行为**，所以记在这里。

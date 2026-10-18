@@ -30,15 +30,23 @@ class AppPathsTest {
     void dataRootIsNotTheInstallDirectory() {
         String local = System.getenv("LOCALAPPDATA");
         assumeTrue(local != null && !local.isBlank(), "没有 LOCALAPPDATA（非 Windows 环境）时跳过");
-        assumeTrue(System.getProperty(AppPaths.HOME_PROPERTY) == null,
-                "本用例只断言**默认**布局；根目录被测试覆盖时不适用");
 
-        Path home = AppPaths.home();
-        Path installDir = Paths.get(local, "TalkingLive").toAbsolutePath().normalize();
-        assertNotEquals(installDir, home,
-                "数据目录等于安装目录 = 卸载时连数据一起删（实测过一次，3.4GB 模型没了）");
-        assertEquals("TalkingLiveData", home.getFileName().toString(),
-                "数据根目录应当是 %LOCALAPPDATA%\\TalkingLiveData —— 改名字前先看 AppPaths.home() 的注释");
+        // 本用例断言的是**默认**布局，而测试期的 argLine 会把根目录重定向到 target/test-home
+        // （否则 mvnw test 会往用户真实日志里写）。所以这里临时清掉再恢复。
+        String saved = System.getProperty(AppPaths.HOME_PROPERTY);
+        System.clearProperty(AppPaths.HOME_PROPERTY);
+        try {
+            Path home = AppPaths.home();
+            Path installDir = Paths.get(local, "TalkingLive").toAbsolutePath().normalize();
+            assertNotEquals(installDir, home,
+                    "数据目录等于安装目录 = 卸载时连数据一起删（实测过一次，3.4GB 模型没了）");
+            assertEquals("TalkingLiveData", home.getFileName().toString(),
+                    "数据根目录应当是 %LOCALAPPDATA%\\TalkingLiveData —— 改名字前先看 AppPaths.home() 的注释");
+        } finally {
+            if (saved != null) {
+                System.setProperty(AppPaths.HOME_PROPERTY, saved);
+            }
+        }
     }
 
     @Test

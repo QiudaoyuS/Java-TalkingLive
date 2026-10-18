@@ -16,7 +16,7 @@
 
 ---
 
-当前版本 **1.1.2** ｜ 完全本地、不联网
+当前版本 **1.1.3** ｜ 完全本地、不联网
 
 <a id="toc"></a>
 
@@ -39,8 +39,13 @@
 
 **前提**：Windows + **JDK 21**（`run.cmd` 会自己去找它；只装了 JDK 8 会直接失败并说明原因）——使用前请安装模型。
 
-> 用 jpackage 打出来的 `TalkingLive.exe` 自带运行时、**不需要 JDK**。目前还没有正式安装包，
-> 所以从源码跑就是下面第 ① 步。
+> **也有安装包了**：`mvnw -Pinstaller package` 产出 `target\dist\TalkingLive-<版本>.exe`，
+> 自带运行时、**目标机器不需要 JDK**。它按用户装到 `%LOCALAPPDATA%\TalkingLive`，
+> **向导不会让你选安装目录** —— 理由是实测出来的：这个安装包的卸载会**递归删除整个安装目录**
+> （连你放进去的文件一起删），而装到非系统盘再从「设置 → 应用」卸载会失败
+> （`Could not set file security ... Error: 5`）。详见 `docs/DECISIONS.md` D13。
+> 装完卸载走「设置 → 应用」即可；**你的模型、配置、日志都在 `%LOCALAPPDATA%\TalkingLiveData`，卸载不碰**。
+> 想从源码跑就是下面第 ① 步。
 
 ### ① 双击 `run.cmd` —— 要点的就这一个文件
 

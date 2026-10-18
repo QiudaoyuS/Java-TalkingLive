@@ -77,6 +77,22 @@ class PackagingLayoutTest {
     }
 
     @Test
+    @DisplayName("安装包不给用户选目录（顺带守住「卸载递归删目录」和「非系统盘卸载失败」两个实测缺陷）")
+    void installerDoesNotOfferDirectoryChoice() throws IOException {
+        String pom = pom();
+        assertTrue(pom.contains("<winDirChooser>false</winDirChooser>"),
+                "winDirChooser 必须是 false。实测两条理由：① jpackage 生成的 WiX 里有 "
+                        + "util:RemoveFolderEx（属性值 [INSTALLDIR]），卸载会连用户自己的文件一起递归删除；"
+                        + "② 装到非系统盘（D:）时从「设置→应用」卸载（非提权）会失败："
+                        + "Could not set file security for file 'D:\\Config.Msi\\*.rbf'. Error: 5");
+        assertFalse(pom.contains("<winDirChooser>true</winDirChooser>"),
+                "打开目录选择 = 给用户一个能一键删掉自己资料的按钮");
+        assertTrue(pom.contains("<winPerUserInstall>true</winPerUserInstall>"),
+                "按用户安装（不弹 UAC）这条不变：默认位置在 %LOCALAPPDATA%\\TalkingLive 下，"
+                        + "装卸都实测正常");
+    }
+
+    @Test
     @DisplayName("暂存步骤写在 jpackage 之前（同一 phase 内按声明顺序执行）")
     void stagingIsDeclaredBeforeJpackage() throws IOException {
         String pom = pom();

@@ -14,10 +14,24 @@
 -->
 <configuration>
 
+  <!--
+    日志根目录的**唯一来源**是 AppPaths.home()（com.talkinglive.core.LogHomePropertyDefiner）。
+
+    这里曾经写成 ${TALKINGLIVE_HOME:-${user.home}/AppData/Local/TalkingLive}，而全仓没有
+    任何一处给 TALKINGLIVE_HOME 赋值 —— 默认值因此永远生效，代价是实测出来的三条：
+      1. 日志落在 %LOCALAPPDATA%\TalkingLive\logs，而程序自己报告的 home 是
+         %LOCALAPPDATA%\TalkingLiveData → 日志与数据分居两处，数据目录里的 logs 是空壳；
+      2. %LOCALAPPDATA%\TalkingLive 是 jpackage 默认安装目录，卸载会把它整棵删掉 → 日志陪葬；
+      3. mvnw test 也会往用户真实日志里写。
+    改成 <define> 之后，路径跟着 AppPaths 走，测试里用 -Dtalkinglive.home 就能重定向掉，
+    不再污染真实日志。
+  -->
+  <define name="talkinglive.home" class="com.talkinglive.core.LogHomePropertyDefiner"/>
+
   <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
-    <file>${TALKINGLIVE_HOME:-${user.home}/AppData/Local/TalkingLive}/logs/talkinglive.log</file>
+    <file>${talkinglive.home}/logs/talkinglive.log</file>
     <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
-      <fileNamePattern>${TALKINGLIVE_HOME:-${user.home}/AppData/Local/TalkingLive}/logs/talkinglive.%i.log</fileNamePattern>
+      <fileNamePattern>${talkinglive.home}/logs/talkinglive.%i.log</fileNamePattern>
       <minIndex>1</minIndex>
       <maxIndex>2</maxIndex>
     </rollingPolicy>
