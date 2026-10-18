@@ -172,6 +172,15 @@ public class FloatingBall extends JWindow {
     private Point pressPoint;
     private boolean dragged = false;
 
+    /**
+     * 按下那一刻窗口左上角的屏幕坐标 —— 拖动的锚点。
+     *
+     * <p><b>没有它就没法拖动</b>：拖动时窗口的新位置 = 按下时的窗口位置 + 鼠标位移。
+     * 早期版本把这步漏了（直接把"位移"当成"绝对坐标"），代价见
+     * {@link #draggedLocation}。
+     */
+    private Point windowAtPress;
+
     private AppConfig.DockSide docked = AppConfig.DockSide.NONE;
     private boolean revealed = true;
     private Timer slideTimer;
@@ -386,6 +395,7 @@ public class FloatingBall extends JWindow {
                 }
                 revealNow();          // 收起状态下按下去，先滑出来再说
                 pressPoint = screenPointOf(e);
+                windowAtPress = getLocation();
                 dragged = false;
             }
 
@@ -396,6 +406,7 @@ public class FloatingBall extends JWindow {
                 }
                 boolean wasClick = isClick(pressPoint, screenPointOf(e), dragged);
                 pressPoint = null;
+                windowAtPress = null;
                 dragged = false;
 
                 if (wasClick && SwingUtilities.isLeftMouseButton(e)) {
@@ -428,8 +439,10 @@ public class FloatingBall extends JWindow {
                 }
                 dragged = true;
                 stopSlide();
-                Point p = e.getLocationOnScreen();
-                setLocationClamped(p.x - pressPoint.x, p.y - pressPoint.y);
+                Point target = draggedLocation(windowAtPress, pressPoint, e.getLocationOnScreen());
+                if (target != null) {
+                    setLocationClamped(target.x, target.y);
+                }
             }
         });
     }
@@ -751,6 +764,35 @@ public class FloatingBall extends JWindow {
     static boolean isClick(Point pressScreen, Point releaseScreen, boolean dragged) {
         return !dragged && pressScreen != null && releaseScreen != null
                 && pressScreen.distance(releaseScreen) < CLICK_SLOP_PX;
+    }
+
+    /**
+     * 拖动过程中窗口左上角应该落在哪（屏幕坐标，尚未夹到屏幕内）。
+     *
+     * <p><b>这条公式曾经是错的，而且错得很贵</b>（安装包实测时才发现）。旧代码是：
+     *
+     * <pre>{@code setLocation(p.x - pressPoint.x, p.y - pressPoint.y);}</pre>
+     *
+     * <p>右边算出来是「鼠标相对按下点的<b>位移</b>」（通常只有几十像素），却被当成
+     * 「窗口的<b>绝对坐标</b>」交给了 {@code setLocation}。于是鼠标一拖：
+     * 球先被拽到屏幕左上角（坐标≈位移，被 {@code setLocationClamped} 夹在 0 附近），
+     * 再松手时 {@code getX()≈0} → 被判定成"贴着左边缘" → 收进左边缘只剩一条。
+     * 用户看到的现象就是"拖一下球就回到原位，还跟着鼠标走一点"。
+     *
+     * <p>正确的关系是：**新位置 = 按下时的窗口位置 + 鼠标位移**。这样按住的那个点
+     * 始终停在鼠标底下，拖多远就走多远，且第二次拖动与第一次互不影响。
+     *
+     * @param windowAtPress 按下瞬间窗口左上角（屏幕坐标）
+     * @param pressScreen   按下瞬间鼠标（屏幕坐标）
+     * @param nowScreen     当前鼠标（屏幕坐标）
+     * @return 目标左上角；任一参数为 {@code null} 时返回 {@code null}（不移动）
+     */
+    static Point draggedLocation(Point windowAtPress, Point pressScreen, Point nowScreen) {
+        if (windowAtPress == null || pressScreen == null || nowScreen == null) {
+            return null;
+        }
+        return new Point(windowAtPress.x + (nowScreen.x - pressScreen.x),
+                windowAtPress.y + (nowScreen.y - pressScreen.y));
     }
 
     /** 事件的屏幕坐标；组件尚未显示等极端情况下退回组件坐标，绝不抛异常。 */
