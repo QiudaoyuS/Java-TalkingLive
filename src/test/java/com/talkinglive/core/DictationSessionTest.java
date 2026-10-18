@@ -219,6 +219,45 @@ class DictationSessionTest {
         }
     }
 
+    @Nested
+    @DisplayName("预览链路故障的判定（只有「预览空 + 精化有字」才算）")
+    class PreviewPipeline {
+
+        @Test
+        @DisplayName("预览空、精化有字 → 是真故障（注入靠兜底）")
+        void refinedOnlyIsAFailure() {
+            DictationSession s = new DictationSession(1, 0, "t", 10);
+            assertTrue(s.previewPipelineFailed("这个需求很明确。"));
+        }
+
+        @Test
+        @DisplayName("两边都空 → 不是链路故障，只是没说话（曾经被误报成 ERROR）")
+        void bothEmptyIsNotAFailure() {
+            DictationSession s = new DictationSession(1, 0, "t", 10);
+            assertFalse(s.previewPipelineFailed(""));
+            assertFalse(s.previewPipelineFailed(null));
+            assertFalse(s.previewPipelineFailed("   "));
+        }
+
+        @Test
+        @DisplayName("预览有字 → 不管精化有没有，都不是预览链路的锅")
+        void previewIsNeverAFailure() {
+            DictationSession s = new DictationSession(1, 0, "t", 10);
+            s.setPreviewText("这个需球很明确");
+            assertFalse(s.previewPipelineFailed("这个需求很明确。"), "两路都有字");
+            assertFalse(s.previewPipelineFailed(null), "只有预览有字：那是精化的问题，另记");
+            assertFalse(s.previewPipelineFailed("   "));
+        }
+
+        @Test
+        @DisplayName("预览只有空白也算空（与 resolveFinalText 的口径一致）")
+        void blankPreviewCountsAsEmpty() {
+            DictationSession s = new DictationSession(1, 0, "t", 10);
+            s.setPreviewText("   ");
+            assertTrue(s.previewPipelineFailed("有字的精化结果"));
+        }
+    }
+
     @Test
     @DisplayName("PCM 缓存按上限预分配，不会因为长录音无限增长（§7 / §12 #5）")
     void bufferIsPreallocated() {

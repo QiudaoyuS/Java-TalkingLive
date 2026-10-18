@@ -101,10 +101,16 @@ public final class VoskSpeechRecognizer implements SpeechRecognizer {
                 fedBytes, String.format("%.2f", fedBytes / 32000.0), finalCount, nonEmptyOutputs,
                 out.isEmpty() ? "★ 最终文本为空" : Logging.describeWithFingerprint(out));
         if (out.isEmpty() && fedBytes > 32000) {
-            // 有音频却一个字都没有：这是流式预览链路的故障，不是「用户没说话」。
-            // 明确记 ERROR，避免被当成正常情况忽略。
-            log.error("流式预览在 {} 秒音频上未产出任何文本——预览链路异常"
-                    + "（同一段音频离线精化通常能出字，可据此对比排查）",
+            // 有音频却一个字都没有 —— **但这里不能断定是预览链路的故障**。
+            //
+            // 这条原本是 log.error("…预览链路异常…")，实测被误报过：用户点了悬浮球、
+            // 2.1 秒里什么都没说（随后切到桌面触发了提交），预览与离线精化都自然是空的，
+            // 日志却打了个 ERROR，让"预览链路异常"这种真故障混进了噪音里。
+            //
+            // 判定权交给能同时看到两路结果的地方：{@link com.talkinglive.core.DictationSession
+            // #previewPipelineFailed(String)} —— 只有「预览空、精化有字」才是流式预览真的出问题。
+            // 这里只如实记一行事实。
+            log.info("本段 {} 秒音频没有任何识别输出（可能是没说话，也可能是增益过低）",
                     String.format("%.2f", fedBytes / 32000.0));
         }
         return out;

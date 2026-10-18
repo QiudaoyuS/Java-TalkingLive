@@ -182,6 +182,21 @@ public final class DictationSession {
     }
 
     /**
+     * 本段文本是否说明**流式预览这条路出了问题**：预览一个字都没出，而同一段音频的
+     * 离线精化却出了字（实测出现过）。
+     *
+     * <p><b>为什么判定放在这里，而不是引擎收尾的时候</b>：引擎收尾时只知道"有音频、没出字"，
+     * 分不清"用户没说话"和"预览链路坏了"——它一度据此直接打 ERROR，实测误报过一次
+     * （用户点了悬浮球、2.1 秒里什么都没说，日志却报"预览链路异常"）。
+     * 只有同时拿到精化结果才能分辨：**两边都空 = 没有语音内容；只有预览空 = 链路故障**。
+     */
+    public boolean previewPipelineFailed(String refined) {
+        boolean hasRefined = refined != null && !refined.isBlank();
+        boolean hasPreview = previewText != null && !previewText.isBlank();
+        return hasRefined && !hasPreview;
+    }
+
+    /**
      * 本段的文本来源诊断，用于日志与排查。
      *
      * <p>正是这个诊断把「预览空、精化有」这种反常情况显式化——

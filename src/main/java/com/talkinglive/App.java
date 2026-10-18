@@ -1005,6 +1005,17 @@ public final class App {
                         result.note(), Logging.describeWithFingerprint(text));
             }
 
+            // ★ 这里才是"流式预览链路坏了"的**唯一**判定点：预览一个字都没出，
+            //   而同一段音频的离线精化出了字。此前这个判定被放在识别器收尾那一刻
+            //   （那时只有"有音频没出字"这个事实，分不清用户没说话还是链路故障），
+            //   实测误报过一次 ERROR —— 用户点了悬浮球后 2 秒没说话，两路都空，
+            //   日志却报"预览链路异常"。见 DictationSession#previewPipelineFailed。
+            if (s.previewPipelineFailed(result.text())) {
+                log.error("预览链路异常：预览 0 字，但同一段音频的离线精化出了字（{}）—— "
+                        + "流式预览没有跟上，注入用的是精化结果",
+                        Logging.describeWithFingerprint(result.text()));
+            }
+
             // ★ 链路诊断行：把「预览 / 精化 / 实际注入」三段文本并排打出来。
             //   存在的理由：实测遇到第二段注入的文字里混着上一段句子
             //   （用户说「在进行麦克风测试」，注入「。在进行麦克风测试。」），

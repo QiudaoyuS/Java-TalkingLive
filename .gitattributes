@@ -10,3 +10,10 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 *.sha256 -text
+# RTF 许可文件必须**逐字节**保持不变。
+#
+# 安装向导的许可页用的是 packaging\license-installer.rtf，而 InstallerLicenseTest 会
+# 把「.txt 按同一规则转出来的结果」与它**逐字符比对**。RTF 里本来就含有 \par 后面的
+# CRLF（换行控制字），一旦被 autocrlf 在提交/检出时来回转换，比对就会失败 ——
+# 那不是文件坏了，而是 git 动了字节。所以这里明确禁止对它做任何行尾转换。
+*.rtf -text
